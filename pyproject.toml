@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kpfm_pl"
+version = "0.1.0"
+description = "Toolbox for loading and correlating KPFM, photoluminescence (PTU) and AFM (JPK) data."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Stefan" }]
+keywords = ["KPFM", "photoluminescence", "TCSPC", "PTU", "AFM", "JPK", "correlation"]
+dependencies = [
+    "numpy>=1.23",
+    "scipy>=1.9",
+    "tifffile>=2023.1.23",
+]
+
+[project.optional-dependencies]
+plot = ["matplotlib>=3.6"]
+gui = ["matplotlib>=3.6"]
+dev = ["pytest>=7", "matplotlib>=3.6"]
+
+[project.urls]
+Homepage = "https://github.com/Stefan/kpfm_pl"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+kpfm_pl = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
