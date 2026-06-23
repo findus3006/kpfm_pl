@@ -61,6 +61,8 @@ class JPK:
         self.units: dict[str, str] = {}
         self.x = np.array([])
         self.y = np.array([])
+        self.dx = 0.0
+        self.dy = 0.0
         self._read()
 
     # ------------------------------------------------------------------ read
@@ -69,11 +71,9 @@ class JPK:
             for page in tif.pages:
                 tags = {tag.name: tag.value for tag in page.tags.values()}
                 name = tags.get(_TAG_NAME)
-                if name is None:
-                    continue  # thumbnail page
 
                 trace = "retrace" if "retrace : true" in str(tags.get(_TAG_TRACE, "")) else ""
-                self._update_axes(tags)
+                self._update_axes(tags, name)
 
                 calib = _CHANNEL_CALIBRATION.get(tags.get(_TAG_CHANNEL))
                 image = np.flip(page.asarray().astype(float), axis=0)
@@ -87,12 +87,14 @@ class JPK:
                 self.channels[key] = image
                 self.units[key] = units
 
-    def _update_axes(self, tags: dict[str, Any]) -> None:
-        nx, ny = tags.get(_TAG_NX), tags.get(_TAG_NY)
-        dx, dy = tags.get(_TAG_DX), tags.get(_TAG_DY)
-        if nx and dx is not None:
-            self.x = dx / nx * np.arange(nx)
-            self.y = dy / ny * np.arange(ny)
+    def _update_axes(self, tags: dict[str, Any], name: str | None) -> None:
+        nx, ny = tags.get(_TAG_NX), tags.get(_TAG_NY) 
+        if name is None: # Only the thumbnail channel includes the scan factors dx and dy, whose name is None
+            self.dx, self.dy = tags.get(_TAG_DX), tags.get(_TAG_DY)
+        if self.dx != 0.0 and self.dy != 0.0:
+            self.x = self.dx / nx * np.arange(nx)
+            self.y = self.dy / ny * np.arange(ny)
+
 
     # ------------------------------------------------------------------ access
     def channel_names(self) -> list[str]:
@@ -103,7 +105,7 @@ class JPK:
         """Physical scan axes as ``{"x": ..., "y": ...}`` (metres)."""
         return {"x": self.x, "y": self.y}
 
-    def image(self, channel: str, process: bool = False) -> Image:
+    def image(self, channel: str, process: bool = True) -> Image:
         """Return one ``channel`` as an :class:`Image`.
 
         Parameters
@@ -121,7 +123,7 @@ class JPK:
                      units={"x": "m", "y": "m", "z": self.units.get(channel, "")},
                      meta={"file": self.filepath.stem})
 
-    def images(self, channels: list[str] | None = None, process: bool = False) -> dict[str, Image]:
+    def images(self, channels: list[str] | None = None, process: bool = True) -> dict[str, Image]:
         """Return several channels as ``{name: Image}`` (all channels by default)."""
         names = channels if channels else self.channel_names()
         return {name: self.image(name, process) for name in names}

@@ -90,7 +90,7 @@ def sort_measurement_files(paths, *, as_path: bool = True) -> tuple:
     Filenames are expected to contain ``<power>nW_<wavelength>nm`` (e.g.
     ``..._200nW_440nm_...``). Files without that pattern are ignored.
     """
-    grouped: dict[tuple[int, int], dict[str, Path]] = defaultdict(dict)
+    grouped: dict[tuple[int, int], dict[str, Path]] = defaultdict(dict) # A defaultdict(dict) automatically creates an empty dictionary when a new key is accessed. A normal dict would raise a KeyError.
     for p in paths:
         path = Path(p)
         m = _MEASUREMENT_RE.search(path.stem)

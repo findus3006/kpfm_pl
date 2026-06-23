@@ -18,7 +18,7 @@ Example
 >>> result = m.to_dict()
 """
 
-from __future__ import annotations
+from __future__ import annotations # This is done so python does not raise a NameError when a class is referenced before it is defined. It allows for forward references in type hints.
 
 from .core import Image, Signal
 from .fitting import MultiExpFit
@@ -28,8 +28,9 @@ from .match import Match
 from .ptu import PTU
 from .zurich import Zurich
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
+#__all__ tells the package user which classes and functions are available for import when they use the * syntax. It is a list of strings that represent the names of the public objects in the module.
 __all__ = [
     "Signal",
     "Image",
@@ -47,7 +48,8 @@ __all__ = [
 
 def __getattr__(name: str):
     # Lazily expose the optional matplotlib-dependent GUI selector so importing
-    # the package stays headless-friendly.
+    # the package stays headless-friendly. When then user does want to use the selector, they can do
+    # from kpfm_pl import InteractiveBoxSelector and the module will be imported on demand
     if name == "InteractiveBoxSelector":
         from .selector import InteractiveBoxSelector
 

@@ -228,8 +228,10 @@ class PTU:
                     "left": {"index": int(nz2[0]), "time": float(time[nz2[0]])},
                     "right": {"index": int(nz2[-1]), "time": float(time[nz2[-1]])},
                 }
-
-        self._tt_cache = {"time": time, "trace": trace, "matrix": sliced, "bintime": bintime}
+        if meta.get("triggers"):
+            self._tt_cache = {"time": time, "trace": trace, "matrix": sliced, "bintime": bintime, "triggers": meta["triggers"]}
+        else:
+            self._tt_cache = {"time": time, "trace": trace, "matrix": sliced, "bintime": bintime}
         return Signal(time, trace, label=f"{self.filepath.stem} time trace",
                       units={"x": "s", "y": "counts"}, meta=meta)
 
@@ -326,8 +328,8 @@ class PTU:
                 "left": {"index": int(np.argmin(np.abs(time - left_t))), "time": float(left_t)},
                 "right": {"index": int(np.argmin(np.abs(time - right_t))), "time": float(right_t)},
             }
-        elif self._tt_cache and "triggers" in self._tt_cache.get("meta", {}):
-            triggers = self._tt_cache["meta"]["triggers"]
+        elif self._tt_cache.get("triggers"):
+            triggers = self._tt_cache["triggers"]
         else:
             print(f"{self.filepath.stem}: no laser triggers found.")
             return None
