@@ -245,6 +245,190 @@ class PTU:
         return Signal(self.lt_time, hist, label=f"{self.filepath.stem} lifetime",
                       units={"x": "s", "y": "counts"})
 
+    def get_roi_matrix(self, roi: dict[str, float], bintime: float = 50e-3) -> np.ndarray:
+        """Extract the photon count matrix for a selected ROI.
+
+        Parameters
+        ----------
+        roi :
+            Dict with ``x_min``, ``x_max``, ``y_min``, ``y_max`` defining the
+            region of interest (time and count ranges).
+        bintime :
+            Width of each time bin in seconds (must match the time_trace call).
+
+        Returns
+        -------
+        matrix :
+            The (time-bin x lifetime-bin) photon count matrix filtered by the
+            ROI's time window and count threshold.
+        """
+        x_min, x_max = roi["x_min"], roi["x_max"]
+        y_min, y_max = roi["y_min"], roi["y_max"]
+
+        # Get time trace for the x window
+        tt = self.time_trace(bintime=bintime, tstart=x_min, tend=x_max, laser_pulse=False)
+
+        # Extract matrix and trace from the time trace metadata
+        matrix = tt["meta"]["matrix"]
+        trace = tt["y"]
+
+        # Apply y threshold to filter matrix rows
+        mask = (trace >= y_min) & (trace <= y_max)
+        roi_matrix = matrix[mask, :]
+
+        return roi_matrix
+
+    def flid(self, roi: dict[str, float] | None = None, *,
+             x_min: float | None = None, x_max: float | None = None,
+             y_min: float | None = None, y_max: float | None = None,
+             bintime: float = 50e-3, n_exp: int = 1, bins: int = 1,
+             mode: str = "fraction", fraction: float = 0.95, smoothing: float = 2.0,
+             start: float = 0.0, end: float | None = None, sigma: float = 1.5,
+             isolated: bool = False, **fit_kwargs) -> Image | list[Image]:
+        """Compute a FLID (Fluorescence-Lifetime-Intensity-Distribution) map.
+
+        Each time bin of the (optionally) ROI-restricted matrix is fitted with
+        ``n_exp`` exponentials; the resulting ``(lifetime, counts)`` pairs are
+        binned into a 2-D histogram (lifetime on x, counts on y).
+
+        Parameters
+        ----------
+        roi :
+            ROI dict ``{"x_min", "x_max", "y_min", "y_max"}`` (e.g. one box from
+            :meth:`InteractiveBoxSelector.get_boxes`). Overrides the explicit
+            ``x_*``/``y_*`` keyword bounds when given.
+        x_min, x_max, y_min, y_max :
+            Manual ROI bounds (time in s, counts on y). Any left as ``None``
+            default to the full range. If all are ``None`` (and ``roi`` is
+            ``None``) the whole time trace is used.
+        bintime :
+            Time-bin width in seconds.
+        n_exp :
+            Number of exponential components per time-bin fit.
+        bins :
+            Lifetime-axis binning factor (``1`` = native resolution).
+        mode, fraction, smoothing, start, end :
+            Fit-window left-bound selection, as in :meth:`fit_lifetime`.
+        sigma :
+            Gaussian smoothing applied to the 2-D histogram (``0`` disables).
+        isolated :
+            When ``True`` return one :class:`Image` per exponential component;
+            otherwise return a single map of the per-bin mean lifetime.
+        **fit_kwargs :
+            Forwarded to :class:`~kpfm_pl.fitting.MultiExpFit`.
+
+        Returns
+        -------
+        Image or list[Image]
+            FLID map(s) with the lifetime axis as ``x`` (ns), counts as ``y``,
+            and occurrence as ``data``. Per-bin ``taus``/``counts`` are stored in
+            ``meta``.
+        """
+        from scipy import ndimage
+
+        # Resolve ROI bounds (roi dict takes precedence over explicit kwargs).
+        if roi is not None:
+            x_min, x_max = roi.get("x_min"), roi.get("x_max")
+            y_min, y_max = roi.get("y_min"), roi.get("y_max")
+
+        if x_min is None and x_max is None and y_min is None and y_max is None:
+            tt = self.time_trace(bintime=bintime)
+            matrix = tt["meta"]["matrix"]
+        else:
+            xmn = 0.0 if x_min is None else x_min
+            xmx = self.acquisition_time if x_max is None else x_max
+            tt = self.time_trace(bintime=bintime, tstart=xmn, tend=xmx)
+            trace = tt["y"]
+            full_matrix = tt["meta"]["matrix"]
+            ymn = -np.inf if y_min is None else y_min
+            ymx = np.inf if y_max is None else y_max
+            matrix = full_matrix[(trace >= ymn) & (trace < ymx), :]
+
+        # Lifetime axis, peak-shifted to ns, and the fit-window mask.
+        lt_ns = self.lt_time * 1e9
+        lt_roi = matrix.sum(axis=0)
+        t0_ns = lt_ns[int(np.argmax(lt_roi))]
+        lt_tshift = lt_ns - t0_ns
+
+        if mode == "fraction":
+            lb = left_bound_fraction(lt_roi, fraction, smoothing)
+            mask = lt_tshift >= lt_tshift[lb]
+        elif mode == "inflection":
+            lb = inflection_left_bound(lt_roi, smoothing) or 0
+            mask = lt_tshift >= lt_tshift[lb]
+        elif mode == "manual":
+            end_ns = lt_tshift[-1] if end is None else end
+            mask = (lt_tshift >= start) & (lt_tshift <= end_ns)
+        else:
+            raise ValueError(f"Unknown mode: {mode!r}")
+
+        # Bin the lifetime axis to make per-bin fits more robust.
+        binned_lt = lt_ns.copy()
+        if bins != 1:
+            step = bins * (lt_ns[1] - lt_ns[0])
+            binned_lt = np.arange(0.0, np.max(lt_ns), step)
+        mask = np.add.reduceat(mask, np.arange(0, mask.shape[0], bins)) > 0
+        binned_lt_tshift = binned_lt - t0_ns
+        t_fit = binned_lt_tshift[mask]
+        binned_matrix = np.add.reduceat(matrix, np.arange(0, matrix.shape[1], bins), axis=1)
+
+        n_binned = len(mask)
+        taus: list[np.ndarray] = []
+        counts: list[float] = []
+        for row in binned_matrix:
+            lt_bin = np.asarray(row, dtype=float)
+            norm = np.max(lt_bin)
+            if not np.isfinite(norm) or norm == 0:
+                continue
+            lt_bin = lt_bin / norm
+            y_fit = lt_bin[mask]
+            ymax = np.max(y_fit)
+            if not np.isfinite(ymax) or ymax == 0:
+                continue
+            y_fit = y_fit / ymax
+            counts.append(float(np.sum(lt_bin)))
+            offset = self.dark_counts * bintime / n_binned / norm
+            fit = MultiExpFit(t_fit, y_fit, n_exp, offset, **fit_kwargs)
+            if fit.success:
+                taus.append(np.asarray(fit.parameters()["tau"], dtype=float))
+            else:
+                taus.append(np.full(n_exp, np.nan))
+
+        taus = np.array(taus) if taus else np.empty((0, n_exp))
+        counts = np.array(counts, dtype=float)
+        n_skipped = binned_matrix.shape[0] - len(counts)
+        print(f"{self.filepath.stem}: FLID over {len(counts)} time bins "
+              f"({n_skipped} skipped).")
+
+        cnt_unit = f"counts/{bintime * 1e3:.0f} ms"
+        base_meta = {
+            "bintime": bintime, "n_exp": n_exp, "lt_bins": bins, "sigma": sigma,
+            "roi": {"x_min": x_min, "x_max": x_max, "y_min": y_min, "y_max": y_max},
+            "taus": taus, "counts": counts,
+        }
+
+        def _make_image(tau_vals: np.ndarray, label: str) -> Image:
+            valid = np.isfinite(tau_vals) & np.isfinite(counts)
+            n_hist = max(int(np.sum(valid)), 1)
+            hist, tau_edges, cnt_edges = np.histogram2d(
+                tau_vals[valid], counts[valid], bins=n_hist)
+            if sigma > 0:
+                hist = ndimage.gaussian_filter(hist, sigma=sigma)
+            tau_centers = 0.5 * (tau_edges[:-1] + tau_edges[1:])
+            cnt_centers = 0.5 * (cnt_edges[:-1] + cnt_edges[1:])
+            # hist is (n_tau, n_counts); Image data is (ny, nx) = (counts, tau).
+            return Image(hist.T, x=tau_centers, y=cnt_centers, label=label,
+                         units={"x": "ns", "y": cnt_unit, "z": "occurrence"},
+                         meta=base_meta)
+
+        if isolated:
+            return [
+                _make_image(taus[:, i], f"{self.filepath.stem} FLID (tau {i + 1})")
+                for i in range(n_exp)
+            ]
+        taus_mean = taus.mean(axis=1) if taus.size else np.array([])
+        return _make_image(taus_mean, f"{self.filepath.stem} FLID")
+
     def threshold(self, off: float = 0.0, on: float = 1.0) -> dict[str, Signal]:
         """Split the lifetime histogram into ``on``/``off`` states by count level.
 
