@@ -1,16 +1,24 @@
-"""Interactive rectangular region selector for matplotlib axes.
+"""Interactive rectangular region selector and draggable circle tool for matplotlib axes.
 
-Optional GUI helper (requires matplotlib). Draw boxes by click-drag, move them by
-dragging the interior, resize via the handles, delete the active box with
-``Delete`` and press ``Enter`` to emit the saved coordinates. Use
-:meth:`InteractiveBoxSelector.get_boxes` to retrieve the selections as dicts.
+Optional GUI helpers (require matplotlib). 
+
+InteractiveBoxSelector
+    Draw boxes by click-drag, move them by dragging the interior, resize via the
+    handles, delete the active box with ``Delete`` and press ``Enter`` to emit the
+    saved coordinates. Use :meth:`InteractiveBoxSelector.get_boxes` to retrieve the
+    selections as dicts.
+
+DraggableCircle
+    Draw a circle by click-drag, then reposition it by dragging. Right-click deletes
+    the circle so a new one can be drawn. Use :meth:`DraggableCircle.get_params` to
+    retrieve ``(center, radius)``.
 """
 
 from __future__ import annotations
 
 from typing import Callable
 
-__all__ = ["InteractiveBoxSelector"]
+__all__ = ["InteractiveBoxSelector", "DraggableCircle"]
 
 
 class InteractiveBoxSelector:
@@ -257,3 +265,121 @@ class InteractiveBoxSelector:
             coords = self.get_boxes()
             if self.on_save:
                 self.on_save(coords)
+
+
+class DraggableCircle:
+    """Draw and reposition a circular ROI on a matplotlib ``Axes``.
+
+    Click-drag to draw the circle (center at press point, radius set by drag
+    distance). Once drawn, drag the interior to move it. Right-click removes the
+    circle so a new one can be drawn.
+
+    Parameters
+    ----------
+    ax :
+        The axes to attach to.
+    center :
+        Initial center ``(x, y)``. Pass together with *radius* to start with a
+        pre-existing circle instead of drawing one from scratch.
+    radius :
+        Initial radius (data units). Only used when *center* is also given.
+
+    Examples
+    --------
+    >>> dc = DraggableCircle(ax)          # user draws a new circle
+    >>> dc = DraggableCircle(ax, center=(0.5, 0.5), radius=0.1)  # pre-placed
+    >>> center, radius = dc.get_params()
+    """
+
+    def __init__(self, ax, center=None, radius=None) -> None:
+        
+        from matplotlib.patches import Circle
+
+        self.ax = ax
+        self.circle = None
+        self.press = None
+        self.is_new_circle = True
+
+        if center is not None:
+            self.circle = Circle(center, radius, edgecolor="red", fill=False)
+            ax.add_patch(self.circle)
+            self.is_new_circle = False
+
+        self._cids = [
+            ax.figure.canvas.mpl_connect("button_press_event", self.on_press),
+            ax.figure.canvas.mpl_connect("button_release_event", self.on_release),
+            ax.figure.canvas.mpl_connect("motion_notify_event", self.on_motion),
+            # A second button_press binding handles right-click deletion so the
+            # two responsibilities stay clearly separated.
+            ax.figure.canvas.mpl_connect("button_press_event", self.on_right_click),
+        ]
+
+    # ------------------------------------------------------------------ public
+    def disconnect(self) -> None:
+        """Detach all event listeners."""
+        for cid in self._cids:
+            self.ax.figure.canvas.mpl_disconnect(cid)
+
+    def get_params(self) -> tuple:
+        """Return ``(center, radius)`` of the current circle, or ``(None, None)``."""
+        if self.circle is None:
+            return None, None
+        return self.circle.center, self.circle.radius
+
+    # ------------------------------------------------------------------ events
+    def on_press(self, event):
+        if event.inaxes != self.ax:
+            return
+
+        # If circle was deleted (right-click), start drawing a new one.
+        if self.circle is None:
+            self.is_new_circle = True
+            self.press = (event.xdata, event.ydata, None, None)
+            return
+
+        if self.is_new_circle:
+            self.press = (event.xdata, event.ydata, None, None)
+            return
+
+        # Drag existing circle if click lands inside it.
+        contains, _ = self.circle.contains(event)
+        if contains:
+            cx, cy = self.circle.center
+            self.press = (cx - event.xdata, cy - event.ydata, cx, cy)
+        else:
+            self.press = None
+
+    def on_motion(self, event):
+        import numpy as np
+        from matplotlib.patches import Circle
+
+        if self.press is None or event.inaxes != self.ax:
+            return
+
+        if self.is_new_circle:
+            cx0, cy0, _, _ = self.press
+            radius = np.sqrt((event.xdata - cx0) ** 2 + (event.ydata - cy0) ** 2)
+            if self.circle:
+                self.circle.remove()
+            self.circle = Circle((cx0, cy0), radius, edgecolor="red", fill=False)
+            self.ax.add_patch(self.circle)
+            self.ax.figure.canvas.draw_idle()
+            return
+
+        dx, dy, _, _ = self.press
+        self.circle.center = (event.xdata + dx, event.ydata + dy)
+        self.ax.figure.canvas.draw_idle()
+
+    def on_release(self, event):
+        if self.is_new_circle:
+            self.is_new_circle = False
+        self.press = None
+
+    def on_right_click(self, event):
+        if event.inaxes != self.ax or event.button != 3:
+            return
+        if self.circle is not None:
+            self.circle.remove()
+            self.circle = None
+            self.is_new_circle = True
+            self.ax.figure.canvas.draw_idle()

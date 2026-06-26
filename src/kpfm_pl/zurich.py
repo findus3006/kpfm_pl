@@ -129,11 +129,13 @@ class Zurich:
         value = self.streams[stream]["value"]
         time = self.streams[stream]["time"]
         scaled = feature_scale(value)
-
+        
         if slope_method:
             slope = np.diff(scaled)
             left_idx = int(np.argmin(slope))
             right_idx = int(np.argmax(slope))
+            if left_idx > right_idx:
+                left_idx, right_idx = right_idx, left_idx
         else:
             on = np.where(scaled >= 0.1)[0]
             if on.size == 0:

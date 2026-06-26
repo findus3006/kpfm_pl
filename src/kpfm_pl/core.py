@@ -25,6 +25,9 @@ import numpy as np
 
 __all__ = ["Signal", "Image"]
 
+# Length unit -> factor to multiply metres by. Used for scaling image extents.
+_LENGTH_SCALES = {"m": 1.0, "mm": 1e3, "um": 1e6, "µm": 1e6, "nm": 1e9}
+
 
 @dataclass
 class Signal:
@@ -122,6 +125,31 @@ class Image:
             float(np.min(self.y)),
             float(np.max(self.y)),
         )
+
+    def extent_scaled(self, unit: str = "um") -> tuple[float, float, float, float] | None:
+        """``extent`` rescaled from the stored axis unit to ``unit``.
+
+        Saves the ``imshow(..., extent=img.extent * 1e6)`` dance when plotting in
+        micrometres. The axis unit is read from ``units["x"]`` (defaults to
+        ``"m"``); ``unit`` is one of ``"m"``, ``"mm"``, ``"um"``/``"µm"`` or
+        ``"nm"``.
+        """
+        ext = self.extent
+        if ext is None:
+            return None
+        src = self.units.get("x", "m") or "m"
+        try:
+            factor = _LENGTH_SCALES[unit] / _LENGTH_SCALES[src]
+        except KeyError as exc:
+            raise ValueError(
+                f"Unknown length unit {exc.args[0]!r}; expected one of {sorted(_LENGTH_SCALES)}"
+            ) from None
+        return tuple(v * factor for v in ext)
+
+    @property
+    def extent_um(self) -> tuple[float, float, float, float] | None:
+        """``extent`` in micrometres (shortcut for ``extent_scaled('um')``)."""
+        return self.extent_scaled("um")
 
     def to_dict(self) -> dict[str, Any]:
         """Return a plain ``dict`` copy of this image."""

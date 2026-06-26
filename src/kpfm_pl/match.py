@@ -121,13 +121,13 @@ class Match:
         """Aligned KPFM signal -- on the shared grid (default) or native axis."""
         if on_grid:
             return Signal(self.grid, self._k_grid, label="KPFM (aligned)",
-                          units={"x": "s", "y": "V"}, meta={"triggers": self.triggers})
+                          units={"x": "s", "y": "V"}, meta={"triggers": self.triggers, "smoothing": self._k_smooth})
         return Signal(self._k_t_aligned, self._k_y_aligned, label="KPFM (aligned)",
                       units={"x": "s", "y": "V"}, meta={"triggers": self.triggers})
 
     def timetrace_signal(self, on_grid: bool = True) -> Signal:
         """Aligned, amplitude-scaled time trace -- shared grid or native axis."""
-        meta = {"scale": self.scale, "shift": self.shift, "triggers": self.triggers}
+        meta = {"scale": self.scale, "shift": self.shift, "triggers": self.triggers, "smoothing": self._t_smooth}
         if on_grid:
             return Signal(self.grid, self._t_grid, label="time trace (aligned, scaled)",
                           units={"x": "s", "y": "counts (scaled)"}, meta=meta)

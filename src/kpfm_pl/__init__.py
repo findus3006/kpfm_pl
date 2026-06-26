@@ -9,7 +9,7 @@ Example
 -------
 >>> from kpfm_pl import PTU, Zurich, Match
 >>> ptu = PTU("scan.ptu", dark_counts=2.55)
->>> tt = ptu.time_trace(0.05, laser_pulse=True)
+>>> tt = ptu.time_trace(0.05, laser_pulse=False)
 >>> z = Zurich("scan.txt")
 >>> kpfm = z.average(bintime=0.05)
 >>> m = Match(kpfm, tt,
@@ -28,7 +28,7 @@ from .match import Match
 from .ptu import PTU
 from .zurich import Zurich
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 #__all__ tells the package user which classes and functions are available for import when they use the * syntax. It is a list of strings that represent the names of the public objects in the module.
 __all__ = [
@@ -46,12 +46,38 @@ __all__ = [
 ]
 
 
-def __getattr__(name: str):
-    # Lazily expose the optional matplotlib-dependent GUI selector so importing
-    # the package stays headless-friendly. When then user does want to use the selector, they can do
-    # from kpfm_pl import InteractiveBoxSelector and the module will be imported on demand
-    if name == "InteractiveBoxSelector":
-        from .selector import InteractiveBoxSelector
+# Optional matplotlib-dependent plotting helpers, exposed lazily so importing
+# the package stays headless-friendly and free of the heavy matplotlib import.
+_PLOTTING_NAMES = (
+    "cmap_spring",
+    "cmap_gold",
+    "set_scaled_rcparams",
+    "set_cbar_formatter",
+    "plot_image",
+    "make_circle",
+)
 
-        return InteractiveBoxSelector
+
+def __getattr__(name: str):
+    # Lazily expose the optional matplotlib-dependent GUI selectors so importing
+    # the package stays headless-friendly. When the user does want to use them,
+    # they can do e.g. ``from kpfm_pl import InteractiveBoxSelector`` and the
+    # module will be imported on demand.
+    if name in ("InteractiveBoxSelector", "DraggableCircle"):
+        from .selector import InteractiveBoxSelector, DraggableCircle
+
+        # Inject both into the package namespace so subsequent attribute lookups
+        # (e.g. kpfm_pl.DraggableCircle) resolve without re-importing.
+        globals()["InteractiveBoxSelector"] = InteractiveBoxSelector
+        globals()["DraggableCircle"] = DraggableCircle
+
+        return globals()[name]
+
+    if name in _PLOTTING_NAMES:
+        from . import plotting
+
+        for _n in _PLOTTING_NAMES:
+            globals()[_n] = getattr(plotting, _n)
+        return globals()[name]
+
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
