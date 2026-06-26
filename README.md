@@ -11,8 +11,7 @@ The design goals:
   plotting-friendly [`Signal`](src/kpfm_pl/core.py) or
   [`Image`](src/kpfm_pl/core.py) object that behaves like a dict
   (`s["x"], s["y"], s["label"], s["units"], s["meta"]`).
-- **No plotting in the core** – data is returned ready to drop into matplotlib;
-  you stay in control of the figures.
+- **No plotting in the core** – data is returned ready to drop into matplotlib.
 - **Flexible getters** instead of hard-coded, side-effect-heavy methods.
 
 ## Installation
@@ -37,6 +36,7 @@ src/kpfm_pl/
     utils.py        pure signal-processing helpers (smooth, resample, ...)
     io.py           file dialogs + measurement-pair sorting
     selector.py     optional interactive matplotlib ROI selector
+    plotting.py     Plotting helper functions (cmaps, matplotlib parameter scaling, ...)
 ```
 
 ## Quick start
@@ -96,6 +96,8 @@ print(jpk.channel_names())
 img = jpk.image("Height (measured)", process=True)   # Image
 plt.imshow(img["data"], extent=img.extent, origin="lower")
 ```
+
+Example scripts for correlation of KPFM and PL, .ptu processing and .jpk processing can be found in the tests folder.
 
 ## Return-format conventions
 
