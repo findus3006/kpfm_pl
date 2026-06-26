@@ -47,13 +47,14 @@ src/kpfm_pl/
 import matplotlib.pyplot as plt
 from kpfm_pl import PTU, Zurich, Match
 
-ptu = PTU("scan.ptu", dark_counts=2.55)
-tt = ptu.time_trace(bintime=0.05, laser_pulse=False)        # Signal
+ptu = PTU("scan.ptu", dark_counts=2.25)
+tt = ptu.time_trace(bintime=0.05, laser_pulse=True)        # Signal
 tt_triggers = ptu.laser_triggers()
 
 z = Zurich("scan.txt")
-kpfm = z.average(bintime=0.05)                               # Signal
-z_triggers = z.laser_triggers(reference=kpfm, slope_method=True)
+stream_names = z.stream_names()
+kpfm = z.average(stream_names[0], bintime=0.05)                               # Signal
+z_triggers = z.laser_triggers(stream_names[1], reference=kpfm, slope_method=True)
 
 m = Match(kpfm, tt,
           kpfm_triggers=z_triggers,
@@ -64,12 +65,15 @@ aligned = m.to_dict()
 print("Pearson:", m.pearson())
 print("Best lag (s):", m.cross_correlation()["best_lag"])
 
-k = m.kpfm_signal()
-t = m.timetrace_signal()
-fig, ax = plt.subplots()
-ax.plot(k["x"], k["y"], label=k["label"])
+fig, ax = plt.subplots(figsize=(16,9))
 ax.plot(t["x"], t["y"], label=t["label"])
+ax.plot(k["x"], k["y"], label=k["label"])
+ax.axvline(z_triggers["left"]["time"], color='k', linestyle='--', label='Left laser trigger')
+ax.axvline(z_triggers["right"]["time"], color='k', linestyle='--', label='Right laser trigger')
+ax.set_ylabel("Amplitude (V)")
 ax.set_xlabel("Time (s)")
+ax.set_title("Correlation between KPFM signal and Timetrace")
+ax.grid(True)
 ax.legend()
 plt.show()
 ```

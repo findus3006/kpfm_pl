@@ -199,6 +199,9 @@ class PTU:
         tstart, tend :
             Optional time window. ``tend=None`` uses the full acquisition.
         laser_pulse :
+            Use this when there are some laser pulses missing in the data, i.e. the PicoHarp
+            did not receive laser pulse triggers from the laser pulse clock at start
+            and end of the measurement.
             When ``False`` the non-zero portion of the trace is centred and
             zero-padded, and the rising/falling edges are stored as triggers.
         """

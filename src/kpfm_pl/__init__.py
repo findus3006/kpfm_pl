@@ -9,7 +9,7 @@ Example
 -------
 >>> from kpfm_pl import PTU, Zurich, Match
 >>> ptu = PTU("scan.ptu", dark_counts=2.55)
->>> tt = ptu.time_trace(0.05, laser_pulse=False)
+>>> tt = ptu.time_trace(0.05, laser_pulse=True)
 >>> z = Zurich("scan.txt")
 >>> kpfm = z.average(bintime=0.05)
 >>> m = Match(kpfm, tt,
@@ -28,7 +28,7 @@ from .match import Match
 from .ptu import PTU
 from .zurich import Zurich
 
-__version__ = "0.1.1"
+__version__ = "1.0.0"
 
 #__all__ tells the package user which classes and functions are available for import when they use the * syntax. It is a list of strings that represent the names of the public objects in the module.
 __all__ = [
