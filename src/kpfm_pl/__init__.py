@@ -21,14 +21,25 @@ Example
 from __future__ import annotations # This is done so python does not raise a NameError when a class is referenced before it is defined. It allows for forward references in type hints.
 
 from .core import Image, Signal
-from .fitting import MultiExpFit
+from .database import (
+    Entry,
+    add_entry,
+    build_database,
+    filter_entries,
+    load_json,
+    remove_entry,
+    save_csv,
+    save_json,
+)
+from .fitting import MultiExpFit, fit_gaussian2d, gaussian2d, peak_power_density
 from .io import pick_files, pick_folder, sort_measurement_files
 from .jpk import JPK
 from .match import Match
 from .ptu import PTU
+from .utils import downsample_sum
 from .zurich import Zurich
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 #__all__ tells the package user which classes and functions are available for import when they use the * syntax. It is a list of strings that represent the names of the public objects in the module.
 __all__ = [
@@ -39,9 +50,21 @@ __all__ = [
     "JPK",
     "Match",
     "MultiExpFit",
+    "gaussian2d",
+    "fit_gaussian2d",
+    "peak_power_density",
+    "downsample_sum",
     "pick_files",
     "pick_folder",
     "sort_measurement_files",
+    "Entry",
+    "build_database",
+    "add_entry",
+    "remove_entry",
+    "filter_entries",
+    "save_json",
+    "load_json",
+    "save_csv",
     "__version__",
 ]
 
@@ -55,6 +78,7 @@ _PLOTTING_NAMES = (
     "set_cbar_formatter",
     "plot_image",
     "make_circle",
+    "crop_roi",
 )
 
 
@@ -63,12 +87,13 @@ def __getattr__(name: str):
     # the package stays headless-friendly. When the user does want to use them,
     # they can do e.g. ``from kpfm_pl import InteractiveBoxSelector`` and the
     # module will be imported on demand.
-    if name in ("InteractiveBoxSelector", "DraggableCircle"):
-        from .selector import InteractiveBoxSelector, DraggableCircle
+    if name in ("InteractiveBoxSelector", "SingleBoxSelector", "DraggableCircle"):
+        from .selector import InteractiveBoxSelector, SingleBoxSelector, DraggableCircle
 
         # Inject both into the package namespace so subsequent attribute lookups
         # (e.g. kpfm_pl.DraggableCircle) resolve without re-importing.
         globals()["InteractiveBoxSelector"] = InteractiveBoxSelector
+        globals()["SingleBoxSelector"] = SingleBoxSelector
         globals()["DraggableCircle"] = DraggableCircle
 
         return globals()[name]

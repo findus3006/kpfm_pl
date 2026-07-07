@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-__all__ = ["InteractiveBoxSelector", "DraggableCircle"]
+__all__ = ["InteractiveBoxSelector", "SingleBoxSelector", "DraggableCircle"]
 
 
 class InteractiveBoxSelector:
@@ -265,6 +265,42 @@ class InteractiveBoxSelector:
             coords = self.get_boxes()
             if self.on_save:
                 self.on_save(coords)
+
+
+class SingleBoxSelector(InteractiveBoxSelector):
+    """:class:`InteractiveBoxSelector` restricted to a single ROI.
+
+    Drawing a new box replaces any previous one, right-click deletes the box
+    outright (rather than merely deselecting it), and pressing ``Enter``
+    closes the figure in addition to invoking ``on_save`` -- so confirming
+    the ROI via ``Enter`` or by simply closing the window behave the same
+    way.
+    """
+
+    def _on_release(self, event):
+        if self._mode == "draw" and self.boxes:
+            for b in self.boxes:
+                self._remove_box_patches(b)
+            self.boxes.clear()
+        super()._on_release(event)
+
+    def _on_press(self, event):
+        if event.inaxes == self.ax and event.button == 3 and self.boxes:
+            self._remove_box_patches(self.boxes.pop())
+            self.active_idx = None
+            self._redraw_all()
+            return
+        super()._on_press(event)
+
+    def _on_key(self, event):
+        if event.key == "enter":
+            if self.on_save:
+                self.on_save(self.get_boxes())
+            import matplotlib.pyplot as plt
+
+            plt.close(self.fig)
+            return
+        super()._on_key(event)
 
 
 class DraggableCircle:

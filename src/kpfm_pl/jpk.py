@@ -133,3 +133,9 @@ class JPK:
         if "height" in channel.lower():
             return set_zero(linear_line_level(data))
         return data
+
+    def get_save_path(self, name: str = "AFM"):
+        png_name = f"{self.filepath.stem} {name}.png"  
+        output_dir = self.filepath.parent/"processed"
+        output_dir.mkdir(exist_ok=True)
+        return output_dir/png_name

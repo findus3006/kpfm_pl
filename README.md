@@ -99,6 +99,21 @@ plt.imshow(img["data"], extent=img.extent, origin="lower")
 
 Example scripts for correlation of KPFM and PL, .ptu processing and .jpk processing can be found in the tests folder.
 
+### Build a searchable database of measurement pairs
+
+```python
+from kpfm_pl import build_database, filter_entries, save_json
+
+entries = build_database(r"C:\Users\rolfs\Desktop\Claude correlate")
+save_json(entries, r"C:\Users\rolfs\Desktop\Claude correlate\database.json")
+
+green_pairs = filter_entries(entries, wavelength_nm=532.0)
+zurich, ptu = green_pairs[0].load()
+```
+
+See [`docs/database.md`](docs/database.md) for the full manual (archive layout,
+parsed fields, pairing logic, querying, and editing entries).
+
 ## Return-format conventions
 
 | Container | Keys |

@@ -11,6 +11,9 @@ from scipy import ndimage
 
 __all__ = [
     "feature_scale",
+    "feature_scale_params",
+    "zscore",
+    "zscore_params",
     "smooth",
     "derivative",
     "resample",
@@ -19,20 +22,66 @@ __all__ = [
     "inflection_left_bound",
     "linear_line_level",
     "set_zero",
+    "downsample_sum",
 ]
 
 
-def feature_scale(y: np.ndarray) -> np.ndarray:
-    """Min-max scale ``y`` to the ``[0, 1]`` range.
+def feature_scale_params(
+    y: np.ndarray, mask: np.ndarray | None = None
+) -> tuple[float, float]:
+    """``(scale, shift)`` of the affine map that min-max scales ``y`` to ``[0, 1]``.
 
-    Robust against constant input (returns zeros instead of NaNs).
+    The returned coefficients satisfy ``y_scaled = scale * y + shift``. When
+    ``mask`` is given, the min/max are computed over ``y[mask]`` (falling back to
+    the full array if the mask is empty) but the map still applies to all of
+    ``y``. Constant input yields ``(0.0, 0.0)`` (i.e. all zeros, no NaNs).
     """
     y = np.asarray(y, dtype=float)
-    ymin = np.min(y)
-    span = np.max(y) - ymin
-    if span == 0:
-        return np.zeros_like(y)
-    return (y - ymin) / span
+    sub = y[mask] if mask is not None and np.any(mask) else y
+    lo = float(np.min(sub))
+    span = float(np.max(sub) - lo)
+    if span == 0 or not np.isfinite(span):
+        return 0.0, 0.0
+    return 1.0 / span, -lo / span
+
+
+def feature_scale(y: np.ndarray, mask: np.ndarray | None = None) -> np.ndarray:
+    """Min-max scale ``y`` to the ``[0, 1]`` range.
+
+    Robust against constant input (returns zeros instead of NaNs). See
+    :func:`feature_scale_params` for the optional ``mask`` semantics.
+    """
+    scale, shift = feature_scale_params(y, mask)
+    return scale * np.asarray(y, dtype=float) + shift
+
+
+def zscore_params(
+    y: np.ndarray, mask: np.ndarray | None = None
+) -> tuple[float, float]:
+    """``(scale, shift)`` of the affine map that standardizes ``y``.
+
+    The returned coefficients satisfy ``y_scaled = scale * y + shift`` and map
+    ``y`` to zero mean / unit standard deviation. When ``mask`` is given, the
+    mean/std are computed over ``y[mask]`` (falling back to the full array if the
+    mask is empty). Constant input yields ``(0.0, 0.0)``.
+    """
+    y = np.asarray(y, dtype=float)
+    sub = y[mask] if mask is not None and np.any(mask) else y
+    mean = float(np.mean(sub))
+    std = float(np.std(sub))
+    if std == 0 or not np.isfinite(std):
+        return 0.0, 0.0
+    return 1.0 / std, -mean / std
+
+
+def zscore(y: np.ndarray, mask: np.ndarray | None = None) -> np.ndarray:
+    """Standardize ``y`` to zero mean / unit standard deviation.
+
+    Robust against constant input (returns zeros). See :func:`zscore_params` for
+    the optional ``mask`` semantics.
+    """
+    scale, shift = zscore_params(y, mask)
+    return scale * np.asarray(y, dtype=float) + shift
 
 
 def smooth(y: np.ndarray, window: int = 1, method: str = "moving_average") -> np.ndarray:
@@ -175,3 +224,17 @@ def set_zero(data: np.ndarray) -> np.ndarray:
     """Shift ``data`` so its minimum sits at zero."""
     data = np.asarray(data, dtype=float)
     return np.abs(data - data.min())
+
+
+def downsample_sum(image: np.ndarray, fx: int, fy: int) -> np.ndarray:
+    """Downsample ``image`` by summing ``fx`` x ``fy`` pixel blocks.
+
+    Trailing rows/columns that do not fill a full block are dropped. Useful
+    to speed up per-pixel fitting on large images.
+    """
+    image = np.asarray(image)
+    h, w = image.shape
+    h2 = (h // fx) * fx
+    w2 = (w // fy) * fy
+    cropped = image[:h2, :w2]
+    return cropped.reshape(h2 // fx, fx, w2 // fy, fy).sum(axis=(1, 3))

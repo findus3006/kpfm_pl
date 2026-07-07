@@ -39,6 +39,7 @@ __all__ = [
     "set_cbar_formatter",
     "plot_image",
     "make_circle",
+    "crop_roi",
 ]
 
 
@@ -186,3 +187,78 @@ def make_circle(ax):
         return None
     plt.close(fig)
     return [center, radius]
+
+
+def crop_roi(image, *, cmap=None, title=None, figsize=(10, 7), ax=None):
+    """Interactively draw a rectangular ROI on ``image`` and return the crop.
+
+    Left-click drag on an empty area draws the box, dragging its interior
+    moves it, and dragging one of the edge/corner handles resizes it.
+    Right-click deletes the current box so a new one can be drawn. Confirm
+    the selection by pressing ``Enter`` or simply closing the figure window
+    (both behave identically). Blocks until the figure is closed.
+
+    Parameters
+    ----------
+    image :
+        2-D or 3-D (e.g. RGB) array to display and crop.
+    cmap :
+        Colormap forwarded to ``imshow`` (ignored for RGB(A) images).
+    title :
+        Optional axis title.
+    figsize :
+        Figure size used when *ax* is ``None``.
+    ax :
+        Existing axis to draw into; a new figure/axis is created when
+        ``None``.
+
+    Returns
+    -------
+    (cropped, bounds) :
+        ``cropped`` is ``image`` sliced to the selected pixel bounds
+        (unchanged if no ROI was drawn). ``bounds`` is a dict
+        ``{"x_min", "x_max", "y_min", "y_max"}`` in pixel coordinates, or
+        ``None`` if no ROI was drawn.
+    """
+    import matplotlib.pyplot as plt
+
+    from .selector import SingleBoxSelector
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+
+    ax.imshow(image, cmap=cmap)
+    if title:
+        ax.set_title(title)
+
+    instructions = (
+        "Controls\n"
+        "  Drag empty area    draw ROI\n"
+        "  Drag box interior  move ROI\n"
+        "  Drag edge/corner   resize ROI\n"
+        "  Right-click        delete ROI\n"
+        "  Enter / close win  confirm crop"
+    )
+    fig.text(0.99, 0.5, instructions, transform=fig.transFigure, fontsize=9,
+              va="center", ha="right", fontfamily="monospace",
+              bbox=dict(boxstyle="round,pad=0.5", facecolor="whitesmoke", edgecolor="gray"))
+    fig.subplots_adjust(right=0.78)
+
+    selector = SingleBoxSelector(ax)
+    plt.show(block=True)
+
+    boxes = selector.get_boxes()
+    if not boxes:
+        print("No ROI drawn. Returning original image.")
+        return image, None
+
+    b = boxes[0]
+    h, w = image.shape[:2]
+    x0 = int(round(max(b["x_min"], 0)))
+    x1 = int(round(min(b["x_max"], w)))
+    y0 = int(round(max(b["y_min"], 0)))
+    y1 = int(round(min(b["y_max"], h)))
+    bounds = {"x_min": x0, "x_max": x1, "y_min": y0, "y_max": y1}
+    return image[y0:y1, x0:x1, ...], bounds

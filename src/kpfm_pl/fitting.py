@@ -15,9 +15,9 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
-from scipy.optimize import least_squares
+from scipy.optimize import curve_fit, least_squares
 
-__all__ = ["MultiExpFit"]
+__all__ = ["MultiExpFit", "gaussian2d", "fit_gaussian2d", "peak_power_density"]
 
 
 class MultiExpFit:
@@ -184,3 +184,64 @@ class MultiExpFit:
             "label": self.legend_label(),
             "success": self.success,
         }
+
+
+def gaussian2d(xy: tuple[np.ndarray, np.ndarray], amplitude: float, x0: float, y0: float,
+               sigma_x: float, sigma_y: float) -> np.ndarray:
+    """Evaluate an un-rotated 2-D Gaussian (no offset) on a mesh.
+
+    ``xy`` is ``(x, y)`` meshgrid arrays; the result is *raveled* so the
+    function can be used directly as a :func:`scipy.optimize.curve_fit` model.
+    """
+    x, y = xy
+    g = amplitude * np.exp(-(((x - x0) ** 2 / (2 * sigma_x ** 2)) +
+                             ((y - y0) ** 2 / (2 * sigma_y ** 2))))
+    return g.ravel()
+
+
+def fit_gaussian2d(x: np.ndarray, y: np.ndarray, image: np.ndarray,
+                    p0: np.ndarray | None = None, **kwargs: Any):
+    """Fit :func:`gaussian2d` to ``image`` sampled on the ``(x, y)`` mesh.
+
+    Parameters
+    ----------
+    x, y :
+        Meshgrid coordinate arrays, same shape as ``image``.
+    image :
+        2-D intensity data to fit.
+    p0 :
+        Initial guess ``[A, x0, y0, sigma_x, sigma_y]``. A default is derived
+        from ``image``/``x``/``y`` when ``None``.
+    **kwargs :
+        Extra keyword arguments forwarded to :func:`scipy.optimize.curve_fit`
+        (e.g. ``maxfev``).
+
+    Returns
+    -------
+    (popt, pcov, fit, perr) :
+        Optimal parameters, their covariance matrix, the fitted surface
+        reshaped like ``image``, and the parameter standard errors
+        (``sqrt(diag(pcov))``).
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    image = np.asarray(image, dtype=float)
+
+    if p0 is None:
+        p0 = [np.max(image), np.mean(x), np.mean(y),
+              (x.max() - x.min()) / 10, (y.max() - y.min()) / 10]
+    kwargs.setdefault("maxfev", 12000)
+
+    popt, pcov = curve_fit(gaussian2d, (x, y), image.ravel(), p0=p0, **kwargs)
+    fit = gaussian2d((x, y), *popt).reshape(image.shape)
+    perr = np.sqrt(np.diag(pcov))
+    return popt, pcov, fit, perr
+
+
+def peak_power_density(total_power: float, sigma_x: float, sigma_y: float):
+    """Peak (center) power density of a 2-D Gaussian beam.
+
+    ``I0 = P / (2*pi*sigma_x*sigma_y)``, equivalent to ``2*P/(pi*w_x*w_y)``
+    with ``w = 2*sigma``.
+    """
+    return total_power / (2 * np.pi * sigma_x * sigma_y)
