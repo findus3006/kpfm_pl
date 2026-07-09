@@ -44,6 +44,7 @@ from __future__ import annotations
 import csv
 import json
 import re
+import warnings
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -312,13 +313,21 @@ def _pair_leaf_files(txt_files: list[Path], ptu_files: list[Path], folder_dr_hin
                 best_ptu, best_score = ptu_path, score
 
         if best_ptu is None:
-            print(f"Warning: no .ptu match found for {txt_path.name}")
+            warnings.warn(
+                f"No .ptu match found for {txt_path.name}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
             continue
         pairs.append((txt_path, best_ptu))
         remaining_ptu.remove(best_ptu)
 
     for leftover in remaining_ptu:
-        print(f"Warning: no .txt match found for {leftover.name}")
+        warnings.warn(
+            f"No .txt match found for {leftover.name}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
     return pairs
 

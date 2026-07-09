@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import struct
 import time as _time
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -158,7 +159,12 @@ class PTU:
         for _ in range(self.num_records):
             chunk = fh.read(4)
             if len(chunk) < 4:
-                print(f"{self.filepath.stem}: file ended earlier than expected.")
+                warnings.warn(
+                    f"{self.filepath.stem}: file ended earlier than expected "
+                    f"({self.num_records} records declared in header).",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
                 break
             record = struct.unpack("<I", chunk)[0]
             channel = (record >> 28) & 0xF
@@ -511,7 +517,11 @@ class PTU:
         elif self._tt_cache.get("triggers"):
             triggers = self._tt_cache["triggers"]
         else:
-            print(f"{self.filepath.stem}: no laser triggers found.")
+            warnings.warn(
+                f"{self.filepath.stem}: no laser triggers found.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
             return None
         print(f"{self.filepath.stem}: trigger spacing "
               f"{triggers['right']['time'] - triggers['left']['time']:.2f} s")
@@ -521,5 +531,9 @@ class PTU:
         """All marker times (seconds) on ``marker_channel``."""
         if marker_channel in self.marker:
             return np.array(self.marker[marker_channel]) * self.rep_time
-        print(f"{self.filepath.stem}: marker channel {marker_channel} not found.")
+        warnings.warn(
+            f"{self.filepath.stem}: marker channel {marker_channel} not found.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return None

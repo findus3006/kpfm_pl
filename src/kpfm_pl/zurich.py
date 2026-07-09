@@ -7,6 +7,7 @@ arrays and plot them yourself.
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -60,10 +61,21 @@ class Zurich:
             raise ValueError("No data streams found in header.")
 
         parsed = []
+        skipped = 0
         for row in data_rows:
             parts = row.split(";")
             if len(parts) == 2:
                 parsed.append((float(parts[0]), float(parts[1])))
+            else:
+                skipped += 1
+        if not parsed:
+            raise ValueError("No valid 'time;value' data rows found in file.")
+        if skipped:
+            warnings.warn(
+                f"Skipped {skipped} malformed data row(s) while parsing.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         if len(parsed) % len(stream_names) != 0:
             raise ValueError(
                 f"{len(parsed)} rows not divisible by {len(stream_names)} streams."
@@ -139,7 +151,11 @@ class Zurich:
         else:
             on = np.where(scaled >= 0.1)[0]
             if on.size == 0:
-                print(f"{self.filepath.stem}: no trigger found in {stream}.")
+                warnings.warn(
+                    f"{self.filepath.stem}: no trigger found in {stream}.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
                 return None
             half = on.size // 2
             left_idx = int(np.max(on[:half])) if half else int(on[0])

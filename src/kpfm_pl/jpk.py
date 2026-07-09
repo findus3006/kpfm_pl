@@ -79,7 +79,13 @@ class JPK:
                 image = np.flip(page.asarray().astype(float), axis=0)
                 if calib is not None:
                     scale_tag, offset_tag, units = calib
-                    image = image * tags[scale_tag] + tags[offset_tag]
+                    try:
+                        image = image * tags[scale_tag] + tags[offset_tag]
+                    except KeyError as exc:
+                        raise ValueError(
+                            f"{self.filepath.name}: channel {name!r} is missing "
+                            f"calibration tag {exc.args[0]!r}."
+                        ) from exc
                 else:
                     units = ""
 

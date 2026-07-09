@@ -90,7 +90,8 @@ def test_laser_triggers_threshold(tmp_path):
 def test_laser_triggers_none_when_flat(tmp_path):
     text = ("% Flat, x\n" + "".join(f"{i}.0;0.0\n" for i in range(5)))
     z = Zurich(_write(tmp_path, text))
-    assert z.laser_triggers("Flat") is None
+    with pytest.warns(RuntimeWarning, match="no trigger found"):
+        assert z.laser_triggers("Flat") is None
 
 
 def test_laser_triggers_with_reference_maps_indices(tmp_path):
@@ -100,3 +101,35 @@ def test_laser_triggers_with_reference_maps_indices(tmp_path):
     # indices now point into the coarse reference axis
     assert 0 <= trig["left"]["index"] < len(ref["x"])
     assert 0 <= trig["right"]["index"] < len(ref["x"])
+
+
+# --- parser-level error propagation (added alongside the error-handling work) ---
+_HEADER = "% Stream A, foo\n% Stream B, bar\n"
+
+
+def test_parse_raises_when_no_valid_data_rows():
+    lines = (_HEADER + "not;a;valid;row\nalso bad\n").splitlines()
+    with pytest.raises(ValueError, match="No valid"):
+        Zurich._parse(lines)
+
+
+def test_parse_raises_without_streams():
+    with pytest.raises(ValueError, match="No data streams"):
+        Zurich._parse(["1.0;2.0", "3.0;4.0"])
+
+
+def test_parse_warns_on_malformed_rows_but_keeps_valid():
+    lines = (
+        _HEADER
+        + "1.0;10.0\n"
+        + "2.0;20.0\n"
+        + "garbage;row;extra\n"  # malformed, must be skipped with a warning
+        + "3.0;30.0\n"
+        + "4.0;40.0\n"
+    ).splitlines()
+    with pytest.warns(RuntimeWarning, match="malformed"):
+        streams = Zurich._parse(lines)
+    assert set(streams) == {"Stream A", "Stream B"}
+    # 4 valid rows / 2 streams -> 2 samples each.
+    assert all(len(s["value"]) == 2 for s in streams.values())
+    assert np.allclose(np.sort(streams["Stream A"]["value"]), [10.0, 20.0])

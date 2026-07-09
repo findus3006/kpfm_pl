@@ -67,3 +67,24 @@ def test_legend_label_is_latex():
     y = _single_exp(t, 1.0, 5.0)
     label = MultiExpFit(t, y, n_exp=1).legend_label()
     assert label.startswith("$f(t) = ") and label.endswith("$")
+
+
+def test_failed_fit_warns_and_raises_clear_error():
+    t = np.linspace(0.0, 10.0, 50)
+    y = _single_exp(t, 1.0, 3.0)
+    # ``A = -1`` violates the lower bound (0), so ``least_squares`` rejects the
+    # initial guess as infeasible and the fit fails.
+    with pytest.warns(RuntimeWarning, match="fit failed"):
+        fit = MultiExpFit(t, y, n_exp=1, p0=np.array([-1.0, 3.0]))
+
+    assert not fit.success
+    # Accessors must surface a clear RuntimeError (carrying the cause), not an
+    # opaque AttributeError from dereferencing a missing result.
+    with pytest.raises(RuntimeError):
+        fit.parameters()
+    with pytest.raises(RuntimeError):
+        fit.curve()
+    with pytest.raises(RuntimeError):
+        fit.quality()
+    with pytest.raises(RuntimeError):
+        fit.to_dict()
