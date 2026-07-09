@@ -97,6 +97,22 @@ class PTU:
         self.acquisition_time = self._tags["MeasDesc_AcquisitionTime"] * 1e-3
 
     @staticmethod
+    def _read_length_prefixed(fh) -> bytes:
+        """Read a ``<q>`` length prefix and that many bytes, bounded by the file size.
+
+        The length is taken straight from the (potentially untrusted) file, so it
+        is validated against the bytes actually remaining before allocating -- a
+        corrupt or malicious tag can otherwise request a multi-gigabyte read.
+        """
+        n = struct.unpack("<q", fh.read(8))[0]
+        cur = fh.tell()
+        end = fh.seek(0, 2)
+        fh.seek(cur)
+        if n < 0 or n > end - cur:
+            raise ValueError(f"Invalid PTU string length {n} (only {end - cur} bytes left).")
+        return fh.read(n)
+
+    @staticmethod
     def _read_tag_value(fh, typ: int) -> Any:
         T = _TAG_TYPES
         if typ == T["Empty8"]:
@@ -115,15 +131,13 @@ class PTU:
             f = struct.unpack("<d", fh.read(8))[0]
             return _time.gmtime(int((f - 25569) * 86400))
         if typ == T["AnsiString"]:
-            n = struct.unpack("<q", fh.read(8))[0]
-            raw = fh.read(n)
+            raw = PTU._read_length_prefixed(fh)
             try:
                 return raw.decode("utf-8").strip("\0")
             except UnicodeDecodeError:
                 return raw.decode("latin1", "ignore").strip("\0")
         if typ == T["WideString"]:
-            n = struct.unpack("<q", fh.read(8))[0]
-            return fh.read(n).decode("utf-16le", errors="ignore").strip("\0")
+            return PTU._read_length_prefixed(fh).decode("utf-16le", errors="ignore").strip("\0")
         raise ValueError(f"Unknown PTU tag type: {typ}")
 
     # ----------------------------------------------------------------- records
