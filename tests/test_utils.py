@@ -4,8 +4,11 @@ import pytest
 from kpfm_pl.utils import (
     bin_average,
     derivative,
+    downsample_sum,
     feature_scale,
+    feature_scale_params,
     fit_window_mask,
+    inflection_left_bound,
     left_bound_fraction,
     linear_line_level,
     nearest_index,
@@ -13,6 +16,8 @@ from kpfm_pl.utils import (
     set_zero,
     smooth,
     trigger_dict,
+    zscore,
+    zscore_params,
 )
 
 
@@ -135,3 +140,113 @@ def test_trigger_dict_shape_and_casts():
                     "right": {"index": 7, "time": 4.0}}
     assert isinstance(trig["left"]["index"], int)
     assert isinstance(trig["right"]["time"], float)
+
+
+def test_feature_scale_params_with_mask():
+    y = np.array([0.0, 10.0, 20.0, 30.0])
+    mask = np.array([False, True, True, False])
+    scale, shift = feature_scale_params(y, mask)
+    # min/max taken over the masked window (10..20)
+    scaled = scale * y + shift
+    assert scaled[1] == pytest.approx(0.0)
+    assert scaled[2] == pytest.approx(1.0)
+
+
+def test_feature_scale_empty_mask_falls_back_to_full():
+    y = np.array([2.0, 4.0, 6.0])
+    mask = np.zeros(3, bool)
+    assert np.allclose(feature_scale(y, mask), [0.0, 0.5, 1.0])
+
+
+def test_zscore_standardizes():
+    y = np.array([1.0, 2.0, 3.0, 4.0])
+    z = zscore(y)
+    assert z.mean() == pytest.approx(0.0)
+    assert z.std() == pytest.approx(1.0)
+
+
+def test_zscore_constant_input_is_zero():
+    assert np.all(zscore(np.full(4, 5.0)) == 0.0)
+
+
+def test_zscore_params_with_mask():
+    y = np.array([0.0, 1.0, 2.0, 3.0, 100.0])
+    mask = np.array([True, True, True, True, False])
+    scale, shift = zscore_params(y, mask)
+    sub = (scale * y + shift)[:4]
+    assert sub.mean() == pytest.approx(0.0)
+    assert sub.std() == pytest.approx(1.0)
+
+
+def test_smooth_gaussian_reduces_variance():
+    rng = np.random.default_rng(1)
+    y = rng.normal(size=400)
+    assert smooth(y, window=5, method="gaussian").var() < y.var()
+
+
+def test_smooth_gaussian_noop_for_nonpositive_window():
+    y = np.arange(5.0)
+    assert np.array_equal(smooth(y, window=0, method="gaussian"), y)
+
+
+def test_smooth_unknown_method_raises():
+    with pytest.raises(ValueError, match="Unknown smoothing method"):
+        smooth(np.arange(5.0), window=2, method="bogus")
+
+
+def test_derivative_with_smoothing_runs():
+    x = np.linspace(0, 10, 101)
+    y = 2.0 * x
+    d = derivative(x, y, smoothing=3)
+    assert np.allclose(d, 2.0, atol=1e-6)
+
+
+def test_bin_average_noop_for_small_bin():
+    x = np.arange(4.0)
+    y = np.arange(4.0)
+    xb, yb = bin_average(x, y, 1)
+    assert np.array_equal(xb, x) and np.array_equal(yb, y)
+
+
+def test_left_bound_fraction_with_smoothing():
+    y = np.concatenate([np.zeros(10), np.linspace(0, 1, 10), np.ones(10)])
+    idx = left_bound_fraction(y, fraction=0.9, smoothing=2)
+    assert 10 <= idx <= 29
+
+
+def test_inflection_left_bound_detects_curvature_change():
+    x = np.linspace(-5, 5, 200)
+    y = 1.0 / (1.0 + np.exp(-x))  # sigmoid: inflection near the centre
+    idx = inflection_left_bound(y, smoothing=1.5)
+    assert idx is not None
+    assert 0 <= idx < len(y)
+
+
+def test_inflection_left_bound_returns_none_for_short_peak():
+    y = np.array([0.0, 0.0, 10.0, 0.0, 0.0])
+    assert inflection_left_bound(y) is None
+
+
+def test_linear_line_level_axis0_removes_tilt():
+    ramp = np.tile(np.linspace(0, 1, 5).reshape(-1, 1), (1, 4))
+    leveled = linear_line_level(ramp, axis=0)
+    assert np.allclose(leveled, 0.0, atol=1e-9)
+
+
+def test_linear_line_level_invalid_axis_raises():
+    with pytest.raises(ValueError, match="axis must be"):
+        linear_line_level(np.ones((3, 3)), axis=2)
+
+
+def test_downsample_sum_blocks():
+    image = np.ones((4, 6))
+    out = downsample_sum(image, 2, 3)
+    assert out.shape == (2, 2)
+    assert np.all(out == 6.0)
+
+
+def test_downsample_sum_drops_trailing_partial_blocks():
+    image = np.ones((5, 5))
+    out = downsample_sum(image, 2, 2)
+    assert out.shape == (2, 2)
+    assert np.all(out == 4.0)
