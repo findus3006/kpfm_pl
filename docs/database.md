@@ -102,7 +102,7 @@ entry = filter_entries(entries, sample="CF501", dr="DR1", date="23.01.2026")[0]
 ### Loading the actual data for a pair
 
 ```python
-zurich, ptu = entry.load()   # -> (Zurich, PTU) instances, see README for their API
+zurich, ptu = entry.load(**kwargs)   # -> (Zurich, PTU) instances, see README for their API, kwargs are passed into PTU(dark_counts=2.25)
 ```
 
 ## Editing the database

@@ -119,12 +119,12 @@ class Entry:
         d["ptu_path"] = Path(d["ptu_path"])
         return cls(**d)
 
-    def load(self):
+    def load(self, **kwargs):
         """Load the underlying :class:`~kpfm_pl.zurich.Zurich` and :class:`~kpfm_pl.ptu.PTU` objects."""
         from .ptu import PTU
         from .zurich import Zurich
 
-        return Zurich(self.txt_path), PTU(self.ptu_path)
+        return Zurich(self.txt_path), PTU(self.ptu_path, **kwargs)
 
 
 # --------------------------------------------------------------------------- filename parsing
