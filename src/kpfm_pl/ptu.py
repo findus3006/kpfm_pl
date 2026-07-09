@@ -17,7 +17,7 @@ import numpy as np
 
 from .core import Image, Signal
 from .fitting import MultiExpFit
-from .utils import inflection_left_bound, left_bound_fraction
+from .utils import fit_window_mask, nearest_index, trigger_dict
 
 __all__ = ["PTU"]
 
@@ -227,10 +227,8 @@ class PTU:
                 pad = len(trace) - len(core)
                 trace = np.pad(core, (pad // 2, pad - pad // 2))
                 nz2 = np.nonzero(trace)[0]
-                meta["triggers"] = {
-                    "left": {"index": int(nz2[0]), "time": float(time[nz2[0]])},
-                    "right": {"index": int(nz2[-1]), "time": float(time[nz2[-1]])},
-                }
+                meta["triggers"] = trigger_dict(
+                    nz2[0], time[nz2[0]], nz2[-1], time[nz2[-1]])
         if meta.get("triggers"):
             self._tt_cache = {"time": time, "trace": trace, "matrix": sliced, "bintime": bintime, "triggers": meta["triggers"]}
         else:
@@ -353,17 +351,8 @@ class PTU:
         t0_ns = lt_ns[int(np.argmax(lt_roi))]
         lt_tshift = lt_ns - t0_ns
 
-        if mode == "fraction":
-            lb = left_bound_fraction(lt_roi, fraction, smoothing)
-            mask = lt_tshift >= lt_tshift[lb]
-        elif mode == "inflection":
-            lb = inflection_left_bound(lt_roi, smoothing) or 0
-            mask = lt_tshift >= lt_tshift[lb]
-        elif mode == "manual":
-            end_ns = lt_tshift[-1] if end is None else end
-            mask = (lt_tshift >= start) & (lt_tshift <= end_ns)
-        else:
-            raise ValueError(f"Unknown mode: {mode!r}")
+        mask = fit_window_mask(lt_tshift, lt_roi, mode, fraction=fraction,
+                               smoothing=smoothing, start=start, end=end)
 
         # Bin the lifetime axis to make per-bin fits more robust.
         binned_lt = lt_ns.copy()
@@ -472,17 +461,8 @@ class PTU:
         t0 = histogram["x"][np.argmax(y)]
         t_ns = (histogram["x"] - t0) * 1e9
 
-        if mode == "fraction":
-            lb = left_bound_fraction(y, fraction, smoothing)
-            mask = t_ns >= t_ns[lb]
-        elif mode == "inflection":
-            lb = inflection_left_bound(y, smoothing) or 0
-            mask = t_ns >= t_ns[lb]
-        elif mode == "manual":
-            end = t_ns[-1] if end is None else end
-            mask = (t_ns >= start) & (t_ns <= end)
-        else:
-            raise ValueError(f"Unknown mode: {mode!r}")
+        mask = fit_window_mask(t_ns, y, mode, fraction=fraction,
+                               smoothing=smoothing, start=start, end=end)
 
         t_fit, y_fit = t_ns[mask], y[mask]
         norm = 1.0
@@ -511,10 +491,9 @@ class PTU:
             time = self._tt_cache["time"]
             left_t = self.marker[marker_channel][0] * self.rep_time
             right_t = self.marker[marker_channel][1] * self.rep_time
-            triggers = {
-                "left": {"index": int(np.argmin(np.abs(time - left_t))), "time": float(left_t)},
-                "right": {"index": int(np.argmin(np.abs(time - right_t))), "time": float(right_t)},
-            }
+            triggers = trigger_dict(
+                nearest_index(time, left_t), left_t,
+                nearest_index(time, right_t), right_t)
         elif self._tt_cache.get("triggers"):
             triggers = self._tt_cache["triggers"]
         else:

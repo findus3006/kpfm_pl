@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 
 from .core import Signal
-from .utils import bin_average, feature_scale
+from .utils import bin_average, feature_scale, nearest_index, trigger_dict
 
 __all__ = ["Zurich"]
 
@@ -148,13 +148,12 @@ class Zurich:
         left_t, right_t = float(time[left_idx]), float(time[right_idx])
         if reference is not None:
             ref_t = np.asarray(reference["x"])
-            left_idx = int(np.argmin(np.abs(ref_t - left_t)))
-            right_idx = int(np.argmin(np.abs(ref_t - right_t)))
+            left_idx = nearest_index(ref_t, left_t)
+            right_idx = nearest_index(ref_t, right_t)
             left_t, right_t = float(ref_t[left_idx]), float(ref_t[right_idx])
 
         print(f"{self.filepath.stem}: trigger spacing {right_t - left_t:.2f} s")
-        return {"left": {"index": left_idx, "time": left_t},
-                "right": {"index": right_idx, "time": right_t}}
+        return trigger_dict(left_idx, left_t, right_idx, right_t)
 
     def find_peaks(self, stream: str, prominence: float = 2.0, left_drop: float = 0.3,
                    **kwargs) -> np.ndarray:

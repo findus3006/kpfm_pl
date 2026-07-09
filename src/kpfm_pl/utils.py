@@ -20,9 +20,12 @@ __all__ = [
     "bin_average",
     "left_bound_fraction",
     "inflection_left_bound",
+    "fit_window_mask",
     "linear_line_level",
     "set_zero",
     "downsample_sum",
+    "nearest_index",
+    "trigger_dict",
 ]
 
 
@@ -200,6 +203,45 @@ def inflection_left_bound(y: np.ndarray, smoothing: float = 1.5) -> int | None:
     return int(best)
 
 
+def fit_window_mask(
+    t_shifted: np.ndarray,
+    y: np.ndarray,
+    mode: str = "fraction",
+    *,
+    fraction: float = 0.95,
+    smoothing: float = 2.0,
+    start: float = 0.0,
+    end: float | None = None,
+) -> np.ndarray:
+    """Boolean mask selecting the fit window of a (peak-shifted) decay curve.
+
+    Shared by the lifetime fit and the FLID map so both pick their fit window
+    identically. ``t_shifted`` is the time axis shifted so the peak sits at zero;
+    ``y`` is the curve used to locate the left bound.
+
+    ``mode``:
+
+    * ``"fraction"`` -- start at the rising edge reaching ``fraction`` of the
+      (``smoothing``-blurred) maximum (see :func:`left_bound_fraction`).
+    * ``"inflection"`` -- start at the dominant inflection point
+      (see :func:`inflection_left_bound`; falls back to index 0).
+    * ``"manual"`` -- keep ``start <= t_shifted <= end`` (``end=None`` uses the
+      last sample).
+    """
+    t_shifted = np.asarray(t_shifted, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if mode == "fraction":
+        lb = left_bound_fraction(y, fraction, smoothing)
+        return t_shifted >= t_shifted[lb]
+    if mode == "inflection":
+        lb = inflection_left_bound(y, smoothing) or 0
+        return t_shifted >= t_shifted[lb]
+    if mode == "manual":
+        end = t_shifted[-1] if end is None else end
+        return (t_shifted >= start) & (t_shifted <= end)
+    raise ValueError(f"Unknown mode: {mode!r}")
+
+
 def linear_line_level(data: np.ndarray, axis: int = 1) -> np.ndarray:
     """Remove a best-fit line from each row (``axis=1``) or column (``axis=0``).
 
@@ -238,3 +280,24 @@ def downsample_sum(image: np.ndarray, fx: int, fy: int) -> np.ndarray:
     w2 = (w // fy) * fy
     cropped = image[:h2, :w2]
     return cropped.reshape(h2 // fx, fx, w2 // fy, fy).sum(axis=(1, 3))
+
+
+def nearest_index(axis: np.ndarray, value: float) -> int:
+    """Index of the sample in ``axis`` closest to ``value``."""
+    axis = np.asarray(axis, dtype=float)
+    return int(np.argmin(np.abs(axis - value)))
+
+
+def trigger_dict(
+    left_index: int, left_time: float, right_index: int, right_time: float
+) -> dict[str, dict[str, float]]:
+    """Assemble the standard laser-trigger dict shared by all loaders.
+
+    Returns ``{"left": {"index", "time"}, "right": {"index", "time"}}`` with the
+    indices cast to ``int`` and the times to ``float``. This is the trigger
+    format consumed by :class:`~kpfm_pl.match.Match`.
+    """
+    return {
+        "left": {"index": int(left_index), "time": float(left_time)},
+        "right": {"index": int(right_index), "time": float(right_time)},
+    }
