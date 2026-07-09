@@ -12,6 +12,7 @@ The model is
 
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 import numpy as np
@@ -68,6 +69,7 @@ class MultiExpFit:
         self.constrain_sum_A = bool(constrain_sum_A)
         self._penalty_weight = 1e5 * np.max(np.abs(self.y)) if self.constrain_sum_A else 0.0
 
+        self._error: Exception | None = None
         self.result = self._fit(p0=p0, bounds=bounds)
 
     # -- model -----------------------------------------------------------------
@@ -112,9 +114,28 @@ class MultiExpFit:
                 self._residuals, p0, jac=self._jacobian, args=(self.t, self.y),
                 bounds=bounds, loss=self.loss, f_scale=self.f_scale, max_nfev=20000,
             )
-        except ValueError as exc:  # pragma: no cover - defensive
-            print(f"Multi-exponential fit failed: {exc}")
+        except (ValueError, np.linalg.LinAlgError) as exc:
+            self._error = exc
+            warnings.warn(
+                f"Multi-exponential fit failed: {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
             return None
+
+    def _require_result(self):
+        """Return the optimizer result or raise a clear error if the fit failed.
+
+        Guards the accessors so a failed fit surfaces as an explicit
+        :class:`RuntimeError` (carrying the original cause) instead of an opaque
+        ``AttributeError`` from dereferencing ``None``.
+        """
+        if self.result is None:
+            msg = "Multi-exponential fit did not converge; no parameters available."
+            if self._error is not None:
+                raise RuntimeError(msg) from self._error
+            raise RuntimeError(msg)
+        return self.result
 
     def _default_p0(self) -> np.ndarray:
         A_guess = np.full(self.n_exp, np.max(self.y) / self.n_exp)
@@ -138,18 +159,18 @@ class MultiExpFit:
 
     def parameters(self) -> dict[str, np.ndarray]:
         """Return fitted amplitudes and lifetimes as ``{"A": ..., "tau": ...}``."""
-        params = self.result.x
+        params = self._require_result().x
         n = len(params) // 2
         return {"A": params[:n], "tau": params[n:2 * n]}
 
     def curve(self, t: np.ndarray | None = None) -> np.ndarray:
         """Evaluate the fitted model (defaults to the fitting grid)."""
         t = self.t if t is None else t
-        return self.model(t, self.result.x)
+        return self.model(t, self._require_result().x)
 
     def quality(self) -> dict[str, Any]:
         """Return goodness-of-fit metrics including ``r_squared``."""
-        residuals = self.result.fun
+        residuals = self._require_result().fun
         if self.constrain_sum_A:
             residuals = residuals[:-1]
         ss_res = np.sum(residuals ** 2)
