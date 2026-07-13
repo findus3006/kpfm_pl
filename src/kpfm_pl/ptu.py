@@ -219,11 +219,17 @@ class PTU:
         tstart, tend :
             Optional time window. ``tend=None`` uses the full acquisition.
         laser_pulse :
-            Use this when there are some laser pulses missing in the data, i.e. the PicoHarp
-            did not receive laser pulse triggers from the laser pulse clock at start
-            and end of the measurement.
-            When ``False`` the non-zero portion of the trace is centred and
-            zero-padded, and the rising/falling edges are stored as triggers.
+            Refers to the pulse generator in the laser driver (e.g. a 10 MHz
+            pulsed laser sends a pulse every 100 ns, needed by the PicoHarp).
+            ``True`` (default, and how data is recorded from now on) means the
+            pulse generator emits triggers throughout the whole file regardless
+            of whether the laser light is on; those triggers are recorded in the
+            marker channel and used as the laser triggers.
+            ``False`` is a legacy work-around for files where no marker was
+            picked up (e.g. the pulse generator only ran while the laser was
+            on): the non-zero portion of the trace is centred and zero-padded,
+            and its rising/falling edges are stored as triggers. This is bad
+            practice and only kept for backwards compatibility.
         """
         if getattr(self, "_bintime", None) != bintime:
             self._build_matrix(bintime)

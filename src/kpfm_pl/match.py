@@ -109,12 +109,13 @@ class Match:
     kpfm_smoothing, timetrace_smoothing :
         Optional moving-average window applied to each signal before alignment.
     scaling :
-        Amplitude-scaling method. ``"feature"`` (default) min-max scales each
+        Amplitude-scaling method. ``"none"`` (default) only shifts and resamples 
+        (the y axes are left untouched, e.g. to scale manually at plot time).;
+        ``"feature"`` min-max scales each
         signal to ``[0, 1]``; ``"zscore"`` standardizes each to zero mean / unit
         std; ``"trigger"`` performs the quantitative two-point calibration that
         maps the time trace onto the KPFM voltage scale via the laser triggers;
-        ``"none"`` only shifts and resamples (the y axes are left untouched, e.g.
-        to scale manually at plot time). ``"feature"``/``"zscore"`` statistics are
+         ``"feature"``/``"zscore"`` statistics are
         taken over the laser-on (trigger-bounded) window.
     trigger_window :
         Half-width (in samples) of the median filter applied to each trigger
