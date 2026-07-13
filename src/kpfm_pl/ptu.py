@@ -495,7 +495,7 @@ class PTU:
 
         fit = MultiExpFit(t_fit, y_fit, n_exp, offset, **fit_kwargs)
         out = fit.to_dict()
-        out.update({"t_fit": t_fit, "y_fit": y_fit, "left_bound_ns": float(t_fit[0])})
+        out.update({"shifted_histogram_x": t_ns, "t_fit": t_fit, "y_fit": y_fit, "left_bound_ns": float(t_fit[0])})
         return out
 
     # -------------------------------------------------------------- triggers

@@ -5,6 +5,7 @@ import kpfm_pl as k
 import matplotlib.pyplot as plt
 from kpfm_pl.plotting import set_scaled_rcparams
 from pathlib import Path # This allows us to not specify the full path to the test data folder
+import numpy as np
 
 # Defining the file path
 script_dir = Path(__file__).parent
@@ -47,7 +48,7 @@ fit_result = ptu.fit_lifetime(on_histogram, n_exp=2, mode="manual", start=0.1, e
 
 # Plot the result
 fig, ax = plt.subplots(figsize=(16,9))
-ax.plot(fit_result["t_fit"], fit_result["y_fit"], 'bo', label='Data', markersize=4, alpha=0.6)
+ax.plot(fit_result["shifted_histogram_x"], on_histogram.y, 'bo', label='Data', markersize=4, alpha=0.6)
 ax.plot(fit_result["t_fit"], fit_result["curve"], 'r-', linewidth=2, label=fit_result["label"])
 ax.set_ylabel("Counts")
 ax.set_xlabel("Time (ns)")
