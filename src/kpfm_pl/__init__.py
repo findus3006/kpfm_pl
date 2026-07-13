@@ -39,7 +39,7 @@ from .ptu import PTU
 from .utils import downsample_sum
 from .zurich import Zurich
 
-__version__ = "1.2.1"
+__version__ = "1.2.2"
 
 #__all__ tells the package user which classes and functions are available for import when they use the * syntax. It is a list of strings that represent the names of the public objects in the module.
 __all__ = [

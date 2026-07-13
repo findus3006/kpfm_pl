@@ -1,57 +1,93 @@
-'''This file shows how to read TCSPC data with the ptu_test2 file found in the Test data folder.
-The relevant packages are imported, the file path is defined, the file loaded and then plotted. '''
+from pathlib import Path
 
-import kpfm_pl as k
-import matplotlib.pyplot as plt
-from kpfm_pl.plotting import set_scaled_rcparams
-from pathlib import Path # This allows us to not specify the full path to the test data folder
+import numpy as np
+import pytest
 
-# Defining the file path
-script_dir = Path(__file__).parent
-file = script_dir / 'Test data' / 'ptu_test2_LaserPulse(DR1_800nW_1200_ChargeAccu_000).ptu'
+from kpfm_pl.core import Signal
+from kpfm_pl.ptu import PTU
 
-# Load and get laser triggers
-ptu = k.PTU(file, dark_counts=2.25)
-tt = ptu.time_trace(bintime=0.05, laser_pulse=True)        # Signal
-laser_triggers = ptu.get_markers()
+DATA_DIR = Path(__file__).parent / "Test data"
+NO_PULSE = DATA_DIR / "ptu_test1_NoLaserPulse_(360s_400nW_532nm_000).ptu"
+PULSE = DATA_DIR / "ptu_test2_LaserPulse(DR1_800nW_1200_ChargeAccu_000).ptu"
 
-# Plot params setup
-set_scaled_rcparams((16,9))
+pytestmark = pytest.mark.skipif(not NO_PULSE.exists(), reason="PTU test file missing")
 
-# Plotting the time trace
-fig, ax = plt.subplots(figsize=(16,9))
-ax.plot(tt["x"], tt["y"], label=tt["label"])
-first = True
-for trigger in laser_triggers:
-    ax.axvline(trigger, color='k', linestyle='--', label='Trigger signal' if first else None)
-    first = False
-ax.set_ylabel("Counts")
-ax.set_xlabel("Time (s)")
-ax.set_title("Charge accumulation")
-ax.grid(True)
-ax.legend()
-plt.show()
 
-# Get the time trace data from 280 to 480 seconds
-tt = ptu.time_trace(bintime=0.05, tstart=280, tend=480, laser_pulse=False)
+@pytest.fixture(scope="module")
+def ptu():
+    return PTU(NO_PULSE)
 
-# Get the top 70% of time bins (based on count level)
-threshold_result = ptu.threshold(on=0.7)
 
-# The "on" histogram contains the lifetime from the top 70% time bins
-on_histogram = threshold_result["on"]
-off_histogram = threshold_result["off"]
+def test_header_tags_parsed(ptu):
+    assert isinstance(ptu.tags, dict)
+    assert ptu.num_records > 0
+    assert ptu.acquisition_time > 0
 
-# Fit the lifetime on the selected ROI
-fit_result = ptu.fit_lifetime(on_histogram, n_exp=2, mode="manual", start=0.1, end=70.0)
 
-# Plot the result
-fig, ax = plt.subplots(figsize=(16,9))
-ax.plot(fit_result["t_fit"], fit_result["y_fit"], 'bo', label='Data', markersize=4, alpha=0.6)
-ax.plot(fit_result["t_fit"], fit_result["curve"], 'r-', linewidth=2, label=fit_result["label"])
-ax.set_ylabel("Counts")
-ax.set_xlabel("Time (ns)")
-ax.set_title("On state lifetime and fit")
-ax.grid(True)
-ax.legend()
-plt.show()
+def test_get_events_shape(ptu):
+    events = ptu.get_events()
+    assert events.ndim == 2
+    assert events.shape[1] == 3
+    assert events.shape[0] > 0
+
+
+def test_time_trace_returns_signal(ptu):
+    tt = ptu.time_trace(bintime=0.5)
+    assert isinstance(tt, Signal)
+    assert tt.units == {"x": "s", "y": "counts"}
+    assert len(tt["x"]) == len(tt["y"])
+    # total photons in the trace cannot exceed the recorded events
+    assert tt["y"].sum() <= ptu.get_events().shape[0]
+
+
+def test_time_trace_window_is_subset(ptu):
+    full = ptu.time_trace(bintime=0.5)
+    windowed = ptu.time_trace(bintime=0.5, tstart=0.0, tend=10.0)
+    assert len(windowed["x"]) < len(full["x"])
+    assert windowed["x"][0] >= 0.0
+
+
+def test_lifetime_histogram(ptu):
+    hist = ptu.lifetime_histogram()
+    assert isinstance(hist, Signal)
+    assert hist["y"].sum() > 0
+    assert len(hist["x"]) == ptu.n_lt_bins
+
+
+def test_threshold_splits_on_off(ptu):
+    ptu.time_trace(bintime=0.5)
+    states = ptu.threshold(off=0.2, on=0.8)
+    assert set(states) == {"on", "off"}
+    assert isinstance(states["on"], Signal)
+    assert isinstance(states["off"], Signal)
+
+
+def test_fit_lifetime_returns_quality(ptu):
+    hist = ptu.lifetime_histogram()
+    fit = ptu.fit_lifetime(hist, n_exp=1)
+    assert "tau" in fit
+    assert "t_fit" in fit and len(fit["t_fit"]) > 0
+
+
+def test_laser_triggers_none_without_pulse(ptu):
+    # this file has no laser-pulse edges and no hardware markers
+    ptu.time_trace(bintime=0.5, laser_pulse=True)
+    assert ptu.laser_triggers() is None
+
+
+def test_laser_pulse_false_records_edge_triggers():
+    p = PTU(NO_PULSE)
+    tt = p.time_trace(bintime=0.5, laser_pulse=False)
+    trig = tt["meta"].get("triggers")
+    assert trig is not None
+    assert trig["left"]["index"] < trig["right"]["index"]
+    # laser_triggers falls back to these trace edges
+    got = p.laser_triggers()
+    assert got == trig
+
+
+def test_invalid_file_raises(tmp_path):
+    bad = tmp_path / "bad.ptu"
+    bad.write_bytes(b"NOTPQTTTR" + b"\x00" * 64)
+    with pytest.raises(ValueError, match="not a valid PTU file"):
+        PTU(bad)

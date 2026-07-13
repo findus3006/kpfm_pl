@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kpfm_pl"
-version = "1.2.1"
+version = "1.2.2"
 description = "Toolbox for loading and correlating KPFM, photoluminescence (PTU) and AFM (JPK) data."
 readme = "README.md"
 requires-python = ">=3.10"

@@ -1,52 +1,66 @@
-'''This file shows how to read AFM data with the jpk_test1 file found in the Test data folder.
-The necessary imports are shown, the file path defined, the plotting dependencies imported, a circle
-interactively drawn and the data plotted.'''
+from pathlib import Path
 
-from kpfm_pl import JPK
-import matplotlib.pyplot as plt
-from matplotlib.patches import Circle
-from pathlib import Path # This allows us to not specify the full path to the test data folder
+import numpy as np
+import pytest
 
-# Defining the file path
-script_dir = Path(__file__).parent
-file = script_dir / 'Test data' / 'jpk_test_(Drift1).jpk'
+from kpfm_pl.core import Image
+from kpfm_pl.jpk import JPK
 
-# Load and process
-drift = JPK(file)
-channels = drift.channel_names()
-afm = drift.image("Height (measured)", process=True)
-kpfm = drift.image("Precision 5")
-photo = drift.image("Photon Counter 1")
-jpk_data = drift.images(["Height (measured)", "Precision 5", "Photon Counter 1"]) # This returns a dictionary with the images
+DATA = Path(__file__).parent / "Test data" / "jpk_test_(Drift1).jpk"
 
-# Plot params setup
-from kpfm_pl import plotting
-plotting.set_scaled_rcparams((16, 9))
+pytestmark = pytest.mark.skipif(not DATA.exists(), reason="JPK test file missing")
 
-# Draw circle with proprietary plotting function
-fig, ax, im, cbar = plotting.plot_image(afm, cmap=plotting.cmap_gold, cbar_scale=1e9, cbar_label="Height (nm)", extent_unit="um", title="Topography")
-circle_params = plotting.make_circle(ax)
 
-# Plot the data manually and add the circle as a patch
-fig, ax = plt.subplots(figsize=(10,7))
-im = ax.imshow(afm.data, extent=afm.extent_um, cmap=plotting.cmap_gold)
-cbar = fig.colorbar(im)
-plotting.set_cbar_formatter(cbar,afm.data, 1e9)
-cbar.set_label("nm")
-ax.set_title("AFM")
-ax.add_patch(Circle(circle_params[0],circle_params[1], edgecolor = "red", fill=False))
-fig, ax = plt.subplots(figsize=(10,7))
-im = ax.imshow(kpfm.data, extent=kpfm.extent_um, cmap=plotting.cmap_spring)
-cbar = fig.colorbar(im)
-plotting.set_cbar_formatter(cbar,kpfm.data,1e3)
-cbar.set_label("m" + kpfm.units["z"])
-ax.set_title("KPFM")
-ax.add_patch(Circle(circle_params[0],circle_params[1], edgecolor = "red", fill=False))
-fig, ax = plt.subplots(figsize=(10,7))
-im = ax.imshow(photo.data, extent=photo.extent_um, cmap='Reds')
-cbar = fig.colorbar(im)
-plotting.set_cbar_formatter(cbar,photo.data,1)
-cbar.set_label(photo.units["z"])
-ax.set_title("PL")
-ax.add_patch(Circle(circle_params[0],circle_params[1], edgecolor = "red", fill=False))
-plt.show()
+@pytest.fixture(scope="module")
+def jpk():
+    return JPK(DATA)
+
+
+def test_channel_names_include_known_channels(jpk):
+    names = jpk.channel_names()
+    assert "Height (measured)" in names
+    assert "Precision 5" in names
+    assert len(names) > 1
+
+
+def test_axes_are_physical_metres(jpk):
+    axes = jpk.axes()
+    assert set(axes) == {"x", "y"}
+    assert axes["x"].size > 0 and axes["y"].size > 0
+    # calibrated scan size is on the micrometre scale
+    assert 0 < float(axes["x"].max()) < 1e-3
+
+
+def test_image_returns_calibrated_image(jpk):
+    img = jpk.image("Precision 5", process=False)
+    assert isinstance(img, Image)
+    assert img.units["z"] == "V"
+    assert img.units["x"] == "m"
+    assert img["data"].ndim == 2
+    assert img.extent is not None
+
+
+def test_height_channel_is_processed(jpk):
+    raw = jpk.image("Height (measured)", process=False)
+    proc = jpk.image("Height (measured)", process=True)
+    # processing line-levels and zeros the minimum of height channels
+    assert np.nanmin(proc["data"]) == pytest.approx(0.0)
+    assert not np.allclose(raw["data"], proc["data"])
+
+
+def test_images_returns_dict(jpk):
+    out = jpk.images(["Precision 5", "Height (measured)"])
+    assert set(out) == {"Precision 5", "Height (measured)"}
+    assert all(isinstance(v, Image) for v in out.values())
+
+
+def test_get_save_path_creates_processed_dir(jpk, tmp_path):
+    import shutil
+
+    local = tmp_path / DATA.name
+    shutil.copy(DATA, local)
+    j = JPK(local)
+    path = j.get_save_path("AFM")
+    assert path.parent.name == "processed"
+    assert path.parent.is_dir()
+    assert path.suffix == ".png"
