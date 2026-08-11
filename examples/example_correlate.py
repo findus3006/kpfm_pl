@@ -23,7 +23,7 @@ for file in files:
         z = k.Zurich(file)
         stream_names = z.stream_names()
         kpfm = z.average(stream_names[0], bintime=0.05)                               # Signal
-        z_triggers = z.laser_triggers(stream_names[1], reference=kpfm, slope_method=True)
+        z_triggers = z.laser_triggers(stream_names[1], reference=kpfm, method="slope")
 
 # Correlate the data, set smoothing parameters
 m = k.Match(kpfm, tt,

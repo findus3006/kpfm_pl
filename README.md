@@ -57,7 +57,7 @@ tt_triggers = ptu.laser_triggers()                         # from the marker cha
 z = Zurich("scan.txt")
 stream_names = z.stream_names()
 kpfm = z.average(stream_names[0], bintime=0.05)            # Signal
-z_triggers = z.laser_triggers(stream_names[1], reference=kpfm, slope_method=True)
+z_triggers = z.laser_triggers(stream_names[1], reference=kpfm, method="slope")
 
 # Align on the laser triggers
 m = Match(kpfm, tt,

@@ -13,7 +13,7 @@ Example
 >>> z = Zurich("scan.txt")
 >>> kpfm = z.average(bintime=0.05)
 >>> m = Match(kpfm, tt,
-...           kpfm_triggers=z.laser_triggers(reference=kpfm, slope_method=True),
+...           kpfm_triggers=z.laser_triggers(reference=kpfm, method="slope"),
 ...           timetrace_triggers=ptu.laser_triggers())
 >>> result = m.to_dict()
 """

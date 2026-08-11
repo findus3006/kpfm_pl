@@ -118,37 +118,41 @@ class Zurich:
                       meta={"stream": stream, "bintime": bintime, "averaged": True})
 
     # ------------------------------------------------------------------ triggers
-    def laser_triggers(self, stream: str = TRIGGER_STREAM, *, slope_method: bool = False,
-                       reference: Signal | None = None) -> dict[str, dict[str, float]] | None:
-        """Locate the two laser triggers in a trigger ``stream``.
+    def laser_triggers(self, stream: str = TRIGGER_STREAM, *, method: str = "threshold",
+                       reference: Signal | None = None,
+                       slope_threshold: float = 0.1) -> dict[str, Any] | None:
+        """Locate the laser triggers in a trigger ``stream``.
 
         Parameters
         ----------
         stream :
             Trigger stream name.
-        slope_method :
-            When ``True`` locate triggers via the steepest rising/falling slopes
-            instead of thresholding.
+        method :
+            ``"threshold"`` (default) locates the on-pulse edges from a
+            ``[0, 1]`` feature-scaled threshold. ``"slope"`` detects **all**
+            rising and falling flanks of the scaled signal, keeps them in the
+            ``"all"`` entry of the returned dict, and reports the first and
+            last flank as ``left``/``right``.
         reference :
             Optional averaged :class:`Signal`; when given, trigger indices are
             mapped onto its (binned) time axis.
+        slope_threshold :
+            Fraction of the maximum ``|diff|`` used to qualify a slope sample
+            as a flank (only used by ``method="slope"``).
 
         Returns
         -------
         dict or None
-            ``{"left": {"index", "time"}, "right": {"index", "time"}}``.
+            ``{"left": {"index", "time"}, "right": {"index", "time"},
+            "all": ndarray[[index, time], ...]}`` -- the ``"all"`` array holds
+            every detected flank (for ``"threshold"`` just the two edges).
+            ``None`` if no trigger is found.
         """
         value = self.streams[stream]["value"]
         time = self.streams[stream]["time"]
         scaled = feature_scale(value)
-        
-        if slope_method:
-            slope = np.diff(scaled)
-            left_idx = int(np.argmin(slope))
-            right_idx = int(np.argmax(slope))
-            if left_idx > right_idx:
-                left_idx, right_idx = right_idx, left_idx
-        else:
+
+        if method == "threshold":
             on = np.where(scaled >= 0.1)[0]
             if on.size == 0:
                 warnings.warn(
@@ -157,19 +161,77 @@ class Zurich:
                     stacklevel=2,
                 )
                 return None
+            if on.size < 2:
+                warnings.warn(
+                    f"{self.filepath.stem}: fewer than two on-samples in {stream}.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                return None
             half = on.size // 2
-            left_idx = int(np.max(on[:half])) if half else int(on[0])
+            left_idx = int(np.max(on[:half]))
             right_idx = int(np.max(on[half:]))
+            all_idx = np.array([left_idx, right_idx], dtype=int)
+        elif method == "slope":
+            slope = np.diff(scaled)
+            max_abs = float(np.max(np.abs(slope))) if slope.size else 0.0
+            if max_abs == 0 or not np.isfinite(max_abs):
+                warnings.warn(
+                    f"{self.filepath.stem}: no slope trigger found in {stream}.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                return None
+            thr = slope_threshold * max_abs
+            # Walk the derivative and collect one index per contiguous flank,
+            # reporting the post-transition sample of the steepest step.
+            flanks: list[int] = []
+            i, n = 0, len(slope)
+            while i < n:
+                if slope[i] > thr:
+                    j = i
+                    while j < n and slope[j] > thr:
+                        j += 1
+                    peak = i + int(np.argmax(slope[i:j]))
+                    flanks.append(peak + 1)
+                    i = j
+                elif slope[i] < -thr:
+                    j = i
+                    while j < n and slope[j] < -thr:
+                        j += 1
+                    peak = i + int(np.argmin(slope[i:j]))
+                    flanks.append(peak + 1)
+                    i = j
+                else:
+                    i += 1
+            if len(flanks) < 2:
+                warnings.warn(
+                    f"{self.filepath.stem}: fewer than two flanks in {stream}.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                return None
+            all_idx = np.array(sorted(flanks), dtype=int)
+            left_idx, right_idx = int(all_idx[0]), int(all_idx[-1])
+        else:
+            raise ValueError(
+                f"Unknown method {method!r}; expected 'threshold' or 'slope'."
+            )
 
         left_t, right_t = float(time[left_idx]), float(time[right_idx])
+        all_times = time[all_idx].astype(float)
         if reference is not None:
-            ref_t = np.asarray(reference["x"])
+            ref_t = np.asarray(reference["x"], dtype=float)
             left_idx = nearest_index(ref_t, left_t)
             right_idx = nearest_index(ref_t, right_t)
             left_t, right_t = float(ref_t[left_idx]), float(ref_t[right_idx])
+            all_idx = np.array([nearest_index(ref_t, t) for t in all_times], dtype=int)
+            all_times = ref_t[all_idx].astype(float)
 
         print(f"{self.filepath.stem}: trigger spacing {right_t - left_t:.2f} s")
-        return trigger_dict(left_idx, left_t, right_idx, right_t)
+        out = trigger_dict(left_idx, left_t, right_idx, right_t)
+        out["all"] = np.column_stack([all_idx, all_times])
+        return out
 
     def find_peaks(self, stream: str, prominence: float = 2.0, left_drop: float = 0.3,
                    **kwargs) -> np.ndarray:

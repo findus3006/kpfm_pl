@@ -82,9 +82,12 @@ TRIGGER = """% TrigStream, chunk info
 def test_laser_triggers_threshold(tmp_path):
     z = Zurich(_write(tmp_path, TRIGGER))
     trig = z.laser_triggers("TrigStream")
-    assert set(trig) == {"left", "right"}
+    assert {"left", "right", "all"} <= set(trig)
     assert trig["left"]["index"] == 3
     assert trig["right"]["index"] == 5
+    # "all" holds [index, time] rows for the two threshold edges
+    assert trig["all"].shape == (2, 2)
+    assert trig["all"][0, 0] == 3 and trig["all"][1, 0] == 5
 
 
 def test_laser_triggers_none_when_flat(tmp_path):
@@ -94,6 +97,16 @@ def test_laser_triggers_none_when_flat(tmp_path):
         assert z.laser_triggers("Flat") is None
 
 
+def test_laser_triggers_threshold_single_on_sample_returns_none(tmp_path):
+    # only one sample crosses the 0.1 threshold -> degenerate, refuse to guess
+    text = "% TrigStream, x\n" + "".join(
+        f"{i}.0;{1.0 if i == 3 else 0.0}\n" for i in range(6)
+    )
+    z = Zurich(_write(tmp_path, text))
+    with pytest.warns(RuntimeWarning, match="fewer than two on-samples"):
+        assert z.laser_triggers("TrigStream") is None
+
+
 def test_laser_triggers_with_reference_maps_indices(tmp_path):
     z = Zurich(_write(tmp_path, TRIGGER))
     ref = Signal(np.linspace(0.0, 8.0, 5), np.zeros(5))
@@ -101,6 +114,62 @@ def test_laser_triggers_with_reference_maps_indices(tmp_path):
     # indices now point into the coarse reference axis
     assert 0 <= trig["left"]["index"] < len(ref["x"])
     assert 0 <= trig["right"]["index"] < len(ref["x"])
+    # the "all" array is remapped onto the reference axis too
+    assert trig["all"].shape == (2, 2)
+    assert all(0 <= int(i) < len(ref["x"]) for i in trig["all"][:, 0])
+
+
+# Multi-pulse trigger signal: on/off/on/off -> four flanks total.
+MULTI_TRIGGER = """% TrigStream, chunk info
+0.0;0.0
+1.0;0.0
+2.0;1.0
+3.0;1.0
+4.0;0.0
+5.0;0.0
+6.0;1.0
+7.0;1.0
+8.0;0.0
+9.0;0.0
+"""
+
+
+def test_laser_triggers_slope_finds_all_flanks(tmp_path):
+    z = Zurich(_write(tmp_path, MULTI_TRIGGER))
+    trig = z.laser_triggers("TrigStream", method="slope")
+    assert trig is not None
+    # four flanks: rise@2, fall@4, rise@6, fall@8 (post-transition samples)
+    assert trig["all"].shape == (4, 2)
+    assert list(trig["all"][:, 0]) == [2, 4, 6, 8]
+    # first and last flank become left/right; times track the parsed axis
+    t_axis = z.streams["TrigStream"]["time"]
+    assert trig["left"]["index"] == 2
+    assert trig["right"]["index"] == 8
+    assert trig["left"]["time"] == float(t_axis[2])
+    assert trig["right"]["time"] == float(t_axis[8])
+
+
+def test_laser_triggers_slope_none_when_flat(tmp_path):
+    text = ("% Flat, x\n" + "".join(f"{i}.0;0.0\n" for i in range(5)))
+    z = Zurich(_write(tmp_path, text))
+    with pytest.warns(RuntimeWarning, match="no slope trigger"):
+        assert z.laser_triggers("Flat", method="slope") is None
+
+
+def test_laser_triggers_slope_single_flank_returns_none(tmp_path):
+    # only one rising edge, no falling edge -> fewer than two flanks
+    text = "% TrigStream, x\n" + "".join(
+        f"{i}.0;{0.0 if i < 3 else 1.0}\n" for i in range(6)
+    )
+    z = Zurich(_write(tmp_path, text))
+    with pytest.warns(RuntimeWarning, match="fewer than two flanks"):
+        assert z.laser_triggers("TrigStream", method="slope") is None
+
+
+def test_laser_triggers_unknown_method_raises(tmp_path):
+    z = Zurich(_write(tmp_path, TRIGGER))
+    with pytest.raises(ValueError, match="Unknown method"):
+        z.laser_triggers("TrigStream", method="bogus")
 
 
 # --- parser-level error propagation (added alongside the error-handling work) ---

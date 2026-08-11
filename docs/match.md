@@ -34,7 +34,7 @@ tt_triggers = ptu.laser_triggers()
 z = k.Zurich("scan.txt")
 streams = z.stream_names()
 kpfm = z.average(streams[0], bintime=0.05)
-z_triggers = z.laser_triggers(streams[1], reference=kpfm, slope_method=True)
+z_triggers = z.laser_triggers(streams[1], reference=kpfm, method="slope")
 
 m = k.Match(kpfm, tt,
             kpfm_triggers=z_triggers,

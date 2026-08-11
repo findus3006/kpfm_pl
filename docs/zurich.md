@@ -57,19 +57,21 @@ kpfm = z.average(z.stream_names()[0], bintime=0.05)  # time-averaged Signal
 
 ```python
 triggers = z.laser_triggers(z.stream_names()[1],
-                            reference=kpfm, slope_method=True)
+                            reference=kpfm, method="slope")
 ```
 
-Locates the two laser triggers in a trigger stream and returns
-`{"left": {"index", "time"}, "right": {"index", "time"}}` – the format
-consumed by [`Match`](match.md). Returns `None` (with a warning) if no
-trigger is found.
+Locates the laser triggers in a trigger stream and returns
+`{"left": {"index", "time"}, "right": {"index", "time"}, "all": ...}` – the
+`left`/`right` format consumed by [`Match`](match.md). The `"all"` entry is an
+`(N, 2)` array of `[index, time]` for every detected flank. Returns `None`
+(with a warning) if no trigger is found.
 
 | Parameter | Default | Meaning |
 |-----------|---------|---------|
 | `stream` | `TRIGGER_STREAM` | trigger stream name |
-| `slope_method` | `False` | when `True`, locate triggers via the steepest rising/falling slopes; otherwise threshold the min-max scaled signal at `0.1` |
+| `method` | `"threshold"` | `"threshold"` min-max scales the signal and thresholds at `0.1` to find the on-pulse edges; `"slope"` detects **all** rising/falling flanks of the scaled signal via `np.diff`, stores them in `"all"`, and reports the first and last as `left`/`right` |
 | `reference` | `None` | optional averaged `Signal`; when given, trigger indices/times are mapped onto its (binned) time axis |
+| `slope_threshold` | `0.1` | fraction of the max `|diff|` used to qualify a slope sample as a flank (only used by `method="slope"`) |
 
 Passing `reference=kpfm` is important when correlating with an averaged KPFM
 signal, so the trigger `index` values line up with the binned axis used by
