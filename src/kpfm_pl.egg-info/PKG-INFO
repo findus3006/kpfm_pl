@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: kpfm_pl
-Version: 0.1.0
+Version: 1.3.0
 Summary: Toolbox for loading and correlating KPFM, photoluminescence (PTU) and AFM (JPK) data.
 Author: Stefan
 License: MIT

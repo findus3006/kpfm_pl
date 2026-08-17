@@ -71,7 +71,10 @@ class JPK:
             for page in tif.pages:
                 tags = {tag.name: tag.value for tag in page.tags.values()}
                 name = tags.get(_TAG_NAME)
-
+                if name == None:
+                    # cantilever-calibration-info.sensitivity
+                    # cantilever-calibration-info.spring-constant
+                    print(tags)
                 trace = "retrace" if "retrace : true" in str(tags.get(_TAG_TRACE, "")) else ""
                 self._update_axes(tags, name)
 

@@ -130,11 +130,11 @@ with a `Test data/` folder holding sample `.ptu`, `.txt` and `.jpk` files:
 ```python
 from kpfm_pl import build_database, filter_entries, save_json
 
-entries = build_database(r"C:\Users\rolfs\Desktop\Claude correlate")
-save_json(entries, r"C:\Users\rolfs\Desktop\Claude correlate\database.json")
+entries = build_database("Path") #Specify the path to the directory containing the measurement pairs
+save_json(entries, "Path" + "\\database.json") #Save the database to a JSON file
 
-green_pairs = filter_entries(entries, wavelength_nm=532.0)
-zurich, ptu = green_pairs[0].load()
+green_pairs = filter_entries(entries, wavelength_nm=532.0) #Filter the entries by wavelength
+zurich, ptu = green_pairs[0].load(dark_counts=2.25) #Load the first entry with dark count correction
 ```
 
 See [`docs/database.md`](docs/database.md) for the full manual (archive layout,
