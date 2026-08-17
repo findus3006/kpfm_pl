@@ -25,6 +25,7 @@ _TAG_NAME = "32850"
 _TAG_TRACE = "32851"
 _TAG_NX, _TAG_NY = "ImageWidth", "ImageLength"
 _TAG_DX, _TAG_DY = "32834", "32835"
+_TAG_META = "32791"
 
 # Channel type -> (scale tag, offset tag, units).
 _CHANNEL_CALIBRATION = {
@@ -71,10 +72,13 @@ class JPK:
             for page in tif.pages:
                 tags = {tag.name: tag.value for tag in page.tags.values()}
                 name = tags.get(_TAG_NAME)
-                if name == None:
-                    # cantilever-calibration-info.sensitivity
-                    # cantilever-calibration-info.spring-constant
-                    print(tags)
+                if name is None:
+                    raw_calibration = tags.get(_TAG_META, "")
+                    self.calibration = {}
+                    for line in raw_calibration.split("\n"):
+                        if " : " in line:
+                            key, value = line.split(" : ", 1)
+                            self.calibration[key.strip()] = value.strip()
                 trace = "retrace" if "retrace : true" in str(tags.get(_TAG_TRACE, "")) else ""
                 self._update_axes(tags, name)
 
@@ -123,7 +127,7 @@ class JPK:
             Channel key from :meth:`channel_names`.
         process :
             When ``True`` apply default processing (line-levelling + zeroing for
-            height channels).
+            height channels) and Voltage to Force conversion for precision-6 channel.
         """
         data = self.channels[channel]
         if process:
@@ -137,10 +141,11 @@ class JPK:
         names = channels if channels else self.channel_names()
         return {name: self.image(name, process) for name in names}
 
-    @staticmethod
-    def _process(channel: str, data: np.ndarray) -> np.ndarray:
+    def _process(self, channel: str, data: np.ndarray) -> np.ndarray:
         if "height" in channel.lower():
             return set_zero(linear_line_level(data))
+        if "precision-6" in channel.lower():
+            return self.calibration['cantilever-calibration-info.sensitivity']*self.calibration['cantilever-calibration-info.spring-constant']*data
         return data
 
     def get_save_path(self, name: str = "AFM"):
