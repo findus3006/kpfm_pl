@@ -1,4 +1,5 @@
 '''This file shows how to align KPFM and timetrace data with the files ptu_test1 and KPFM_test1 found in the Test data folder.
+The files kpfm_test1_ and ptu_test1_ are legacy files to verify their functionality.
 The relevant packages are imported, the file path is defined, the files loaded depending on their type and then correlated.
 In the end the data is plotted. '''
 
@@ -10,13 +11,14 @@ from pathlib import Path # This allows us to not specify the full path to the te
 
 # Define file path. Select a .ptu and a .txt file that are to be correlated
 script_dir = Path(__file__).parent
-files = k.pick_files(script_dir / 'Test data', as_path=False)
+files = [str(script_dir / 'Test data' / 'test3_DR1_360s_10Hz_4.67W_Scan1_001.ptu'), 
+         str(script_dir / 'Test data' / 'test3_JS249_02,03_DR1_10Hz_AM17_Scan1.txt')]
 
 # Iterate over files, load and get laser triggers
 for file in files:
     if file.endswith('.ptu'): # If the file is a PTU file
         ptu = k.PTU(file, dark_counts=2.25)
-        tt = ptu.time_trace(bintime=0.05, laser_pulse=False)        # Signal
+        tt = ptu.time_trace(bintime=0.05)        # Signal
         tt_triggers = ptu.laser_triggers()
 
     elif file.endswith('.txt'): # If the file is a Zurich file

@@ -86,7 +86,8 @@ docs/               per-module manuals (ptu, zurich, jpk, match, database)
   `README.md` quick-start/examples, and the example scripts in `src/examples/`
   if they use the changed call.
 - The example scripts double as living documentation; keep them runnable
-  against the files in `src/examples/Test data/`.
+  against the files in `src/examples/Test data/`. A legacy script `example_correlate_legacy.py` 
+  is provided to verify the functionality of the legacy files.
 
 ## Gotchas specific to this codebase
 
@@ -109,6 +110,9 @@ docs/               per-module manuals (ptu, zurich, jpk, match, database)
 - **PTU files can be untrusted input**: string/blob lengths are validated
   against the remaining file size (`_read_length_prefixed`). Preserve these
   bounds checks.
+
+## Workflow
+- You may invoke subagents to handoff tasks to speed up work or to minimize context window size.
 
 ## Scope & safety
 
