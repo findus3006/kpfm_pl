@@ -7,7 +7,7 @@ or colormaps live in the loader – those belong to the optional
 [`plotting`](../src/kpfm_pl/plotting.py) helpers.
 
 The runnable example is
-[`src/examples/example_jpk.py`](../src/examples/example_jpk.py), which loads
+[`examples/example_jpk.py`](../examples/example_jpk.py), which loads
 `jpk_test_(Drift1).jpk` from the `Test data/` folder.
 
 ## Loading a file
@@ -23,6 +23,9 @@ The reader iterates over the TIFF pages, reads JPK's private tags, applies the
 per-channel calibration (`value = raw * scale + offset`) and flips the image
 vertically so row 0 is at the bottom. Channels are keyed by
 `"<name> <trace>"` (a `retrace` suffix distinguishes retrace scans).
+The unnamed 64x64 page is retained as `jpk.thumbnail` for reference but is not
+listed as a measurement channel. Its scan dimensions and calibration metadata
+are still used for the calibrated channels.
 
 Attributes after loading:
 
@@ -31,6 +34,7 @@ Attributes after loading:
 | `channels` | `{key: ndarray}` calibrated channel arrays |
 | `units` | `{key: unit}` z-unit per channel |
 | `x`, `y` | physical scan axes (metres), derived from the scan factors `dx`/`dy` |
+| `thumbnail` | unnamed preview page, separate from the measurement channels |
 
 ## Channel calibration
 
@@ -42,11 +46,16 @@ Calibration is looked up by the channel's type tag. Known channel types:
 | `phase` | `deg` |
 | `vDeflection` | `N` |
 | `photon-counter0`, `photon-counter1` | `counts/s` |
-| `precision-5`, `precision-6`, `precision-7` | `V` |
+| `precision-5`, `precision-6`, `precision-7` (raw) | `V` |
 | `error` | `V` |
 
 Channels with an unknown type are returned uncalibrated with empty units. If a
 known channel is missing its scale/offset tag, a `ValueError` is raised.
+The cantilever sensitivity and spring constant are parsed into SI values when
+the file is loaded. With processing enabled, a Precision 6 voltage image is
+multiplied by these two calibration values and returned in newtons. Missing,
+malformed or non-finite force calibration raises a `ValueError` instead of
+returning an incorrectly calibrated image.
 
 ## Getting channels as Images
 
@@ -58,7 +67,7 @@ all_imgs = jpk.images(["Height (measured)", "Precision 5"])  # {name: Image}
 
 - `image(channel, process=True)` – return one channel. When `process=True`,
   height channels are line-levelled (`linear_line_level`) and zeroed
-  (`set_zero`); other channels are returned unprocessed.
+  (`set_zero`), and Precision 6 channels are converted from volts to newtons.
 - `images(channels=None, process=True)` – return several channels as
   `{name: Image}` (all channels when `channels=None`).
 - `axes()` – `{"x": ..., "y": ...}` scan axes in metres.
@@ -71,7 +80,7 @@ all_imgs = jpk.images(["Height (measured)", "Precision 5"])  # {name: Image}
 |-------------------|---------|
 | `image.extent` | `(xmin, xmax, ymin, ymax)` in the stored unit (metres) |
 | `image.extent_um` | the extent rescaled to micrometres |
-| `image.extent_scaled(unit)` | extent in `"m"`, `"mm"`, `"um"`/`"µm"` or `"nm"` |
+| `image.extent_scaled(unit)` | extent in `"m"`, `"mm"`, `"um"`/`"µm"` or `"nm"`; x/y source units are scaled independently |
 
 ```python
 import matplotlib.pyplot as plt

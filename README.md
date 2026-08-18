@@ -7,10 +7,11 @@ combined **KPFM**, **photoluminescence** (PicoQuant PTU / TCSPC) and **AFM**
 The design goals:
 
 - **One package, three file types** – PTU, Zurich `.txt` and JPK `.jpk`.
-- **Consistent return format** – every loader/analysis call returns a
-  plotting-friendly [`Signal`](src/kpfm_pl/core.py) or
-  [`Image`](src/kpfm_pl/core.py) object that behaves like a dict
-  (`s["x"], s["y"], s["label"], s["units"], s["meta"]`).
+- **Consistent data products** – primary plottable loader/analysis results use
+  the [`Signal`](src/kpfm_pl/core.py) or [`Image`](src/kpfm_pl/core.py)
+  containers, while metadata, statistics and fit summaries use documented
+  dictionaries or arrays. `Signal` and `Image` support dictionary-style access
+  and helpers (`s["x"], s["y"], s["label"], s["units"], s["meta"]`).
 - **No plotting in the core** – data is returned ready to drop into matplotlib.
 - **Flexible getters** instead of hard-coded, side-effect-heavy methods.
 
@@ -75,8 +76,8 @@ t = m.timetrace_signal()   # aligned time trace Signal (on shared grid)
 fig, ax = plt.subplots(figsize=(16, 9))
 ax.plot(k["x"], k["y"], label=k["label"])
 ax.plot(t["x"], t["y"], label=t["label"])
-ax.axvline(k["meta"]["triggers"]["left"], color="k", linestyle="--", label="Left laser trigger")
-ax.axvline(k["meta"]["triggers"]["right"], color="k", linestyle="--", label="Right laser trigger")
+ax.axvline(k["meta"]["triggers"]["left"]["time"], color="k", linestyle="--", label="Left laser trigger")
+ax.axvline(k["meta"]["triggers"]["right"]["time"], color="k", linestyle="--", label="Right laser trigger")
 ax.set_ylabel("Amplitude (V)")
 ax.set_xlabel("Time (s)")
 ax.set_title("Correlation between KPFM signal and time trace")
@@ -116,12 +117,13 @@ Zurich lock-in reader.
 
 ## Example scripts
 
-Runnable end-to-end scripts live in [`src/examples/`](src/examples), together
+Runnable end-to-end scripts live in [`examples/`](examples), together
 with a `Test data/` folder holding sample `.ptu`, `.txt` and `.jpk` files:
 
 | Script | What it shows |
 |--------|---------------|
-| `example_correlate.py` | Load a `.ptu` + `.txt` pair and align them with `Match` |
+| `example_correlate.py` | Load a current marker-based `.ptu` + `.txt` pair and align them with `Match` |
+| `example_correlate_legacy.py` | Verify alignment of a legacy no-marker PTU via `laser_pulse=False` |
 | `example_ptu.py` | Read TCSPC data, threshold and fit a lifetime histogram |
 | `example_jpk.py` | Load AFM channels and plot with the `plotting` helpers |
 

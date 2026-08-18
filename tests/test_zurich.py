@@ -85,9 +85,8 @@ def test_laser_triggers_threshold(tmp_path):
     assert {"left", "right", "all"} <= set(trig)
     assert trig["left"]["index"] == 3
     assert trig["right"]["index"] == 5
-    # "all" holds [index, time] rows for the two threshold edges
-    assert trig["all"].shape == (2, 2)
-    assert trig["all"][0, 0] == 3 and trig["all"][1, 0] == 5
+    # "all" uses the same point dictionaries as the selected pair.
+    assert [point["index"] for point in trig["all"]] == [3, 5]
 
 
 def test_laser_triggers_none_when_flat(tmp_path):
@@ -114,9 +113,12 @@ def test_laser_triggers_with_reference_maps_indices(tmp_path):
     # indices now point into the coarse reference axis
     assert 0 <= trig["left"]["index"] < len(ref["x"])
     assert 0 <= trig["right"]["index"] < len(ref["x"])
-    # the "all" array is remapped onto the reference axis too
-    assert trig["all"].shape == (2, 2)
-    assert all(0 <= int(i) < len(ref["x"]) for i in trig["all"][:, 0])
+    # every point is remapped onto the reference axis too
+    assert len(trig["all"]) == 2
+    assert all(0 <= point["index"] < len(ref["x"]) for point in trig["all"])
+    assert all(
+        point["time"] == ref["x"][point["index"]] for point in trig["all"]
+    )
 
 
 # Multi-pulse trigger signal: on/off/on/off -> four flanks total.
@@ -139,14 +141,22 @@ def test_laser_triggers_slope_finds_all_flanks(tmp_path):
     trig = z.laser_triggers("TrigStream", method="slope")
     assert trig is not None
     # four flanks: rise@2, fall@4, rise@6, fall@8 (post-transition samples)
-    assert trig["all"].shape == (4, 2)
-    assert list(trig["all"][:, 0]) == [2, 4, 6, 8]
+    assert [point["index"] for point in trig["all"]] == [2, 4, 6, 8]
     # first and last flank become left/right; times track the parsed axis
     t_axis = z.streams["TrigStream"]["time"]
     assert trig["left"]["index"] == 2
     assert trig["right"]["index"] == 8
     assert trig["left"]["time"] == float(t_axis[2])
     assert trig["right"]["time"] == float(t_axis[8])
+
+
+def test_laser_triggers_threshold_finds_each_contiguous_window(tmp_path):
+    z = Zurich(_write(tmp_path, MULTI_TRIGGER))
+    trig = z.laser_triggers("TrigStream", method="threshold")
+    assert trig is not None
+    assert [point["index"] for point in trig["all"]] == [2, 3, 6, 7]
+    assert trig["left"] == trig["all"][0]
+    assert trig["right"] == trig["all"][-1]
 
 
 def test_laser_triggers_slope_none_when_flat(tmp_path):

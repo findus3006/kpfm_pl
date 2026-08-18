@@ -9,12 +9,17 @@ from __future__ import annotations
 
 import warnings
 from pathlib import Path
-from typing import Any
-
 import numpy as np
 
 from .core import Signal
-from .utils import bin_average, feature_scale, nearest_index, trigger_dict
+from .utils import (
+    TriggerCollection,
+    TriggerPoint,
+    bin_average,
+    feature_scale,
+    nearest_index,
+    trigger_dict,
+)
 
 __all__ = ["Zurich"]
 
@@ -120,7 +125,7 @@ class Zurich:
     # ------------------------------------------------------------------ triggers
     def laser_triggers(self, stream: str = TRIGGER_STREAM, *, method: str = "threshold",
                        reference: Signal | None = None,
-                       slope_threshold: float = 0.1) -> dict[str, Any] | None:
+                       slope_threshold: float = 0.1) -> TriggerCollection | None:
         """Locate the laser triggers in a trigger ``stream``.
 
         Parameters
@@ -144,8 +149,10 @@ class Zurich:
         -------
         dict or None
             ``{"left": {"index", "time"}, "right": {"index", "time"},
-            "all": ndarray[[index, time], ...]}`` -- the ``"all"`` array holds
-            every detected flank (for ``"threshold"`` just the two edges).
+            "all": [{"index", "time"}, ...]}``. The ``"all"`` list holds
+            every detected flank in the same point format as ``left`` and
+            ``right``. For threshold detection, every contiguous on-window
+            contributes its first and last sample.
             ``None`` if no trigger is found.
         """
         value = self.streams[stream]["value"]
@@ -168,10 +175,10 @@ class Zurich:
                     stacklevel=2,
                 )
                 return None
-            half = on.size // 2
-            left_idx = int(np.max(on[:half]))
-            right_idx = int(np.max(on[half:]))
-            all_idx = np.array([left_idx, right_idx], dtype=int)
+            starts = np.r_[on[0], on[1:][np.diff(on) > 1]]
+            ends = np.r_[on[:-1][np.diff(on) > 1], on[-1]]
+            all_idx = np.column_stack((starts, ends)).ravel().astype(int)
+            left_idx, right_idx = int(all_idx[0]), int(all_idx[-1])
         elif method == "slope":
             slope = np.diff(scaled)
             max_abs = float(np.max(np.abs(slope))) if slope.size else 0.0
@@ -230,8 +237,11 @@ class Zurich:
 
         print(f"{self.filepath.stem}: trigger spacing {right_t - left_t:.2f} s")
         out = trigger_dict(left_idx, left_t, right_idx, right_t)
-        out["all"] = np.column_stack([all_idx, all_times])
-        return out
+        points: list[TriggerPoint] = [
+            {"index": int(index), "time": float(trigger_time)}
+            for index, trigger_time in zip(all_idx, all_times, strict=True)
+        ]
+        return {**out, "all": points}
 
     def find_peaks(self, stream: str, prominence: float = 2.0, left_drop: float = 0.3,
                    **kwargs) -> np.ndarray:

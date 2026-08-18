@@ -6,10 +6,15 @@ reuse across the loaders and the :class:`~kpfm_pl.match.Match` class.
 
 from __future__ import annotations
 
+from typing import TypedDict
+
 import numpy as np
 from scipy import ndimage
 
 __all__ = [
+    "TriggerPoint",
+    "TriggerPair",
+    "TriggerCollection",
     "feature_scale",
     "feature_scale_params",
     "zscore",
@@ -27,6 +32,26 @@ __all__ = [
     "nearest_index",
     "trigger_dict",
 ]
+
+
+class TriggerPoint(TypedDict):
+    """One trigger location on a signal axis."""
+
+    index: int
+    time: float
+
+
+class TriggerPair(TypedDict):
+    """The shared left/right trigger representation used by the loaders."""
+
+    left: TriggerPoint
+    right: TriggerPoint
+
+
+class TriggerCollection(TriggerPair):
+    """A trigger pair plus every detected flank in chronological order."""
+
+    all: list[TriggerPoint]
 
 
 def feature_scale_params(
@@ -290,7 +315,7 @@ def nearest_index(axis: np.ndarray, value: float) -> int:
 
 def trigger_dict(
     left_index: int, left_time: float, right_index: int, right_time: float
-) -> dict[str, dict[str, float]]:
+) -> TriggerPair:
     """Assemble the standard laser-trigger dict shared by all loaders.
 
     Returns ``{"left": {"index", "time"}, "right": {"index", "time"}}`` with the

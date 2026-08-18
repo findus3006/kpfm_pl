@@ -2,12 +2,13 @@
 
 Loads PicoQuant `.ptu` TTTR-T3 files (TCSPC / photoluminescence) and exposes
 them as binned **time traces**, **lifetime histograms**, **FLID maps** and
-**multi-exponential lifetime fits**. Every public method returns a
-plotting-friendly [`Signal`](../src/kpfm_pl/core.py) or
-[`Image`](../src/kpfm_pl/core.py); there is no plotting inside the loader.
+**multi-exponential lifetime fits**. Primary plottable data products use the
+[`Signal`](../src/kpfm_pl/core.py) or [`Image`](../src/kpfm_pl/core.py)
+containers; fit summaries, triggers and raw event access use their documented
+dictionary/array forms. There is no plotting inside the loader.
 
 The runnable example is
-[`src/examples/example_ptu.py`](../src/examples/example_ptu.py), which uses
+[`examples/example_ptu.py`](../examples/example_ptu.py), which uses
 `ptu_test2_LaserPulse(...).ptu` from the `Test data/` folder.
 
 ## Loading a file
@@ -52,6 +53,12 @@ tt = ptu.time_trace(bintime=0.05, laser_pulse=True)   # Signal (x=s, y=counts)
 | `tstart`, `tend` | `0.0`, `None` | optional time window; `None` = full acquisition |
 | `laser_pulse` | `True` | see below |
 
+The requested time window is interpreted as the half-open interval
+`[tstart, tend)`. Every acquisition bin that overlaps it is retained, including
+a partial final bin, and `Signal.x` contains the selected bins' actual left-edge
+times. Thus an unaligned `tstart` can return a first x value earlier than
+`tstart` when that bin overlaps the requested interval.
+
 The `laser_pulse` flag refers to the **pulse generator in the laser driver**
 (e.g. a 10 MHz pulsed laser sends a pulse every 100 ns, which the PicoHarp
 needs as its sync reference):
@@ -68,17 +75,22 @@ needs as its sync reference):
   This is bad practice and only kept for backwards compatibility.
 
 The returned `Signal.meta` carries `bintime`, the per-bin `matrix`
-(time-bin × lifetime-bin counts) and `average_counts`.
+(time-bin × lifetime-bin counts) and `average_counts`. The row sum of `matrix`
+always equals `Signal.y`, including in the legacy `laser_pulse=False` path.
 
 ## Lifetime histogram
 
 ```python
 hist = ptu.lifetime_histogram()          # sums the cached time-trace matrix
-hist = ptu.lifetime_histogram(matrix)    # or pass an explicit count matrix
+hist = ptu.lifetime_histogram(matrix, bintime=0.05)  # explicit count matrix
 ```
 
 Returns a `Signal` of counts vs. lifetime-bin time (s). If no time trace has
-been built yet, a default one is created automatically.
+been built yet, a default one is created automatically. Histogram metadata
+records its contributing `time_bin_count`, `bintime` and
+`acquisition_duration`. Supply `bintime` with an explicit matrix when
+`dark_counts` is non-zero; without this provenance, `fit_lifetime()` rejects
+the fit instead of applying a correction derived from an unrelated trace.
 
 ## Thresholding into on/off states
 
@@ -89,7 +101,9 @@ states = ptu.threshold(off=0.1, on=0.6)   # {"on": Signal, "off": Signal}
 `on`/`off` are fractions of the time-trace maximum. Time bins with counts
 `>= on * max` contribute to the `"on"` histogram, bins `< off * max` to
 `"off"`. Calling `threshold()` with defaults (`off=0`, `on=1`) puts the whole
-matrix into `"on"`.
+matrix into `"on"`. Each histogram records the number and duration of the
+selected bins, so lifetime fitting applies dark-count correction only for the
+state that contributed to that histogram.
 
 ## Lifetime fitting
 
@@ -155,12 +169,17 @@ Key parameters:
 | `x_min`/`x_max`/`y_min`/`y_max` | `None` | manual bounds (time in s, counts on y) |
 | `bintime` | `0.05` | time-bin width (s) |
 | `n_exp` | `1` | exponentials per per-bin fit |
-| `bins` | `1` | lifetime-axis binning factor |
+| `bins` | `1` | lifetime-axis reduction factor used before each fit |
+| `lifetime_bins` | `100` | histogram bins on the fitted-lifetime axis (1–1024) |
+| `intensity_bins` | `100` | histogram bins on the raw-count axis (1–1024) |
 | `mode`/`fraction`/`smoothing`/`start`/`end` | – | fit-window selection, as in `fit_lifetime` |
 | `sigma` | `1.5` | Gaussian smoothing of the 2-D histogram (`0` disables) |
 | `isolated` | `False` | when `True`, return one `Image` per exponential; otherwise a single mean-lifetime map |
 
-Per-bin `taus`/`counts` are stored in `Image.meta`.
+Per-bin `taus`/`counts` are stored in `Image.meta`. `counts` contains the raw
+photon total in each time bin; lifetime curves are normalised only for fitting.
+The two explicit histogram sizes keep FLID memory bounded independently of the
+measurement duration.
 
 `get_roi_matrix(roi, bintime)` returns the raw photon count matrix filtered by
 an ROI's time window and count threshold (useful to build custom histograms).
@@ -168,7 +187,7 @@ an ROI's time window and count threshold (useful to build custom histograms).
 ## Laser triggers and markers
 
 ```python
-triggers = ptu.laser_triggers(marker_channel=4)
+triggers = ptu.laser_triggers(marker_channel=4, reference=tt)
 markers  = ptu.get_markers(marker_channel=4)   # all marker times (s)
 ```
 
@@ -177,3 +196,8 @@ markers  = ptu.get_markers(marker_channel=4)   # all marker times (s)
 edges (when `laser_pulse=False` was used). This is the trigger format consumed
 by [`Match`](match.md). Both methods warn and return `None` if no marker is
 found. `laser_triggers` returns exactly two triggers no matter how many triggers are in the specified marker channel. `get_markers` returns all triggers in the specified marker channel.
+Pass the time trace used downstream as `reference` to map both indices and
+times onto that axis. A marker pair outside the reference window warns and
+returns `None`, rather than clamping an index while retaining an unrelated
+absolute marker time. `get_markers()` remains the source of exact hardware
+marker times.

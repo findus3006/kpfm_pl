@@ -18,7 +18,7 @@ import numpy as np
 
 from .core import Image, Signal
 from .fitting import MultiExpFit
-from .utils import fit_window_mask, nearest_index, trigger_dict
+from .utils import TriggerPair, fit_window_mask, nearest_index, trigger_dict
 
 __all__ = ["PTU"]
 
@@ -73,15 +73,17 @@ class PTU:
 
     # ------------------------------------------------------------------ header
     def _read_header(self, fh) -> None:
-        if fh.read(8).decode("utf-8").strip("\0") != "PQTTTR":
+        if self._read_exact(fh, 8, "magic").decode("utf-8", errors="replace").strip("\0") != "PQTTTR":
             raise ValueError(f"{self.filepath} is not a valid PTU file.")
-        fh.read(8)  # version, unused
+        self._read_exact(fh, 8, "version")  # version, unused
 
         tags: list[tuple[str, Any]] = []
         while True:
-            ident = fh.read(32).decode("utf-8").strip("\0")
-            idx = struct.unpack("<i", fh.read(4))[0]
-            typ = struct.unpack("<i", fh.read(4))[0]
+            ident = self._read_exact(fh, 32, "tag identifier").decode(
+                "utf-8", errors="replace"
+            ).strip("\0")
+            idx = struct.unpack("<i", self._read_exact(fh, 4, "tag index"))[0]
+            typ = struct.unpack("<i", self._read_exact(fh, 4, "tag type"))[0]
             name = f"{ident}({idx})" if idx > -1 else ident
             tags.append((name, self._read_tag_value(fh, typ)))
             if ident == "Header_End":
@@ -98,6 +100,16 @@ class PTU:
         self.acquisition_time = self._tags["MeasDesc_AcquisitionTime"] * 1e-3
 
     @staticmethod
+    def _read_exact(fh, n: int, field: str) -> bytes:
+        """Read exactly ``n`` bytes or reject a truncated PTU field."""
+        raw = fh.read(n)
+        if len(raw) != n:
+            raise ValueError(
+                f"Truncated PTU {field}: expected {n} bytes, got {len(raw)}."
+            )
+        return raw
+
+    @staticmethod
     def _read_length_prefixed(fh) -> bytes:
         """Read a ``<q>`` length prefix and that many bytes, bounded by the file size.
 
@@ -105,32 +117,36 @@ class PTU:
         is validated against the bytes actually remaining before allocating -- a
         corrupt or malicious tag can otherwise request a multi-gigabyte read.
         """
-        n = struct.unpack("<q", fh.read(8))[0]
+        n = struct.unpack("<q", PTU._read_exact(fh, 8, "payload length"))[0]
         cur = fh.tell()
         end = fh.seek(0, 2)
         fh.seek(cur)
         if n < 0 or n > end - cur:
-            raise ValueError(f"Invalid PTU string length {n} (only {end - cur} bytes left).")
-        return fh.read(n)
+            raise ValueError(f"Invalid PTU payload length {n} (only {end - cur} bytes left).")
+        return PTU._read_exact(fh, n, "payload")
 
     @staticmethod
     def _read_tag_value(fh, typ: int) -> Any:
         T = _TAG_TYPES
         if typ == T["Empty8"]:
-            fh.read(8)
+            PTU._read_exact(fh, 8, "empty tag value")
             return "<empty>"
         if typ == T["Bool8"]:
-            return struct.unpack("<q", fh.read(8))[0] != 0
-        if typ in (T["Int8"], T["BitSet64"], T["Color8"], T["Float8Array"], T["BinaryBlob"]):
-            val = struct.unpack("<q", fh.read(8))[0]
-            if typ == T["BinaryBlob"]:
-                fh.seek(val, 1)
-            return val
+            return struct.unpack("<q", PTU._read_exact(fh, 8, "boolean tag value"))[0] != 0
+        if typ in (T["Int8"], T["BitSet64"], T["Color8"]):
+            return struct.unpack("<q", PTU._read_exact(fh, 8, "integer tag value"))[0]
         if typ == T["Float8"]:
-            return struct.unpack("<d", fh.read(8))[0]
+            return struct.unpack("<d", PTU._read_exact(fh, 8, "float tag value"))[0]
         if typ == T["TDateTime"]:
-            f = struct.unpack("<d", fh.read(8))[0]
+            f = struct.unpack("<d", PTU._read_exact(fh, 8, "date tag value"))[0]
             return _time.gmtime(int((f - 25569) * 86400))
+        if typ == T["Float8Array"]:
+            raw = PTU._read_length_prefixed(fh)
+            if len(raw) % 8:
+                raise ValueError(
+                    f"Invalid PTU Float8Array payload length {len(raw)}; expected a multiple of 8."
+                )
+            return np.frombuffer(raw, dtype="<f8").copy()
         if typ == T["AnsiString"]:
             raw = PTU._read_length_prefixed(fh)
             try:
@@ -139,6 +155,8 @@ class PTU:
                 return raw.decode("latin1", "ignore").strip("\0")
         if typ == T["WideString"]:
             return PTU._read_length_prefixed(fh).decode("utf-16le", errors="ignore").strip("\0")
+        if typ == T["BinaryBlob"]:
+            return PTU._read_length_prefixed(fh)
         raise ValueError(f"Unknown PTU tag type: {typ}")
 
     # ----------------------------------------------------------------- records
@@ -231,46 +249,105 @@ class PTU:
             and its rising/falling edges are stored as triggers. This is bad
             practice and only kept for backwards compatibility.
         """
+        if not np.isfinite(bintime) or bintime <= 0:
+            raise ValueError("bintime must be a positive finite number.")
         if getattr(self, "_bintime", None) != bintime:
             self._build_matrix(bintime)
         tend = self.acquisition_time if tend is None else min(tend, self.acquisition_time)
         tstart = max(tstart, 0.0)
 
-        start_bin, end_bin = int(tstart / bintime), int(tend / bintime)
+        # Select every acquisition bin that overlaps the requested half-open
+        # interval [tstart, tend). Labels remain the actual bin-left times.
+        bin_left = np.arange(self._matrix.shape[0], dtype=float) * bintime
+        bin_right = np.minimum(bin_left + bintime, self.acquisition_time)
+        start_bin = int(np.searchsorted(bin_right, tstart, side="right"))
+        end_bin = int(np.searchsorted(bin_left, tend, side="left"))
+        end_bin = max(end_bin, start_bin)
         sliced = self._matrix[start_bin:end_bin, :]
-        time = tstart + np.arange(sliced.shape[0]) * bintime
+        time = bin_left[start_bin:end_bin]
+        bin_durations = bin_right[start_bin:end_bin] - time
         trace = sliced.sum(axis=1)
+        selected_duration = float(np.sum(bin_durations))
         meta: dict[str, Any] = {
             "bintime": bintime,
             "matrix": sliced,
-            "average_counts": trace.mean() / bintime if len(trace) else 0.0,
+            "bin_durations": bin_durations,
+            "acquisition_duration": selected_duration,
+            "average_counts": trace.sum() / selected_duration if selected_duration else 0.0,
         }
 
         if not laser_pulse:
             nz = np.nonzero(trace)[0]
             if len(nz):
-                core = trace[nz[0]:nz[-1] + 1]
+                core_slice = slice(nz[0], nz[-1] + 1)
+                core = trace[core_slice]
+                core_matrix = sliced[core_slice, :]
+                core_durations = bin_durations[core_slice]
+                discarded_durations = np.concatenate(
+                    (bin_durations[:nz[0]], bin_durations[nz[-1] + 1:])
+                )
                 pad = len(trace) - len(core)
-                trace = np.pad(core, (pad // 2, pad - pad // 2))
+                padding = (pad // 2, pad - pad // 2)
+                trace = np.pad(core, padding)
+                sliced = np.pad(core_matrix, (padding, (0, 0)))
+                bin_durations = np.concatenate(
+                    (
+                        discarded_durations[:padding[0]],
+                        core_durations,
+                        discarded_durations[padding[0]:],
+                    )
+                )
+                meta["matrix"] = sliced
+                meta["bin_durations"] = bin_durations
                 nz2 = np.nonzero(trace)[0]
                 meta["triggers"] = trigger_dict(
                     nz2[0], time[nz2[0]], nz2[-1], time[nz2[-1]])
+        self._tt_cache = {
+            "time": time, "trace": trace, "matrix": sliced, "bintime": bintime,
+            "bin_durations": bin_durations,
+            "acquisition_duration": selected_duration,
+        }
         if meta.get("triggers"):
-            self._tt_cache = {"time": time, "trace": trace, "matrix": sliced, "bintime": bintime, "triggers": meta["triggers"]}
-        else:
-            self._tt_cache = {"time": time, "trace": trace, "matrix": sliced, "bintime": bintime}
-        return Signal(time, trace, label=f"{self.filepath.stem} time trace",
-                      units={"x": "s", "y": "counts"}, meta=meta)
+            self._tt_cache["triggers"] = meta["triggers"]
+        signal = Signal(time, trace, label=f"{self.filepath.stem} time trace",
+                        units={"x": "s", "y": "counts"}, meta=meta)
+        self._tt_cache["signal"] = signal
+        return signal
 
-    def lifetime_histogram(self, matrix: np.ndarray | None = None) -> Signal:
-        """Lifetime histogram (summed over time bins) as a :class:`Signal`."""
+    def lifetime_histogram(self, matrix: np.ndarray | None = None, *,
+                           bintime: float | None = None) -> Signal:
+        """Lifetime histogram (summed over time bins) as a :class:`Signal`.
+
+        Pass ``bintime`` with an explicit matrix to retain the acquisition
+        duration needed for dark-count correction during fitting.
+        """
         if matrix is None:
             if not self._tt_cache:
                 self.time_trace()
             matrix = self._tt_cache["matrix"]
+            bintime = self._tt_cache["bintime"]
+            acquisition_duration = self._tt_cache["acquisition_duration"]
+        else:
+            acquisition_duration = None
+        matrix = np.asarray(matrix)
+        if matrix.ndim != 2 or matrix.shape[1] != self.n_lt_bins:
+            raise ValueError(
+                f"matrix must have shape (N, {self.n_lt_bins}); got {matrix.shape}."
+            )
+        if bintime is not None and (not np.isfinite(bintime) or bintime <= 0):
+            raise ValueError("bintime must be a positive finite number.")
         hist = matrix.sum(axis=0)
+        meta: dict[str, Any] = {"time_bin_count": int(matrix.shape[0])}
+        if bintime is not None:
+            meta.update({
+                "bintime": float(bintime),
+                "acquisition_duration": float(
+                    matrix.shape[0] * bintime
+                    if acquisition_duration is None else acquisition_duration
+                ),
+            })
         return Signal(self.lt_time, hist, label=f"{self.filepath.stem} lifetime",
-                      units={"x": "s", "y": "counts"})
+                      units={"x": "s", "y": "counts"}, meta=meta)
 
     def get_roi_matrix(self, roi: dict[str, float], bintime: float = 50e-3) -> np.ndarray:
         """Extract the photon count matrix for a selected ROI.
@@ -309,6 +386,7 @@ class PTU:
              x_min: float | None = None, x_max: float | None = None,
              y_min: float | None = None, y_max: float | None = None,
              bintime: float = 50e-3, n_exp: int = 1, bins: int = 1,
+             lifetime_bins: int = 100, intensity_bins: int = 100,
              mode: str = "fraction", fraction: float = 0.95, smoothing: float = 2.0,
              start: float = 0.0, end: float | None = None, sigma: float = 1.5,
              isolated: bool = False, **fit_kwargs) -> Image | list[Image]:
@@ -334,6 +412,9 @@ class PTU:
             Number of exponential components per time-bin fit.
         bins :
             Lifetime-axis binning factor (``1`` = native resolution).
+        lifetime_bins, intensity_bins :
+            Number of histogram bins on the fitted-lifetime and raw-count axes.
+            Each must be between 1 and 1024, which keeps map allocation bounded.
         mode, fraction, smoothing, start, end :
             Fit-window left-bound selection, as in :meth:`fit_lifetime`.
         sigma :
@@ -353,6 +434,17 @@ class PTU:
         """
         from scipy import ndimage
 
+        if isinstance(n_exp, (bool, np.bool_)) or not isinstance(n_exp, (int, np.integer)) or n_exp < 1:
+            raise ValueError("n_exp must be a positive integer.")
+        if isinstance(bins, (bool, np.bool_)) or not isinstance(bins, (int, np.integer)) or bins < 1:
+            raise ValueError("bins must be a positive integer.")
+        for name, value in (("lifetime_bins", lifetime_bins),
+                            ("intensity_bins", intensity_bins)):
+            if (isinstance(value, (bool, np.bool_))
+                    or not isinstance(value, (int, np.integer))
+                    or not 1 <= value <= 1024):
+                raise ValueError(f"{name} must be an integer between 1 and 1024.")
+
         # Resolve ROI bounds (roi dict takes precedence over explicit kwargs).
         if roi is not None:
             x_min, x_max = roi.get("x_min"), roi.get("x_max")
@@ -371,6 +463,9 @@ class PTU:
             ymx = np.inf if y_max is None else y_max
             matrix = full_matrix[(trace >= ymn) & (trace < ymx), :]
 
+        if matrix.shape[0] == 0 or not np.any(matrix):
+            raise ValueError("The selected FLID region contains no photons.")
+
         # Lifetime axis, peak-shifted to ns, and the fit-window mask.
         lt_ns = self.lt_time * 1e9
         lt_roi = matrix.sum(axis=0)
@@ -381,20 +476,24 @@ class PTU:
                                smoothing=smoothing, start=start, end=end)
 
         # Bin the lifetime axis to make per-bin fits more robust.
-        binned_lt = lt_ns.copy()
-        if bins != 1:
-            step = bins * (lt_ns[1] - lt_ns[0])
-            binned_lt = np.arange(0.0, np.max(lt_ns), step)
-        mask = np.add.reduceat(mask, np.arange(0, mask.shape[0], bins)) > 0
+        group_starts = np.arange(0, matrix.shape[1], bins)
+        if group_starts.size < 2:
+            raise ValueError("bins must leave at least two lifetime groups for fitting.")
+        group_sizes = np.minimum(bins, matrix.shape[1] - group_starts)
+        binned_lt = np.add.reduceat(lt_ns, group_starts) / group_sizes
+        mask = np.add.reduceat(mask, group_starts) > 0
         binned_lt_tshift = binned_lt - t0_ns
         t_fit = binned_lt_tshift[mask]
-        binned_matrix = np.add.reduceat(matrix, np.arange(0, matrix.shape[1], bins), axis=1)
+        if t_fit.size < 2:
+            raise ValueError("The selected FLID fit window contains fewer than two bins.")
+        binned_matrix = np.add.reduceat(matrix, group_starts, axis=1)
 
         n_binned = len(mask)
         taus: list[np.ndarray] = []
         counts: list[float] = []
         for row in binned_matrix:
             lt_bin = np.asarray(row, dtype=float)
+            raw_counts = float(np.sum(lt_bin))
             norm = np.max(lt_bin)
             if not np.isfinite(norm) or norm == 0:
                 continue
@@ -404,7 +503,7 @@ class PTU:
             if not np.isfinite(ymax) or ymax == 0:
                 continue
             y_fit = y_fit / ymax
-            counts.append(float(np.sum(lt_bin)))
+            counts.append(raw_counts)
             offset = self.dark_counts * bintime / n_binned / norm
             fit = MultiExpFit(t_fit, y_fit, n_exp, offset, **fit_kwargs)
             if fit.success:
@@ -421,15 +520,17 @@ class PTU:
         cnt_unit = f"counts/{bintime * 1e3:.0f} ms"
         base_meta = {
             "bintime": bintime, "n_exp": n_exp, "lt_bins": bins, "sigma": sigma,
+            "lifetime_bins": int(lifetime_bins),
+            "intensity_bins": int(intensity_bins),
             "roi": {"x_min": x_min, "x_max": x_max, "y_min": y_min, "y_max": y_max},
             "taus": taus, "counts": counts,
         }
 
         def _make_image(tau_vals: np.ndarray, label: str) -> Image:
             valid = np.isfinite(tau_vals) & np.isfinite(counts)
-            n_hist = max(int(np.sum(valid)), 1)
             hist, tau_edges, cnt_edges = np.histogram2d(
-                tau_vals[valid], counts[valid], bins=n_hist)
+                tau_vals[valid], counts[valid],
+                bins=(int(lifetime_bins), int(intensity_bins)))
             if sigma > 0:
                 hist = ndimage.gaussian_filter(hist, sigma=sigma)
             tau_centers = 0.5 * (tau_edges[:-1] + tau_edges[1:])
@@ -459,17 +560,31 @@ class PTU:
         matrix = self._tt_cache["matrix"]
         max_counts = np.max(trace)
         if off == 0 and on == 1:
-            on_matrix, off_matrix = matrix, np.zeros_like(matrix)
+            on_mask = np.ones(trace.shape, dtype=bool)
+            off_mask = np.zeros(trace.shape, dtype=bool)
         else:
-            on_matrix = matrix[trace >= int(on * max_counts), :]
-            off_matrix = matrix[trace < int(off * max_counts), :]
+            on_mask = trace >= int(on * max_counts)
+            off_mask = trace < int(off * max_counts)
+        on_matrix = matrix[on_mask, :]
+        off_matrix = matrix[off_mask, :]
+        bintime = float(self._tt_cache["bintime"])
+        durations = np.asarray(self._tt_cache["bin_durations"], dtype=float)
+
+        def _meta(fraction: float, mask: np.ndarray) -> dict[str, float | int]:
+            return {
+                "fraction": fraction,
+                "time_bin_count": int(np.count_nonzero(mask)),
+                "bintime": bintime,
+                "acquisition_duration": float(np.sum(durations[mask])),
+            }
+
         return {
             "on": Signal(self.lt_time, on_matrix.sum(axis=0),
                          label=f"on ({on:.0%})", units={"x": "s", "y": "counts"},
-                         meta={"fraction": on}),
+                         meta=_meta(on, on_mask)),
             "off": Signal(self.lt_time, off_matrix.sum(axis=0),
                           label=f"off ({off:.0%})", units={"x": "s", "y": "counts"},
-                          meta={"fraction": off}),
+                          meta=_meta(off, off_mask)),
         }
 
     def fit_lifetime(self, histogram: Signal, n_exp: int = 2, *, mode: str = "fraction",
@@ -495,9 +610,13 @@ class PTU:
         if normalize and np.max(y_fit) > 0:
             norm = np.max(y_fit)
             y_fit = y_fit / norm
-        offset = self.dark_counts * self._bintime * self._tt_cache["trace"].size \
-            / self.n_lt_bins / norm if normalize else \
-            self.dark_counts * self._bintime * self._tt_cache["trace"].size / self.n_lt_bins
+        duration = histogram["meta"].get("acquisition_duration")
+        if self.dark_counts and duration is None:
+            raise ValueError(
+                "Histogram acquisition duration is required for dark-count correction. "
+                "Build it with lifetime_histogram(matrix, bintime=...)."
+            )
+        offset = self.dark_counts * float(duration or 0.0) / self.n_lt_bins / norm
 
         fit = MultiExpFit(t_fit, y_fit, n_exp, offset, **fit_kwargs)
         out = fit.to_dict()
@@ -505,23 +624,31 @@ class PTU:
         return out
 
     # -------------------------------------------------------------- triggers
-    def laser_triggers(self, marker_channel: int = 4) -> dict[str, dict[str, float]] | None:
+    def laser_triggers(self, marker_channel: int = 4, *,
+                       reference: Signal | None = None) -> TriggerPair | None:
         """First two laser-trigger markers as ``{"left": ..., "right": ...}``.
 
         Falls back to the time-trace edges (when ``laser_pulse=False`` was used)
-        if no hardware marker is present.
+        if no hardware marker is present. When ``reference`` is supplied,
+        indices and times are mapped to its time axis. Markers outside the
+        reference are rejected rather than clamped to an unrelated endpoint.
         """
         if marker_channel in self.marker and len(self.marker[marker_channel]) >= 2:
-            if not self._tt_cache:
+            if reference is None and not self._tt_cache:
                 self.time_trace()
-            time = self._tt_cache["time"]
+            if reference is None:
+                reference = self._tt_cache["signal"]
             left_t = self.marker[marker_channel][0] * self.rep_time
             right_t = self.marker[marker_channel][1] * self.rep_time
-            triggers = trigger_dict(
-                nearest_index(time, left_t), left_t,
-                nearest_index(time, right_t), right_t)
+            triggers = self._map_triggers(reference, left_t, right_t)
         elif self._tt_cache.get("triggers"):
             triggers = self._tt_cache["triggers"]
+            if reference is not None:
+                triggers = self._map_triggers(
+                    reference,
+                    triggers["left"]["time"],
+                    triggers["right"]["time"],
+                )
         else:
             warnings.warn(
                 f"{self.filepath.stem}: no laser triggers found.",
@@ -529,9 +656,31 @@ class PTU:
                 stacklevel=2,
             )
             return None
+        if triggers is None:
+            return None
         print(f"{self.filepath.stem}: trigger spacing "
               f"{triggers['right']['time'] - triggers['left']['time']:.2f} s")
         return triggers
+
+    def _map_triggers(self, reference: Signal, left_t: float, right_t: float
+                      ) -> TriggerPair | None:
+        """Map absolute trigger times to a reference while preserving invariants."""
+        time = np.asarray(reference["x"], dtype=float)
+        if time.ndim != 1 or time.size == 0 or not np.all(np.isfinite(time)):
+            raise ValueError("reference must have a non-empty finite 1-D time axis.")
+        low, high = float(np.min(time)), float(np.max(time))
+        if left_t < low or right_t > high:
+            warnings.warn(
+                f"{self.filepath.stem}: laser triggers lie outside the reference time axis.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+            return None
+        left_idx = nearest_index(time, left_t)
+        right_idx = nearest_index(time, right_t)
+        return trigger_dict(
+            left_idx, time[left_idx], right_idx, time[right_idx]
+        )
 
     def get_markers(self, marker_channel: int = 4) -> np.ndarray | None:
         """All marker times (seconds) on ``marker_channel``."""

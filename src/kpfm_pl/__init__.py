@@ -9,7 +9,7 @@ Example
 -------
 >>> from kpfm_pl import PTU, Zurich, Match
 >>> ptu = PTU("scan.ptu", dark_counts=2.55)
->>> tt = ptu.time_trace(0.05, laser_pulse=False)
+>>> tt = ptu.time_trace(0.05)
 >>> z = Zurich("scan.txt")
 >>> kpfm = z.average(bintime=0.05)
 >>> m = Match(kpfm, tt,
@@ -20,6 +20,7 @@ Example
 
 from __future__ import annotations # This is done so python does not raise a NameError when a class is referenced before it is defined. It allows for forward references in type hints.
 
+from ._version import __version__
 from .core import Image, Signal
 from .database import (
     Entry,
@@ -36,10 +37,28 @@ from .io import pick_files, pick_folder, sort_measurement_files
 from .jpk import JPK
 from .match import Match
 from .ptu import PTU
-from .utils import downsample_sum
+from .utils import (
+    TriggerCollection,
+    TriggerPair,
+    TriggerPoint,
+    bin_average,
+    derivative,
+    downsample_sum,
+    feature_scale,
+    feature_scale_params,
+    fit_window_mask,
+    inflection_left_bound,
+    left_bound_fraction,
+    linear_line_level,
+    nearest_index,
+    resample,
+    set_zero,
+    smooth,
+    trigger_dict,
+    zscore,
+    zscore_params,
+)
 from .zurich import Zurich
-
-__version__ = "1.2.4"
 
 #__all__ tells the package user which classes and functions are available for import when they use the * syntax. It is a list of strings that represent the names of the public objects in the module.
 __all__ = [
@@ -53,7 +72,25 @@ __all__ = [
     "gaussian2d",
     "fit_gaussian2d",
     "peak_power_density",
+    "TriggerPoint",
+    "TriggerPair",
+    "TriggerCollection",
+    "feature_scale",
+    "feature_scale_params",
+    "zscore",
+    "zscore_params",
+    "smooth",
+    "derivative",
+    "resample",
+    "bin_average",
+    "left_bound_fraction",
+    "inflection_left_bound",
+    "fit_window_mask",
+    "linear_line_level",
+    "set_zero",
     "downsample_sum",
+    "nearest_index",
+    "trigger_dict",
     "pick_files",
     "pick_folder",
     "sort_measurement_files",
@@ -65,6 +102,16 @@ __all__ = [
     "save_json",
     "load_json",
     "save_csv",
+    "cmap_spring",
+    "cmap_gold",
+    "set_scaled_rcparams",
+    "set_cbar_formatter",
+    "plot_image",
+    "make_circle",
+    "crop_roi",
+    "InteractiveBoxSelector",
+    "SingleBoxSelector",
+    "DraggableCircle",
     "__version__",
 ]
 
@@ -81,13 +128,19 @@ _PLOTTING_NAMES = (
     "crop_roi",
 )
 
+_SELECTOR_NAMES = (
+    "InteractiveBoxSelector",
+    "SingleBoxSelector",
+    "DraggableCircle",
+)
+
 
 def __getattr__(name: str):
     # Lazily expose the optional matplotlib-dependent GUI selectors so importing
     # the package stays headless-friendly. When the user does want to use them,
     # they can do e.g. ``from kpfm_pl import InteractiveBoxSelector`` and the
     # module will be imported on demand.
-    if name in ("InteractiveBoxSelector", "SingleBoxSelector", "DraggableCircle"):
+    if name in _SELECTOR_NAMES:
         from .selector import InteractiveBoxSelector, SingleBoxSelector, DraggableCircle
 
         # Inject both into the package namespace so subsequent attribute lookups
@@ -106,3 +159,8 @@ def __getattr__(name: str):
         return globals()[name]
 
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    """Return eagerly and lazily exposed package attributes."""
+    return sorted(set(globals()) | set(__all__))

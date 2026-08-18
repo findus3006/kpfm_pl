@@ -1,7 +1,8 @@
-'''This file shows how to align KPFM and timetrace data with the files ptu_test1 and KPFM_test1 found in the Test data folder.
-The files kpfm_test1_ and ptu_test1_ are legacy files to verify their functionality.
-The relevant packages are imported, the file path is defined, the files loaded depending on their type and then correlated.
-In the end the data is plotted. '''
+'''Align current marker-based PTU and KPFM test data from the Test data folder.
+
+The relevant packages are imported, the paths are defined, the files are loaded
+according to their type, and the aligned signals are plotted.
+'''
 
 import kpfm_pl as k
 import matplotlib.pyplot as plt
@@ -48,8 +49,8 @@ fig, ax = plt.subplots(figsize=(16,9))
 ax2 = ax.twinx()
 ax.plot(k["x"], k["y"], label=k["label"], c="red")
 ax2.plot(t["x"], feature_scale(t["y"]), label=t["label"], c="blue")
-ax.axvline(k["meta"]["triggers"]["left"], color="k", linestyle="--", label="Left laser trigger")
-ax.axvline(k["meta"]["triggers"]["right"], color="k", linestyle="--", label="Right laser trigger")
+ax.axvline(k["meta"]["triggers"]["left"]["time"], color="k", linestyle="--", label="Left laser trigger")
+ax.axvline(k["meta"]["triggers"]["right"]["time"], color="k", linestyle="--", label="Right laser trigger")
 ax.set_title("Correlation of KPFM and time trace")
 ax.set_xlabel("Time (s)")
 ax.set_ylabel("Amplitude of KPFM signal (V)")

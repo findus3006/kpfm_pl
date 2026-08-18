@@ -6,7 +6,7 @@ laser-trigger channel, ...) into per-stream
 return the arrays and plot them yourself.
 
 The Zurich reader is used in
-[`src/examples/example_correlate.py`](../src/examples/example_correlate.py)
+[`examples/example_correlate.py`](../examples/example_correlate.py)
 together with a `.ptu` file, via the `Match` class.
 
 ## File format
@@ -62,14 +62,15 @@ triggers = z.laser_triggers(z.stream_names()[1],
 
 Locates the laser triggers in a trigger stream and returns
 `{"left": {"index", "time"}, "right": {"index", "time"}, "all": ...}` – the
-`left`/`right` format consumed by [`Match`](match.md). The `"all"` entry is an
-`(N, 2)` array of `[index, time]` for every detected flank. Returns `None`
-(with a warning) if no trigger is found.
+`left`/`right` format consumed by [`Match`](match.md). The `"all"` entry is a
+list of `{"index": int, "time": float}` points, so every trigger location has
+one consistent representation. Returns `None` (with a warning) if no trigger
+is found.
 
 | Parameter | Default | Meaning |
 |-----------|---------|---------|
 | `stream` | `TRIGGER_STREAM` | trigger stream name |
-| `method` | `"threshold"` | `"threshold"` min-max scales the signal and thresholds at `0.1` to find the on-pulse edges; `"slope"` detects **all** rising/falling flanks of the scaled signal via `np.diff`, stores them in `"all"`, and reports the first and last as `left`/`right` |
+| `method` | `"threshold"` | `"threshold"` min-max scales the signal, finds contiguous windows above `0.1`, and stores the first and last sample of every window in `"all"`; `"slope"` detects **all** rising/falling flanks via `np.diff`. Both report the first and last detected points as `left`/`right`. |
 | `reference` | `None` | optional averaged `Signal`; when given, trigger indices/times are mapped onto its (binned) time axis |
 | `slope_threshold` | `0.1` | fraction of the max `|diff|` used to qualify a slope sample as a flank (only used by `method="slope"`) |
 
