@@ -278,9 +278,10 @@ def _pair_leaf_files(txt_files: list[Path], ptu_files: list[Path], folder_dr_hin
     folders with a single obvious pair as well as folders holding several
     pairs distinguished only by frequency or by power/wavelength.
 
-    Returns a list of ``(txt_path, ptu_path)`` tuples. Unmatched files (e.g.
-    a stray ``.txt`` without a companion ``.ptu``) are dropped with a
-    ``print`` warning.
+    Returns a list of ``(txt_path, ptu_path)`` tuples. A pair is only formed
+    when at least one token is shared; unmatched files (e.g. a stray ``.txt``
+    without a companion ``.ptu``, or files sharing nothing) are dropped with a
+    warning, as are ambiguous ties.
     """
     txt_meta = {p: parse_txt(p) for p in txt_files}
     ptu_meta = {p: parse_ptu(p) for p in ptu_files}
@@ -304,21 +305,31 @@ def _pair_leaf_files(txt_files: list[Path], ptu_files: list[Path], folder_dr_hin
         tm = txt_meta[txt_path]
         t_sig = _signature(tm["dr"], tm["pid_bandwidth_hz"], tm["total_power_nw"], tm["wavelength_nm"])
 
-        best_ptu, best_score = None, -1
+        best_ptu, best_score, tied = None, 0, False
         for ptu_path in remaining_ptu:
             pm = ptu_meta[ptu_path]
             p_sig = _signature(pm["dr"], pm["freq_hz"], pm["total_power_nw"], pm["wavelength_nm"])
             score = _match_score(t_sig, p_sig)
             if score > best_score:
-                best_ptu, best_score = ptu_path, score
+                best_ptu, best_score, tied = ptu_path, score, False
+            elif score == best_score and best_ptu is not None:
+                tied = True
 
         if best_ptu is None:
             warnings.warn(
-                f"No .ptu match found for {txt_path.name}",
+                f"No .ptu match found for {txt_path.name} "
+                "(no shared filename tokens).",
                 RuntimeWarning,
                 stacklevel=2,
             )
             continue
+        if tied:
+            warnings.warn(
+                f"Ambiguous .ptu match for {txt_path.name}: several files "
+                f"share the best score ({best_score}); picked {best_ptu.name}.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         pairs.append((txt_path, best_ptu))
         remaining_ptu.remove(best_ptu)
 
@@ -365,6 +376,8 @@ def _entry_from_pair(txt_path: Path, ptu_path: Path, sample: str, precipitation:
 def build_database(root: str | Path) -> list[Entry]:
     """Recursively scan ``root`` and build the list of paired :class:`Entry` objects."""
     root = Path(root)
+    if not root.is_dir():
+        raise ValueError(f"{root} is not a valid directory")
     entries: list[Entry] = []
 
     for leaf in _find_leaf_folders(root):
@@ -374,7 +387,9 @@ def build_database(root: str | Path) -> list[Entry]:
         if not txt_files or not ptu_files:
             continue
 
-        rel_parts = leaf.relative_to(root).parts
+        # Data files directly in the scan root give an empty relative path;
+        # use the root folder itself for classification.
+        rel_parts = leaf.relative_to(root).parts or (root.name,)
         sample, precipitation, date, dr_hint = _classify_folder(rel_parts)
 
         for txt_path, ptu_path in _pair_leaf_files(txt_files, ptu_files, dr_hint):
@@ -413,7 +428,8 @@ def add_entry(entries: list[Entry], txt_path: str | Path, ptu_path: str | Path,
     txt_path, ptu_path = Path(txt_path), Path(ptu_path)
 
     if root is not None:
-        rel_parts = txt_path.parent.relative_to(Path(root)).parts
+        root = Path(root)
+        rel_parts = txt_path.parent.relative_to(root).parts or (root.name,)
         sample, precipitation, date, dr_hint = _classify_folder(rel_parts)
     else:
         sample, precipitation, date, dr_hint = txt_path.parent.name, None, None, None

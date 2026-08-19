@@ -37,6 +37,15 @@ def test_parse_two_streams(tmp_path):
     assert np.allclose(z.time, [0.0, 1.0, 2.0])
 
 
+def test_parse_time_axis_not_ending_at_zero(tmp_path):
+    # The axis carries an end offset (does not terminate at 0.0): each value
+    # must stay paired with its own elapsed time.
+    text = "% StreamA, x\n-2.5;10.0\n-1.5;20.0\n-0.5;30.0\n"
+    z = Zurich(_write(tmp_path, text))
+    assert np.allclose(z.streams["StreamA"]["time"], [0.0, 1.0, 2.0])
+    assert np.allclose(z.streams["StreamA"]["value"], [10.0, 20.0, 30.0])
+
+
 def test_signal_returns_signal_with_units(tmp_path):
     z = Zurich(_write(tmp_path, TWO_STREAM))
     s = z.signal("StreamA")

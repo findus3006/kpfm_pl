@@ -42,6 +42,10 @@ shared tokens (DR, frequency, total power, wavelength) between candidate
 files -- this correctly disambiguates folders that hold several pairs for
 the same DR (e.g. distinguished only by PID frequency, or only by
 power/wavelength when the `.ptu` filename doesn't carry a DR label at all).
+Files sharing *no* token are never paired: they are skipped with a warning,
+and ambiguous ties (several candidates with the same best score) also warn.
+Data files placed directly in the scan root are supported; the root folder
+name is then used as the sample name.
 
 ## Building and persisting the database
 

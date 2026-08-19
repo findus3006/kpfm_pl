@@ -27,7 +27,11 @@ ptu = PTU("scan.ptu", dark_counts=2.25)
 
 On load the header tags and all photon records are parsed. Continuous-wave
 files (no laser trigger / infinite global resolution) are detected and the
-photon records are skipped with a printed notice.
+photon records are skipped with a printed notice; the `is_cw` attribute is set
+to `True`, the lifetime axis stays empty (`n_lt_bins = 0`) and every
+time-binned/lifetime method (`time_trace`, `lifetime_histogram`, `flid`,
+`threshold`, `fit_lifetime`, `laser_triggers`, `get_markers`) raises a clear
+`ValueError` instead of failing on a half-constructed object.
 
 Useful attributes after loading:
 
@@ -35,7 +39,8 @@ Useful attributes after loading:
 |-----------|---------|
 | `acquisition_time` | total measurement time (s) |
 | `resolution` | TCSPC bin resolution (s) |
-| `rep_time` | laser repetition period (s) |
+| `rep_time` | laser repetition period (s; `inf` for continuous-wave files) |
+| `is_cw` | `True` for continuous-wave files (see above) |
 | `n_lt_bins`, `lt_time` | lifetime-axis length and time axis (s) |
 | `events` | raw photon array, shape `(N, 3)` = `[truesync, dtime, time_s]` |
 | `marker` | `{channel: [sync, ...]}` hardware markers |
@@ -192,10 +197,14 @@ markers  = ptu.get_markers(marker_channel=4)   # all marker times (s)
 ```
 
 `laser_triggers` returns `{"left": {"index", "time"}, "right": {"index",
-"time"}}` from the first two hardware markers, falling back to the time-trace
-edges (when `laser_pulse=False` was used). This is the trigger format consumed
-by [`Match`](match.md). Both methods warn and return `None` if no marker is
-found. `laser_triggers` returns exactly two triggers no matter how many triggers are in the specified marker channel. `get_markers` returns all triggers in the specified marker channel.
+"time"}}` from the first and last hardware markers, falling back to the
+time-trace edges (when `laser_pulse=False` was used). This is the trigger
+format consumed by [`Match`](match.md). Both methods warn and return `None` if
+no marker is found. `laser_triggers` returns exactly two triggers no matter how
+many triggers are in the specified marker channel; with only a *single* marker
+it warns and returns a pair whose left and right triggers coincide (usable as a
+single-trigger spec for `Match`). `get_markers` returns all triggers in the
+specified marker channel.
 Pass the time trace used downstream as `reference` to map both indices and
 times onto that axis. A marker pair outside the reference window warns and
 returns `None`, rather than clamping an index while retaining an unrelated

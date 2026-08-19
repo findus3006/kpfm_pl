@@ -41,6 +41,20 @@ def test_r_squared_high_for_clean_data():
     assert fit.quality()["r_squared"] > 0.999
 
 
+def test_r_squared_uses_unweighted_residuals_for_weighted_fits():
+    rng = np.random.default_rng(0)
+    t = np.linspace(0.0, 40.0, 400)
+    y = _single_exp(t, 1.0, 6.0) + rng.normal(0.0, 0.02, t.size)
+    weights = np.linspace(1.0, 5.0, t.size)
+    fit = MultiExpFit(t, y, n_exp=1, weights=weights)
+    q = fit.quality()
+    expected = 1 - np.sum((fit.curve() - y) ** 2) / np.sum((y - y.mean()) ** 2)
+    assert q["r_squared"] == pytest.approx(expected)
+    assert 0.0 <= q["r_squared"] <= 1.0
+    # "residuals" stays the optimiser's weighted residual vector
+    assert len(q["residuals"]) == t.size
+
+
 def test_curve_matches_data_shape():
     t = np.linspace(0.0, 40.0, 123)
     y = _single_exp(t, 1.0, 6.0)

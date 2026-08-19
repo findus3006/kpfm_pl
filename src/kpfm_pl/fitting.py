@@ -169,17 +169,24 @@ class MultiExpFit:
         return self.model(t, self._require_result().x)
 
     def quality(self) -> dict[str, Any]:
-        """Return goodness-of-fit metrics including ``r_squared``."""
-        residuals = self._require_result().fun
+        """Return goodness-of-fit metrics including ``r_squared``.
+
+        ``"residuals"`` are the (possibly weighted) residuals as minimised by
+        the optimiser, excluding the ``constrain_sum_A`` penalty term.
+        ``"r_squared"`` is always computed from the unweighted residuals
+        ``curve() - y`` so it stays meaningful with non-unit ``weights``.
+        """
+        result = self._require_result()
+        residuals = result.fun
         if self.constrain_sum_A:
             residuals = residuals[:-1]
-        ss_res = np.sum(residuals ** 2)
+        ss_res = np.sum((self.curve() - self.y) ** 2)
         ss_tot = np.sum((self.y - np.mean(self.y)) ** 2)
         return {
             "residuals": residuals,
-            "cost": self.result.cost,
-            "success": self.result.success,
-            "message": self.result.message,
+            "cost": result.cost,
+            "success": result.success,
+            "message": result.message,
             "r_squared": 1 - ss_res / ss_tot if ss_tot != 0 else 0.0,
         }
 

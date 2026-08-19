@@ -66,6 +66,9 @@ Match(kpfm, timetrace, *, kpfm_triggers, timetrace_triggers,
 
 A single `float` trigger sets the right trigger equal to the left (only the
 time-shift/resampling is well defined) and disallows `scaling="trigger"`.
+With a single trigger there is no laser-on window, so the
+`"feature"`/`"zscore"` statistics (and the trigger-bounded statistics below)
+fall back to the full overlap.
 
 ## Scaling methods
 
@@ -109,12 +112,14 @@ m.pearson(within_triggers=True)
 # -> {"statistic": r, "pvalue": p}
 
 m.cross_correlation(within_triggers=True, normalize=True)
-# -> {"lag": <s array>, "correlation": <array>, "best_lag": <s>}
+# -> {"lag": <s array>, "correlation": <array>, "best_lag": <s>,
+#     "best_correlation": <float>}
 ```
 
 Both restrict to the laser-on window between the triggers by default. For the
-cross-correlation, a **positive** `best_lag` means the time trace lags the
-KPFM signal. Statistics use only paired finite samples and raise `ValueError`
+cross-correlation, a **positive** `best_lag` means the time trace leads the
+KPFM signal (the KPFM signal lags); a **negative** `best_lag` means the time
+trace lags. Statistics use only paired finite samples and raise `ValueError`
 when fewer than two pairs remain or either signal is constant. Construction
 also rejects empty, non-finite, or non-increasing time axes and signals with no
 overlapping time span.

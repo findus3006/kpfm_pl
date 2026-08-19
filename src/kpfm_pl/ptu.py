@@ -66,7 +66,14 @@ class PTU:
 
         with open(self.filepath, "rb") as fh:
             self._read_header(fh)
-            if np.isinf(self.coarse_rep_time):
+            self.is_cw = bool(np.isinf(self.coarse_rep_time))
+            if self.is_cw:
+                # Continuous-wave file: no sync period, so records cannot be
+                # decoded into lifetime bins. Keep safe defaults so the object
+                # is fully constructed; binning methods raise a clear error.
+                self.n_lt_bins = 0
+                self.lt_bins = np.array([], dtype=int)
+                self.lt_time = np.array([], dtype=float)
                 print(f"{self.filepath.stem}: continuous-wave data, no trigger present.")
                 return
             self._read_records(fh, smooth_rep_rate)
@@ -93,9 +100,12 @@ class PTU:
         self.num_records = self._tags["TTResult_NumberOfRecords"]
         self.coarse_rep_time = self._tags["MeasDesc_GlobalResolution"]
         if np.isinf(self.coarse_rep_time):
-            return
-        digits = int(-np.floor(np.log10(abs(self.coarse_rep_time))))
-        self.rep_time = round(self.coarse_rep_time, digits)
+            # Continuous-wave file: keep the infinite rep time but still expose
+            # the remaining header attributes so the object is usable.
+            self.rep_time = self.coarse_rep_time
+        else:
+            digits = int(-np.floor(np.log10(abs(self.coarse_rep_time))))
+            self.rep_time = round(self.coarse_rep_time, digits)
         self.resolution = self._tags["MeasDesc_Resolution"]
         self.acquisition_time = self._tags["MeasDesc_AcquisitionTime"] * 1e-3
 
@@ -215,12 +225,28 @@ class PTU:
         """Raw photon events, shape ``(N, 3)`` = ``[truesync, dtime, time_s]``."""
         return self.events
 
+    def _require_pulsed(self) -> None:
+        """Reject time-binned/lifetime analysis on continuous-wave files."""
+        if self.is_cw:
+            raise ValueError(
+                f"{self.filepath.stem}: continuous-wave file (infinite sync "
+                "period); time-binned and lifetime analysis require pulsed "
+                "(T3) data."
+            )
+
     def _build_matrix(self, bintime: float) -> None:
         """Build the (time-bin x lifetime-bin) photon count matrix."""
         n_tt = int(np.ceil(self.acquisition_time / bintime))
-        matrix = np.zeros((n_tt, self.n_lt_bins), dtype=np.uint32)
         sync_per_bin = bintime / self.rep_time
         tt_idx = (self.events[:, 0] / sync_per_bin).astype(int)
+        # The matrix is sized from the header acquisition time, but tt_idx
+        # comes from the photon syncs: with smooth_rep_rate=True (rounded rep
+        # time) or files whose records run marginally past the declared
+        # duration, the last photons can index past that size. Grow the matrix
+        # to fit the data so np.add.at cannot raise a bare IndexError.
+        if tt_idx.size:
+            n_tt = max(n_tt, int(tt_idx.max()) + 1)
+        matrix = np.zeros((n_tt, self.n_lt_bins), dtype=np.uint32)
         lt_idx = self.events[:, 1].astype(int)
         np.add.at(matrix, (tt_idx, lt_idx), 1)
         self._matrix = matrix
@@ -249,6 +275,7 @@ class PTU:
             and its rising/falling edges are stored as triggers. This is bad
             practice and only kept for backwards compatibility.
         """
+        self._require_pulsed()
         if not np.isfinite(bintime) or bintime <= 0:
             raise ValueError("bintime must be a positive finite number.")
         if getattr(self, "_bintime", None) != bintime:
@@ -266,7 +293,9 @@ class PTU:
         sliced = self._matrix[start_bin:end_bin, :]
         time = bin_left[start_bin:end_bin]
         bin_durations = bin_right[start_bin:end_bin] - time
-        trace = sliced.sum(axis=1)
+        # Sum as int64 and convert to float: a uint32 y would silently wrap on
+        # downstream subtraction. meta["matrix"] stays integer for memory.
+        trace = sliced.sum(axis=1, dtype=np.int64).astype(float)
         selected_duration = float(np.sum(bin_durations))
         meta: dict[str, Any] = {
             "bintime": bintime,
@@ -321,6 +350,7 @@ class PTU:
         Pass ``bintime`` with an explicit matrix to retain the acquisition
         duration needed for dark-count correction during fitting.
         """
+        self._require_pulsed()
         if matrix is None:
             if not self._tt_cache:
                 self.time_trace()
@@ -434,6 +464,7 @@ class PTU:
         """
         from scipy import ndimage
 
+        self._require_pulsed()
         if isinstance(n_exp, (bool, np.bool_)) or not isinstance(n_exp, (int, np.integer)) or n_exp < 1:
             raise ValueError("n_exp must be a positive integer.")
         if isinstance(bins, (bool, np.bool_)) or not isinstance(bins, (int, np.integer)) or bins < 1:
@@ -554,6 +585,7 @@ class PTU:
         ``on`` and ``off`` are fractions of the time-trace maximum. Returns a dict
         with ``"on"`` and ``"off"`` :class:`Signal` histograms.
         """
+        self._require_pulsed()
         if not self._tt_cache:
             self.time_trace()
         trace = self._tt_cache["trace"]
@@ -598,6 +630,7 @@ class PTU:
         the :meth:`~kpfm_pl.fitting.MultiExpFit.to_dict` payload augmented with the
         time/intensity arrays actually fitted.
         """
+        self._require_pulsed()
         y = np.asarray(histogram["y"], dtype=float)
         t0 = histogram["x"][np.argmax(y)]
         t_ns = (histogram["x"] - t0) * 1e9
@@ -626,20 +659,33 @@ class PTU:
     # -------------------------------------------------------------- triggers
     def laser_triggers(self, marker_channel: int = 4, *,
                        reference: Signal | None = None) -> TriggerPair | None:
-        """First two laser-trigger markers as ``{"left": ..., "right": ...}``.
+        """First and last laser-trigger markers as ``{"left": ..., "right": ...}``.
 
-        Falls back to the time-trace edges (when ``laser_pulse=False`` was used)
-        if no hardware marker is present. When ``reference`` is supplied,
-        indices and times are mapped to its time axis. Markers outside the
-        reference are rejected rather than clamped to an unrelated endpoint.
+        With only a single marker on the channel, a warning is emitted and the
+        left and right triggers coincide (usable as a single-trigger spec for
+        :class:`~kpfm_pl.match.Match`). Falls back to the time-trace edges
+        (when ``laser_pulse=False`` was used) if no hardware marker is present.
+        When ``reference`` is supplied, indices and times are mapped to its
+        time axis. Markers outside the reference are rejected rather than
+        clamped to an unrelated endpoint.
         """
-        if marker_channel in self.marker and len(self.marker[marker_channel]) >= 2:
+        self._require_pulsed()
+        if self.marker.get(marker_channel):
+            markers = self.marker[marker_channel]
+            if len(markers) == 1:
+                warnings.warn(
+                    f"{self.filepath.stem}: only one laser trigger found on "
+                    f"marker channel {marker_channel}; left and right triggers "
+                    "coincide.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
             if reference is None and not self._tt_cache:
                 self.time_trace()
             if reference is None:
                 reference = self._tt_cache["signal"]
-            left_t = self.marker[marker_channel][0] * self.rep_time
-            right_t = self.marker[marker_channel][-1] * self.rep_time
+            left_t = markers[0] * self.rep_time
+            right_t = markers[-1] * self.rep_time
             triggers = self._map_triggers(reference, left_t, right_t)
         elif self._tt_cache.get("triggers"):
             triggers = self._tt_cache["triggers"]
@@ -684,6 +730,7 @@ class PTU:
 
     def get_markers(self, marker_channel: int = 4) -> np.ndarray | None:
         """All marker times (seconds) on ``marker_channel``."""
+        self._require_pulsed()
         if marker_channel in self.marker:
             return np.array(self.marker[marker_channel]) * self.rep_time
         warnings.warn(

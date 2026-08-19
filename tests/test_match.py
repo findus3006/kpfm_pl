@@ -114,6 +114,15 @@ def test_trigger_scaling_matches_anchors():
     assert tt_native[85] == pytest.approx(kpfm["y"][80])
 
 
+def test_trigger_scaling_degenerate_anchors_warn_and_use_unit_scale():
+    kpfm, tt = _make_pair()
+    trig = _triggers(20, 2.0, 20, 2.0)  # left == right -> zero denominator
+    with pytest.warns(RuntimeWarning, match="degenerate anchors"):
+        m = Match(kpfm, tt, kpfm_triggers=trig, timetrace_triggers=trig,
+                  scaling="trigger", trigger_window=1)
+    assert m.scale == 1.0
+
+
 def test_trigger_scaling_requires_dict_triggers():
     kpfm, tt = _make_pair()
     with pytest.raises(ValueError):
@@ -154,9 +163,22 @@ def test_cross_correlation_zero_lag_for_identical_signals():
               timetrace_triggers=_triggers(40, 2.0, 160, 8.0),
               scaling="none")
     out = m.cross_correlation()
-    assert set(out) == {"lag", "correlation", "best_lag"}
+    assert set(out) == {"lag", "correlation", "best_lag", "best_correlation"}
     assert out["best_lag"] == pytest.approx(0.0, abs=1e-2)
     assert np.max(out["correlation"]) == pytest.approx(1.0, abs=1e-6)
+
+
+def test_cross_correlation_lag_sign_for_shifted_pair():
+    # The KPFM bump occurs 0.5 s *after* the time-trace bump: the time trace
+    # leads the KPFM signal, so best_lag must come out positive.
+    x = np.linspace(0.0, 10.0, 1001)
+    tt_y = np.exp(-((x - 4.0) ** 2) / 0.125)
+    k_y = np.exp(-((x - 4.5) ** 2) / 0.125)
+    m = Match(Signal(x, k_y), Signal(x, tt_y),
+              kpfm_triggers=2.0, timetrace_triggers=2.0,
+              scaling="none")
+    out = m.cross_correlation()
+    assert out["best_lag"] == pytest.approx(0.5, abs=0.02)
 
 
 def test_pearson_full_range_ignores_window():
@@ -222,6 +244,23 @@ def test_none_scaling_preserves_labels_and_units():
     assert m.kpfm_signal().units == {"x": "s", "y": "V"}
     assert m.timetrace_signal().label == "tt"
     assert m.timetrace_signal().units == {"x": "s", "y": "counts"}
+
+
+@pytest.mark.parametrize("scaling", ["feature", "zscore"])
+def test_normalized_scaling_with_off_grid_single_trigger(scaling):
+    # 2.03 lies between grid samples: with a single float trigger the window
+    # mask would otherwise be empty, so the statistics must fall back to the
+    # full overlap instead of raising.
+    kpfm, tt = _make_pair()
+    m = Match(kpfm, tt, kpfm_triggers=2.03, timetrace_triggers=2.03,
+              scaling=scaling)
+    y = m.kpfm_signal(on_grid=False)["y"]
+    if scaling == "feature":
+        assert np.nanmin(y) == pytest.approx(0.0, abs=1e-6)
+        assert np.nanmax(y) == pytest.approx(1.0, abs=1e-6)
+    else:
+        assert np.mean(y) == pytest.approx(0.0, abs=1e-6)
+        assert np.std(y) == pytest.approx(1.0, abs=1e-6)
 
 
 @pytest.mark.parametrize("scaling", ["feature", "zscore"])

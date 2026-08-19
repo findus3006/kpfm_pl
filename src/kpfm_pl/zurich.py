@@ -90,8 +90,13 @@ class Zurich:
         streams: dict[str, dict[str, np.ndarray]] = {}
         for i, name in enumerate(stream_names):
             block = parsed[i * chunk:(i + 1) * chunk]
-            # The exported time axis is negative and reversed; flip to forward time.
-            t = np.array([-p[0] for p in block])[::-1]
+            # The exported time axis is negative and reversed; flip to forward
+            # time. Referencing each sample to the first exported timestamp is
+            # the robust equivalent of negate-and-reverse: it keeps every value
+            # paired with its own elapsed time even when the axis carries an
+            # end offset or jitter.
+            t_raw = np.array([p[0] for p in block])
+            t = t_raw - t_raw[0]
             v = np.array([p[1] for p in block])
             streams[name] = {"time": t, "value": v}
         return streams
@@ -236,6 +241,8 @@ class Zurich:
             all_times = ref_t[all_idx].astype(float)
 
         print(f"{self.filepath.stem}: trigger spacing {right_t - left_t:.2f} s")
+        if left_t == right_t:
+            print(f"{self.filepath.stem}: Only one trigger found. Left and right trigger coincide.")
         out = trigger_dict(left_idx, left_t, right_idx, right_t)
         points: list[TriggerPoint] = [
             {"index": int(index), "time": float(trigger_time)}

@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from kpfm_pl.database import add_entry, build_database, filter_entries, load_json, remove_entry, save_json
 
 
@@ -104,6 +106,32 @@ def test_build_database_pairs_and_parses(tmp_path):
 
     # ipynb files must not create spurious leaf folders / entries
     assert all(e.sample != "correlation attempt" for e in entries)
+
+
+def test_build_database_with_files_in_scan_root(tmp_path):
+    # data files directly in the scan root: sample falls back to the root name
+    _touch(tmp_path / "DR1_25Hz_hKPFM2V.txt")
+    _touch(tmp_path / "DR1_360s_25Hz_10W_002.ptu")
+    entries = build_database(tmp_path)
+    assert len(entries) == 1
+    assert entries[0].sample == tmp_path.name
+    assert entries[0].dr == "DR1"
+
+
+def test_build_database_rejects_non_directory(tmp_path):
+    with pytest.raises(ValueError, match="not a valid directory"):
+        build_database(tmp_path / "does_not_exist")
+
+
+def test_pairing_skips_files_sharing_no_tokens(tmp_path):
+    # nothing shared (no DR / frequency / power / wavelength): must warn and
+    # skip instead of pairing unrelated files
+    base = tmp_path / "sample"
+    _touch(base / "foo.txt")
+    _touch(base / "bar.ptu")
+    with pytest.warns(RuntimeWarning, match="No .ptu match"):
+        entries = build_database(tmp_path)
+    assert entries == []
 
 
 def test_save_and_load_json_roundtrip(tmp_path):

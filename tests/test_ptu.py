@@ -188,12 +188,87 @@ def test_invalid_file_raises(tmp_path):
         PTU(bad)
 
 
+def test_laser_triggers_single_marker_warns_and_coincides():
+    p = _synthetic_ptu(np.ones((5, 2), dtype=np.uint32), bintime=0.25,
+                       acquisition_time=1.25)
+    p.marker = {4: [2]}
+    p.rep_time = 0.1
+    ref = Signal(np.array([0.0, 0.25, 0.5, 0.75, 1.0]), np.ones(5))
+    with pytest.warns(RuntimeWarning, match="only one laser trigger"):
+        triggers = p.laser_triggers(reference=ref)
+    # left and right coincide so the pair can serve as a single-trigger
+    # spec for Match.
+    assert triggers["left"] == triggers["right"] == {"index": 1, "time": 0.25}
+
+
+def test_time_trace_y_is_float():
+    p = _synthetic_ptu(np.ones((3, 4), dtype=np.uint32), bintime=0.5,
+                       acquisition_time=1.5)
+    tt = p.time_trace(bintime=0.5)
+    assert np.issubdtype(tt["y"].dtype, np.floating)
+    # subtraction must go negative instead of wrapping like uint32
+    assert np.min(tt["y"] - (np.max(tt["y"]) + 1.0)) < 0
+
+
+def test_build_matrix_grows_for_photons_past_declared_duration():
+    p = _synthetic_ptu(np.zeros((2, 4), dtype=np.uint32), bintime=0.5,
+                       acquisition_time=1.0)
+    p.rep_time = 0.1
+    # the last photon (sync 12 -> time bin 2) indexes past the two bins
+    # implied by the header acquisition time
+    p.events = np.array([[2.0, 1.0, 0.2], [12.0, 2.0, 1.2]])
+    p._build_matrix(0.5)
+    assert p._matrix.shape == (3, 4)
+    assert p._matrix.sum() == 2
+
+
+def _header_tag(name: str, typ: int, value: bytes = b"\x00" * 8) -> bytes:
+    import struct
+
+    return name.encode().ljust(32, b"\x00") + struct.pack("<ii", -1, typ) + value
+
+
+def test_continuous_wave_file_constructs_and_rejects_binning(tmp_path):
+    import struct
+
+    from kpfm_pl.ptu import _TAG_TYPES
+
+    data = (
+        b"PQTTTR\x00\x00" + b"1.0.00\x00\x00"
+        + _header_tag("TTResult_NumberOfRecords", _TAG_TYPES["Int8"],
+                      struct.pack("<q", 0))
+        + _header_tag("MeasDesc_GlobalResolution", _TAG_TYPES["Float8"],
+                      struct.pack("<d", np.inf))
+        + _header_tag("MeasDesc_Resolution", _TAG_TYPES["Float8"],
+                      struct.pack("<d", 4e-12))
+        + _header_tag("MeasDesc_AcquisitionTime", _TAG_TYPES["Int8"],
+                      struct.pack("<q", 360000))
+        + _header_tag("Header_End", _TAG_TYPES["Empty8"])
+    )
+    path = tmp_path / "cw.ptu"
+    path.write_bytes(data)
+
+    p = PTU(path)
+    # fully constructed object with safe defaults
+    assert p.is_cw is True
+    assert p.acquisition_time == pytest.approx(360.0)
+    assert p.n_lt_bins == 0
+    assert p.get_events().shape[0] == 0
+    # time-binned / lifetime analysis raises a clear error instead of an
+    # AttributeError from a half-constructed object
+    for call in (p.time_trace, p.lifetime_histogram, p.flid, p.threshold,
+                 p.laser_triggers, p.get_markers):
+        with pytest.raises(ValueError, match="continuous-wave"):
+            call()
+
+
 def _synthetic_ptu(matrix: np.ndarray, *, bintime: float,
                    acquisition_time: float) -> PTU:
     """Construct a decoded PTU instance for focused matrix-level tests."""
     p = PTU.__new__(PTU)
     p.filepath = Path("synthetic.ptu")
     p.dark_counts = 0.0
+    p.is_cw = False
     p.acquisition_time = acquisition_time
     p.n_lt_bins = matrix.shape[1]
     p.lt_time = np.arange(matrix.shape[1], dtype=float) * 1e-9

@@ -17,6 +17,7 @@ trigger-bounded overlap region.
 
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 import numpy as np
@@ -299,7 +300,9 @@ class Match:
 
         For ``"feature"``/``"zscore"`` each signal gets its own affine transform,
         with statistics taken over the laser-on (trigger-bounded) window so the
-        laser-off baseline cannot dominate. For ``"trigger"`` the KPFM signal is
+        laser-off baseline cannot dominate. With a single trigger (left equals
+        right) no window exists and the statistics fall back to the full
+        overlap. For ``"trigger"`` the KPFM signal is
         left untouched and the time trace is mapped onto the KPFM scale using the
         two (optionally median-filtered) trigger anchors. For ``"none"`` both
         signals are passed through unscaled (identity transform).
@@ -340,13 +343,27 @@ class Match:
             # triggers. abs() keeps the PL trace's natural orientation (it rises
             # while the light is on) and anchors it to the left trigger.
             scale = abs((k_y2 - k_y1) / denom) if denom != 0 else 1.0
-            if scale == 0 or not np.isfinite(scale): # This ensures that if there is only one trigger point, meaning left=right, it will work like method="none"
+            if denom == 0 or scale == 0 or not np.isfinite(scale): # This ensures that if there is only one trigger point, meaning left=right, it will work like method="none"
+                warnings.warn(
+                    "scaling='trigger' has degenerate anchors (identical "
+                    "trigger amplitudes, e.g. a single trigger point); "
+                    "falling back to unit scale like scaling='none'.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
                 scale = 1.0
             shift = k_y1 - scale * t_y1
             return 1.0, 0.0, float(scale), float(shift)
 
-        k_mask = (k_t >= k_left) & (k_t <= k_right) & np.isfinite(k_y)
-        t_mask = (t_t_shift >= k_left) & (t_t_shift <= k_right) & np.isfinite(t_y)
+        if self._single_trigger:
+            # Single trigger (left == right): no laser-on window is defined, so
+            # take the statistics over the full overlap -- mirroring the
+            # `_window_mask` fallback used by the statistical helpers.
+            k_mask = np.isfinite(k_y)
+            t_mask = np.isfinite(t_y)
+        else:
+            k_mask = (k_t >= k_left) & (k_t <= k_right) & np.isfinite(k_y)
+            t_mask = (t_t_shift >= k_left) & (t_t_shift <= k_right) & np.isfinite(t_y)
         if not np.any(k_mask) or not np.any(t_mask):
             raise ValueError(
                 f"scaling={method!r} requires finite samples in both trigger windows."
@@ -462,7 +479,8 @@ class Match:
                           normalize: bool = True) -> dict[str, np.ndarray | float]:
         """Cross-correlation of the two aligned signals and the best lag.
 
-        Returns ``{"lag": <lags in s>, "correlation": <array>, "best_lag": <s>}``.
+        Returns ``{"lag": <lags in s>, "correlation": <array>, "best_lag": <s>,
+        "best_correlation": <float>}``.
         Positive ``best_lag`` means the time trace leads the KPFM signal
         (or equivalently, the KPFM signal lags the time trace).
         Negative ``best_lag`` means the time trace lags the KPFM signal.
