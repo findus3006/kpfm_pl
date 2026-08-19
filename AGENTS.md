@@ -86,7 +86,7 @@ docs/               per-module manuals (ptu, zurich, jpk, match, database)
   `README.md` quick-start/examples, and the example scripts in `src/examples/`
   if they use the changed call.
 - The example scripts double as living documentation; keep them runnable
-  against the files in `src/examples/Test data/`. A legacy script `example_correlate_legacy.py` 
+  against the files in `examples/Test data/`. A legacy script `example_correlate_legacy.py` 
   is provided to verify the functionality of the legacy files.
 
 ## Gotchas specific to this codebase

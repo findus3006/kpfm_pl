@@ -370,7 +370,7 @@ class PTU:
         y_min, y_max = roi["y_min"], roi["y_max"]
 
         # Get time trace for the x window
-        tt = self.time_trace(bintime=bintime, tstart=x_min, tend=x_max, laser_pulse=False)
+        tt = self.time_trace(bintime=bintime, tstart=x_min, tend=x_max)
 
         # Extract matrix and trace from the time trace metadata
         matrix = tt["meta"]["matrix"]
@@ -639,7 +639,7 @@ class PTU:
             if reference is None:
                 reference = self._tt_cache["signal"]
             left_t = self.marker[marker_channel][0] * self.rep_time
-            right_t = self.marker[marker_channel][1] * self.rep_time
+            right_t = self.marker[marker_channel][-1] * self.rep_time
             triggers = self._map_triggers(reference, left_t, right_t)
         elif self._tt_cache.get("triggers"):
             triggers = self._tt_cache["triggers"]

@@ -340,7 +340,7 @@ class Match:
             # triggers. abs() keeps the PL trace's natural orientation (it rises
             # while the light is on) and anchors it to the left trigger.
             scale = abs((k_y2 - k_y1) / denom) if denom != 0 else 1.0
-            if scale == 0 or not np.isfinite(scale):
+            if scale == 0 or not np.isfinite(scale): # This ensures that if there is only one trigger point, meaning left=right, it will work like method="none"
                 scale = 1.0
             shift = k_y1 - scale * t_y1
             return 1.0, 0.0, float(scale), float(shift)
@@ -463,7 +463,9 @@ class Match:
         """Cross-correlation of the two aligned signals and the best lag.
 
         Returns ``{"lag": <lags in s>, "correlation": <array>, "best_lag": <s>}``.
-        Positive ``best_lag`` means the time trace lags the KPFM signal.
+        Positive ``best_lag`` means the time trace leads the KPFM signal
+        (or equivalently, the KPFM signal lags the time trace).
+        Negative ``best_lag`` means the time trace lags the KPFM signal.
         """
         k, t = self._statistical_samples(within_triggers)
         k = k - k.mean()
@@ -477,5 +479,7 @@ class Match:
 
         dt = self.grid[1] - self.grid[0] if len(self.grid) > 1 else 1.0
         lags = np.arange(-len(t) + 1, len(k)) * dt
-        best_lag = float(lags[int(np.argmax(corr))])
-        return {"lag": lags, "correlation": corr, "best_lag": best_lag}
+        idx = np.argmax(np.abs(corr))
+        best_lag = float(lags[idx])
+        best_corr = float(corr[idx])
+        return {"lag": lags, "correlation": corr, "best_lag": best_lag, "best_correlation": best_corr}

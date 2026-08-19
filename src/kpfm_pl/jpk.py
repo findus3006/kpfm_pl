@@ -272,6 +272,7 @@ class JPK:
         return data
 
     def get_save_path(self, name: str = "AFM"):
+        """Get the path to save the processed image."""
         png_name = f"{self.filepath.stem} {name}.png"  
         output_dir = self.filepath.parent/"processed"
         output_dir.mkdir(exist_ok=True)
