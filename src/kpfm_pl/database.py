@@ -79,6 +79,9 @@ _DATE_SEARCH_RE = re.compile(r"\d{1,2}[.\-]\d{1,2}[.\-]\d{2,4}")
 
 _DEFAULT_WAVELENGTH_NM = 440.0
 _DEFAULT_TIME_S = 360.0
+_DEFAULT_AMPLITUDE_V = 1.0
+_DEFAULT_SCAN = 1
+
 
 _DATA_SUFFIXES = {".txt", ".ptu"}
 
@@ -353,15 +356,17 @@ def _entry_from_pair(txt_path: Path, ptu_path: Path, sample: str, precipitation:
     wavelength = pm["wavelength_nm"] or tm["wavelength_nm"] or _DEFAULT_WAVELENGTH_NM
     time_s = pm["measurement_time_s"] or _DEFAULT_TIME_S
     total_power = pm["total_power_nw"] if pm["total_power_nw"] is not None else tm["total_power_nw"]
+    kpfm_amplitude_v = tm["kpfm_amplitude_v"] or _DEFAULT_AMPLITUDE_V
+    scan = tm["scan"] or _DEFAULT_SCAN
 
     return Entry(
         sample=sample,
         precipitation=precipitation,
         date=date,
         dr=dr,
-        scan=tm["scan"],
+        scan=scan,
         kpfm_mode=tm["kpfm_mode"],
-        kpfm_amplitude_v=tm["kpfm_amplitude_v"],
+        kpfm_amplitude_v=kpfm_amplitude_v,
         kpfm_gain=tm["kpfm_gain"],
         pid_bandwidth_hz=tm["pid_bandwidth_hz"],
         wavelength_nm=wavelength,

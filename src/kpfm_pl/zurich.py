@@ -237,7 +237,7 @@ class Zurich:
             left_idx = nearest_index(ref_t, left_t)
             right_idx = nearest_index(ref_t, right_t)
             left_t, right_t = float(ref_t[left_idx]), float(ref_t[right_idx])
-            all_idx = np.array([nearest_index(ref_t, t) for t in all_times], dtype=int)
+            all_idx = np.unique(np.array([nearest_index(ref_t, t) for t in all_times], dtype=int))
             all_times = ref_t[all_idx].astype(float)
 
         print(f"{self.filepath.stem}: trigger spacing {right_t - left_t:.2f} s")
@@ -250,7 +250,7 @@ class Zurich:
         ]
         return {**out, "all": points}
 
-    def find_peaks(self, stream: str, prominence: float = 2.0, left_drop: float = 0.3,
+    def find_peaks(self, stream: Signal, prominence: float = 2.0, left_drop: float = 0.3,
                    **kwargs) -> np.ndarray:
         """Detect trigger onsets in a stream via :func:`scipy.signal.find_peaks`.
 
@@ -258,8 +258,8 @@ class Zurich:
         """
         from scipy import signal as _signal
 
-        y = self.streams[stream]["value"]
-        time = self.streams[stream]["time"]
+        y = stream.y
+        time = stream.x
         peaks, _ = _signal.find_peaks(y, prominence=prominence, **kwargs)
         onsets = []
         for p in peaks:

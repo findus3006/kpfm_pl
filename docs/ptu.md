@@ -70,9 +70,9 @@ needs as its sync reference):
 
 - `laser_pulse=True` (**default**, and how data is recorded from now on) – the
   pulse generator emits triggers throughout the whole file, regardless of
-  whether the laser light is on. Those triggers are recorded in the marker
-  channel, so the laser triggers come from `laser_triggers()` /
-  `get_markers()`.
+  whether the laser light is on. Those triggers are not recorded in the marker
+  channel and are not to be confused with the laser triggers from `laser_trigger()`
+  and `get_markers()`.
 - `laser_pulse=False` – a **legacy work-around** for files where no marker was
   picked up (e.g. the pulse generator only ran while the laser was on). The
   non-zero portion of the trace is centred and zero-padded, and the
@@ -81,7 +81,7 @@ needs as its sync reference):
 
 The returned `Signal.meta` carries `bintime`, the per-bin `matrix`
 (time-bin × lifetime-bin counts) and `average_counts`. The row sum of `matrix`
-always equals `Signal.y`, including in the legacy `laser_pulse=False` path.
+always equals `Signal.y`.
 
 ## Lifetime histogram
 

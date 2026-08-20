@@ -100,6 +100,10 @@ def _robust_trigger_value(y: np.ndarray, index: int, window: int) -> float:
 
 
 _SCALING_INFO: dict[str, dict[str, str]] = {
+    "none": {
+        "k_label": "KPFM (aligned)",
+        "t_label": "time trace (aligned)",
+    },
     "feature": {
         "k_label": "KPFM (aligned, normalized)",
         "t_label": "time trace (aligned, normalized)",
@@ -240,8 +244,7 @@ class Match:
         k_x_unit = self.kpfm.units.get("x", "")
         if self.scaling == "none":
             self._info = {
-                "k_label": self.kpfm.label,
-                "t_label": self.timetrace.label,
+                **_SCALING_INFO["none"],
                 "k_unit": self.kpfm.units.get("y", ""),
                 "t_unit": self.timetrace.units.get("y", ""),
                 "x_unit": k_x_unit,
@@ -250,8 +253,6 @@ class Match:
             target_unit = self.kpfm.units.get("y", "")
             self._info = {
                 **_SCALING_INFO["trigger"],
-                "k_label": self.kpfm.label,
-                "t_label": self.timetrace.label,
                 "k_unit": target_unit,
                 "t_unit": target_unit,
                 "x_unit": k_x_unit,

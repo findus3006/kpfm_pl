@@ -81,7 +81,7 @@ signal, so the trigger `index` values line up with the binned axis used by
 ## Peak detection
 
 ```python
-onsets = z.find_peaks(stream, prominence=2.0, left_drop=0.3)
+onsets = z.find_peaks(z.signal(stream=TRIGGER_STREAM, units="V")), prominence=2.0, left_drop=0.3)
 ```
 
 Detects trigger onsets via `scipy.signal.find_peaks` and walks back from each

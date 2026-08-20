@@ -28,7 +28,7 @@ measurement pairs by their metadata instead of hunting through folders.
 | `dr` | either file | e.g. `"DR2"` |
 | `scan` | `.txt` | `Scan1`, `Scan2`, ... |
 | `kpfm_mode` | `.txt` | `"heterodyne"` (`hKPFM<amp>V`) or `"AM"` (`AM<gain>_<amp>V`, `AM<amp>V`, or `AM<gain>`) |
-| `kpfm_amplitude_v` | `.txt` | modulation amplitude in V |
+| `kpfm_amplitude_v` | `.txt` | modulation amplitude in V. Defaults to 1V if absent. |
 | `kpfm_gain` | `.txt` | recorded but not physically important |
 | `pid_bandwidth_hz` | `.txt` | PID bandwidth, e.g. `25Hz`, `100mHz` |
 | `wavelength_nm` | `.ptu` | defaults to `440.0` if absent from either filename |

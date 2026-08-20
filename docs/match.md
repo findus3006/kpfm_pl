@@ -74,7 +74,7 @@ fall back to the full overlap.
 
 | `scaling` | Effect |
 |-----------|--------|
-| `"none"` (default) | only shift + resample; y axes, labels, and units are preserved |
+| `"none"` (default) | only shift + resample; y axes, and units are preserved |
 | `"feature"` | min-max scale each signal to `[0, 1]`; output y units are dimensionless (`"1"`) |
 | `"zscore"` | standardize each signal to zero mean / unit std; output y units are dimensionless (`"1"`) |
 | `"trigger"` | quantitative two-point calibration mapping the PL trace onto the KPFM target scale; both output y units match the KPFM input unit |
