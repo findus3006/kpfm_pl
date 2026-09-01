@@ -157,22 +157,15 @@ class Match:
     """
 
     def __init__(
-        self,
-        kpfm: Signal,
-        timetrace: Signal,
-        *,
-        kpfm_triggers: _TriggerSpec,
-        timetrace_triggers: _TriggerSpec,
-        n_points: int | None = None,
-        kpfm_smoothing: int = 1,
-        timetrace_smoothing: int = 1,
-        scaling: str = "none",
-        trigger_window: int = 5,
-    ) -> None:
+        self, kpfm: Signal, timetrace: Signal, *,
+        kpfm_triggers: _TriggerSpec, timetrace_triggers: _TriggerSpec, n_points: int | None = None, kpfm_smoothing: int = 1,
+        timetrace_smoothing: int = 1, scaling: str = "none", trigger_window: int = 5,) -> None:
+
         k_t, _ = _validate_signal(kpfm, "kpfm")
         t_t, _ = _validate_signal(timetrace, "timetrace")
         _validated_trigger_times(kpfm_triggers, "kpfm_triggers")
         _validated_trigger_times(timetrace_triggers, "timetrace_triggers")
+
         for name, value in (
             ("kpfm_smoothing", kpfm_smoothing),
             ("timetrace_smoothing", timetrace_smoothing),
@@ -213,12 +206,8 @@ class Match:
         t_t = self._input_axes[1]
         t_y = smooth(np.asarray(self.timetrace["y"], dtype=float), self._t_smooth)
 
-        k_left, k_right = _validated_trigger_times(
-            self.kpfm_triggers, "kpfm_triggers"
-        )
-        t_left, t_right = _validated_trigger_times(
-            self.timetrace_triggers, "timetrace_triggers"
-        )
+        k_left, k_right = _validated_trigger_times(self.kpfm_triggers, "kpfm_triggers")
+        t_left, t_right = _validated_trigger_times(self.timetrace_triggers, "timetrace_triggers")
         self._single_trigger = k_left == k_right
 
         # 1) shift the time trace so its left trigger meets the KPFM left trigger.
@@ -230,18 +219,12 @@ class Match:
         t0 = max(k_t.min(), t_t_shift.min())
         t1 = min(k_t.max(), t_t_shift.max())
         if t1 <= t0:
-            raise ValueError(
-                "kpfm and shifted timetrace have no overlapping time span."
-            )
+            raise ValueError("kpfm and shifted timetrace have no overlapping time span.")
 
         # 2) amplitude-scale both signals according to the chosen method.
-        (
-            self.kpfm_scale,
-            self.kpfm_shift,
-            self.scale,
-            self.shift,
-        ) = self._compute_scaling(k_y, k_t, t_y, t_t_shift, k_left, k_right)
+        (self.kpfm_scale, self.kpfm_shift, self.scale, self.shift,) = self._compute_scaling(k_y, k_t, t_y, t_t_shift, k_left, k_right)
         k_x_unit = self.kpfm.units.get("x", "")
+
         if self.scaling == "none":
             self._info = {
                 **_SCALING_INFO["none"],
@@ -447,9 +430,7 @@ class Match:
             & (x <= self.triggers["right"]["time"])
         )
 
-    def _statistical_samples(
-        self, within_triggers: bool
-    ) -> tuple[np.ndarray, np.ndarray]:
+    def _statistical_samples(self, within_triggers: bool) -> tuple[np.ndarray, np.ndarray]:
         """Return paired finite samples, rejecting underspecified statistics."""
         mask = (
             self._window_mask(self.grid)
@@ -476,8 +457,21 @@ class Match:
         r = stats.pearsonr(k, t)
         return {"statistic": float(r.statistic), "pvalue": float(r.pvalue)}
 
-    def cross_correlation(self, within_triggers: bool = True,
-                          normalize: bool = True) -> dict[str, np.ndarray | float]:
+    
+    def spearmanr(self, within_triggers: bool = True) -> dict[str, float]:
+        """Spearman correlation between the two aligned signals on the grid.
+
+        Parameters
+        ----------
+        within_triggers :
+            Restrict to the laser-on window between the two triggers.
+        """
+        k, t = self._statistical_samples(within_triggers)
+        r = stats.spearmanr(k, t)
+        return {"statistic": float(r.statistic), "pvalue": float(r.pvalue)}
+
+
+    def cross_correlation(self, within_triggers: bool = True, normalize: bool = True) -> dict[str, np.ndarray | float]:
         """Cross-correlation of the two aligned signals and the best lag.
 
         Returns ``{"lag": <lags in s>, "correlation": <array>, "best_lag": <s>,
