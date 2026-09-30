@@ -154,6 +154,25 @@ ax.plot(fit["t_fit"], fit["curve"], "r-", label=fit["label"])
 ax.set_xlabel("Time (ns)"); ax.set_ylabel("Counts")
 ```
 
+## Lifetime trace
+
+```python
+tt = ptu.time_trace(bintime=0.5, laser_pulse=False)
+lt = ptu.lifetime_trace(bintime=0.5, n_exp=2, bins=10)
+```
+
+`lifetime_trace` fits every photon time bin and returns a `Signal` containing
+the mean fitted lifetime in ns. Its `x` and `y` arrays have exactly one entry
+per selected time bin. Bins outside an intensity ROI, empty bins and failed
+fits remain `NaN` at their original positions; the individual fitted
+components are available in `Signal.meta["taus"]`.
+
+When `laser_pulse` is omitted, `lifetime_trace` inherits the mode used by the
+most recent `time_trace` call. This keeps legacy `laser_pulse=False` traces on
+the same centred, zero-padded bins. Pass `laser_pulse=True` or `False`
+explicitly when creating a lifetime trace without first creating its matching
+PL time trace.
+
 ## FLID map
 
 ```python

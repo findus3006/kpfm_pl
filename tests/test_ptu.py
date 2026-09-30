@@ -156,6 +156,118 @@ def test_flid_preserves_raw_counts_and_odd_lifetime_groups(monkeypatch):
     assert image.data.shape == (4, 3)
 
 
+def test_lifetime_trace_preserves_time_bins_and_marks_failed_fits(monkeypatch):
+    class DummyFit:
+        calls = 0
+
+        def __init__(self, *args, **kwargs):
+            self.call = DummyFit.calls
+            DummyFit.calls += 1
+            self.success = self.call == 0
+
+        def parameters(self):
+            return {"tau": np.array([2.0, 4.0])}
+
+    monkeypatch.setattr("kpfm_pl.ptu.MultiExpFit", DummyFit)
+    matrix = np.array([
+        [4, 2, 1, 0, 0],
+        [0, 0, 0, 0, 0],
+        [8, 4, 2, 0, 0],
+    ], dtype=np.uint32)
+    p = _synthetic_ptu(matrix, bintime=1.0, acquisition_time=3.0)
+
+    trace = p.lifetime_trace(
+        bintime=1.0, n_exp=2, bins=2,
+        mode="manual", start=-1, end=10,
+    )
+
+    np.testing.assert_allclose(trace.x, [0.0, 1.0, 2.0])
+    assert len(trace.x) == len(trace.y) == matrix.shape[0]
+    assert trace.y[0] == pytest.approx(3.0)
+    assert np.isnan(trace.y[1])  # empty photon bin
+    assert np.isnan(trace.y[2])  # unsuccessful fit
+    assert trace.meta["taus"].shape == (3, 2)
+    assert trace.units == {"x": "s", "y": "ns"}
+
+
+def test_lifetime_trace_keeps_intensity_roi_bins_as_nan(monkeypatch):
+    class DummyFit:
+        success = True
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def parameters(self):
+            return {"tau": np.array([5.0])}
+
+    monkeypatch.setattr("kpfm_pl.ptu.MultiExpFit", DummyFit)
+    matrix = np.array([[4, 2, 1, 0], [8, 4, 2, 0]], dtype=np.uint32)
+    p = _synthetic_ptu(matrix, bintime=1.0, acquisition_time=2.0)
+    trace = p.lifetime_trace(
+        bintime=1.0, y_min=10.0, mode="manual", start=-1, end=10,
+    )
+
+    np.testing.assert_allclose(trace.x, [0.0, 1.0])
+    assert np.isnan(trace.y[0])
+    assert trace.y[1] == pytest.approx(5.0)
+
+
+def test_lifetime_trace_inherits_legacy_time_bin_transform(monkeypatch):
+    class DummyFit:
+        success = True
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def parameters(self):
+            return {"tau": np.array([3.0])}
+
+    monkeypatch.setattr("kpfm_pl.ptu.MultiExpFit", DummyFit)
+    matrix = np.zeros((8, 4), dtype=np.uint32)
+    matrix[:3] = [[4, 2, 1, 0], [8, 4, 2, 0], [12, 6, 3, 0]]
+    p = _synthetic_ptu(matrix, bintime=1.0, acquisition_time=8.0)
+
+    time_trace = p.time_trace(bintime=1.0, laser_pulse=False)
+    lifetime_trace = p.lifetime_trace(
+        bintime=1.0, mode="manual", start=-1, end=10,
+    )
+
+    assert len(lifetime_trace.x) == len(lifetime_trace.y) == len(time_trace.x)
+    np.testing.assert_array_equal(lifetime_trace.x, time_trace.x)
+    np.testing.assert_array_equal(
+        np.flatnonzero(np.isfinite(lifetime_trace.y)),
+        np.flatnonzero(time_trace.y),
+    )
+    assert lifetime_trace.meta["laser_pulse"] is False
+
+
+def test_lifetime_trace_can_override_inherited_legacy_mode(monkeypatch):
+    class DummyFit:
+        success = True
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def parameters(self):
+            return {"tau": np.array([3.0])}
+
+    monkeypatch.setattr("kpfm_pl.ptu.MultiExpFit", DummyFit)
+    matrix = np.zeros((8, 4), dtype=np.uint32)
+    matrix[:3] = [[4, 2, 1, 0], [8, 4, 2, 0], [12, 6, 3, 0]]
+    p = _synthetic_ptu(matrix, bintime=1.0, acquisition_time=8.0)
+    p.time_trace(bintime=1.0, laser_pulse=False)
+
+    lifetime_trace = p.lifetime_trace(
+        bintime=1.0, laser_pulse=True,
+        mode="manual", start=-1, end=10,
+    )
+
+    np.testing.assert_array_equal(
+        np.flatnonzero(np.isfinite(lifetime_trace.y)), [0, 1, 2]
+    )
+    assert lifetime_trace.meta["laser_pulse"] is True
+
+
 @pytest.mark.parametrize("name,value", [
     ("n_exp", 0), ("bins", 0), ("lifetime_bins", 0), ("intensity_bins", 1025),
 ])
@@ -256,7 +368,7 @@ def test_continuous_wave_file_constructs_and_rejects_binning(tmp_path):
     assert p.get_events().shape[0] == 0
     # time-binned / lifetime analysis raises a clear error instead of an
     # AttributeError from a half-constructed object
-    for call in (p.time_trace, p.lifetime_histogram, p.flid, p.threshold,
+    for call in (p.time_trace, p.lifetime_histogram, p.lifetime_trace, p.flid, p.threshold,
                  p.laser_triggers, p.get_markers):
         with pytest.raises(ValueError, match="continuous-wave"):
             call()

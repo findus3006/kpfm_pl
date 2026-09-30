@@ -335,6 +335,7 @@ class PTU:
             "time": time, "trace": trace, "matrix": sliced, "bintime": bintime,
             "bin_durations": bin_durations,
             "acquisition_duration": selected_duration,
+            "laser_pulse": bool(laser_pulse),
         }
         if meta.get("triggers"):
             self._tt_cache["triggers"] = meta["triggers"]
@@ -412,6 +413,152 @@ class PTU:
 
         return roi_matrix
 
+    def _fit_time_bin_lifetimes(
+        self, roi: dict[str, float] | None = None, *,
+        x_min: float | None = None, x_max: float | None = None,
+        y_min: float | None = None, y_max: float | None = None,
+        bintime: float = 50e-3, n_exp: int = 1, bins: int = 1,
+        mode: str = "fraction", fraction: float = 0.95,
+        smoothing: float = 2.0, start: float = 0.0,
+        end: float | None = None, laser_pulse: bool | None = None,
+        **fit_kwargs,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, float | None]]:
+        """Fit lifetimes per time bin while preserving time-bin positions."""
+        self._require_pulsed()
+        if (isinstance(n_exp, (bool, np.bool_))
+                or not isinstance(n_exp, (int, np.integer)) or n_exp < 1):
+            raise ValueError("n_exp must be a positive integer.")
+        if (isinstance(bins, (bool, np.bool_))
+                or not isinstance(bins, (int, np.integer)) or bins < 1):
+            raise ValueError("bins must be a positive integer.")
+
+        if roi is not None:
+            x_min, x_max = roi.get("x_min"), roi.get("x_max")
+            y_min, y_max = roi.get("y_min"), roi.get("y_max")
+
+        xmn = 0.0 if x_min is None else x_min
+        xmx = self.acquisition_time if x_max is None else x_max
+        # Lifetime values must be fitted from the same time-bin layout as the
+        # PL trace they accompany.  In particular, ``laser_pulse=False``
+        # centres and pads legacy marker-less traces.  Rebuilding with the
+        # normal default would silently put the lifetime values back on the
+        # unshifted bins.  Unless explicitly overridden, inherit the mode of
+        # the most recently generated time trace.
+        if laser_pulse is None:
+            laser_pulse = bool(self._tt_cache.get("laser_pulse", True))
+        elif not isinstance(laser_pulse, (bool, np.bool_)):
+            raise TypeError("laser_pulse must be a bool or None.")
+
+        if laser_pulse:
+            tt = self.time_trace(
+                bintime=bintime, tstart=xmn, tend=xmx, laser_pulse=True
+            )
+            time = np.asarray(tt["x"], dtype=float)
+            counts = np.asarray(tt["y"], dtype=float)
+            matrix = np.asarray(tt["meta"]["matrix"])
+        else:
+            # Apply legacy centring to the complete acquisition before taking
+            # an x-window.  Centring only a requested sub-window can move the
+            # same photons to different bins than in the full PL trace.
+            tt = self.time_trace(bintime=bintime, laser_pulse=False)
+            full_time = np.asarray(tt["x"], dtype=float)
+            full_counts = np.asarray(tt["y"], dtype=float)
+            full_matrix = np.asarray(tt["meta"]["matrix"])
+            durations = np.asarray(tt["meta"]["bin_durations"], dtype=float)
+            in_window = (full_time + durations > xmn) & (full_time < xmx)
+            time = full_time[in_window]
+            counts = full_counts[in_window]
+            matrix = full_matrix[in_window]
+
+        ymn = -np.inf if y_min is None else y_min
+        ymx = np.inf if y_max is None else y_max
+        selected = (counts >= ymn) & (counts < ymx)
+        selected_matrix = matrix[selected, :]
+        if selected_matrix.shape[0] == 0 or not np.any(selected_matrix):
+            raise ValueError("The selected lifetime region contains no photons.")
+
+        # Use the selected region to choose one common lifetime fit window, then
+        # fit each selected row independently. Unselected/invalid/failed rows
+        # remain NaN so their positions stay aligned with ``time``.
+        lt_ns = self.lt_time * 1e9
+        lt_roi = selected_matrix.sum(axis=0)
+        t0_ns = lt_ns[int(np.argmax(lt_roi))]
+        lt_tshift = lt_ns - t0_ns
+        mask = fit_window_mask(lt_tshift, lt_roi, mode, fraction=fraction,
+                               smoothing=smoothing, start=start, end=end)
+
+        group_starts = np.arange(0, matrix.shape[1], bins)
+        if group_starts.size < 2:
+            raise ValueError("bins must leave at least two lifetime groups for fitting.")
+        group_sizes = np.minimum(bins, matrix.shape[1] - group_starts)
+        binned_lt = np.add.reduceat(lt_ns, group_starts) / group_sizes
+        mask = np.add.reduceat(mask, group_starts) > 0
+        t_fit = (binned_lt - t0_ns)[mask]
+        if t_fit.size < 2:
+            raise ValueError("The selected lifetime fit window contains fewer than two bins.")
+        binned_matrix = np.add.reduceat(matrix, group_starts, axis=1)
+
+        taus = np.full((len(time), n_exp), np.nan, dtype=float)
+        n_binned = len(mask)
+        for index in np.flatnonzero(selected):
+            lt_bin = np.asarray(binned_matrix[index], dtype=float)
+            norm = np.max(lt_bin)
+            if not np.isfinite(norm) or norm == 0:
+                continue
+            y_fit = lt_bin[mask] / norm
+            ymax = np.max(y_fit)
+            if not np.isfinite(ymax) or ymax == 0:
+                continue
+            y_fit = y_fit / ymax
+            offset = self.dark_counts * bintime / n_binned / norm
+            fit = MultiExpFit(t_fit, y_fit, n_exp, offset, **fit_kwargs)
+            if fit.success:
+                fitted_taus = np.asarray(fit.parameters()["tau"], dtype=float)
+                if fitted_taus.shape == (n_exp,) and np.all(np.isfinite(fitted_taus)):
+                    taus[index] = fitted_taus
+
+        bounds = {"x_min": x_min, "x_max": x_max,
+                  "y_min": y_min, "y_max": y_max}
+        return time, taus, counts, bounds
+
+    def lifetime_trace(self, roi: dict[str, float] | None = None, *,
+                       x_min: float | None = None, x_max: float | None = None,
+                       y_min: float | None = None, y_max: float | None = None,
+                       bintime: float = 50e-3, n_exp: int = 1, bins: int = 1,
+                       mode: str = "fraction", fraction: float = 0.95,
+                       smoothing: float = 2.0, start: float = 0.0,
+                       end: float | None = None,
+                       laser_pulse: bool | None = None, **fit_kwargs) -> Signal:
+        """Return mean fitted lifetime versus acquisition time.
+
+        The returned ``Signal.x`` contains the time-bin positions and
+        ``Signal.y`` contains the arithmetic mean of the fitted exponential
+        lifetimes in ns. There is exactly one value per time bin. A value is
+        ``NaN`` when the bin is outside the requested intensity ROI, contains
+        no usable photons, or its fit fails. Individual fitted components are
+        available as ``signal.meta["taus"]`` with shape ``(time bins, n_exp)``.
+        By default, the trace inherits the ``laser_pulse`` mode of the most
+        recent :meth:`time_trace` call.  Pass the option explicitly when no
+        time trace has been generated first.
+        """
+        time, taus, counts, bounds = self._fit_time_bin_lifetimes(
+            roi, x_min=x_min, x_max=x_max, y_min=y_min, y_max=y_max,
+            bintime=bintime, n_exp=n_exp, bins=bins, mode=mode,
+            fraction=fraction, smoothing=smoothing, start=start, end=end,
+            laser_pulse=laser_pulse, **fit_kwargs,
+        )
+        mean_taus = np.full(len(time), np.nan, dtype=float)
+        valid = np.all(np.isfinite(taus), axis=1)
+        mean_taus[valid] = np.mean(taus[valid], axis=1)
+        return Signal(
+            time, mean_taus,
+            label=f"{self.filepath.stem} mean lifetime",
+            units={"x": "s", "y": "ns"},
+            meta={"bintime": bintime, "n_exp": n_exp, "lt_bins": bins,
+                  "roi": bounds, "taus": taus, "counts": counts,
+                  "laser_pulse": bool(self._tt_cache["laser_pulse"])},
+        )
+
     def flid(self, roi: dict[str, float] | None = None, *,
              x_min: float | None = None, x_max: float | None = None,
              y_min: float | None = None, y_max: float | None = None,
@@ -424,10 +571,7 @@ class PTU:
 
         Each time bin of the (optionally) ROI-restricted matrix is fitted with
         ``n_exp`` exponentials; the resulting ``(lifetime, counts)`` pairs are
-        binned into a 2-D histogram (lifetime on x, counts on y). 
-        Bug: If the ptu file does not have markers PTU((laser_pulse=False),
-        the tt_cache is overwritten by the flid() call. In that case run 
-        laser_triggers() before flid().
+        binned into a 2-D histogram (lifetime on x, counts on y).
 
         Parameters
         ----------
@@ -468,11 +612,6 @@ class PTU:
         """
         from scipy import ndimage
 
-        self._require_pulsed()
-        if isinstance(n_exp, (bool, np.bool_)) or not isinstance(n_exp, (int, np.integer)) or n_exp < 1:
-            raise ValueError("n_exp must be a positive integer.")
-        if isinstance(bins, (bool, np.bool_)) or not isinstance(bins, (int, np.integer)) or bins < 1:
-            raise ValueError("bins must be a positive integer.")
         for name, value in (("lifetime_bins", lifetime_bins),
                             ("intensity_bins", intensity_bins)):
             if (isinstance(value, (bool, np.bool_))
@@ -480,85 +619,21 @@ class PTU:
                     or not 1 <= value <= 1024):
                 raise ValueError(f"{name} must be an integer between 1 and 1024.")
 
-        # Resolve ROI bounds (roi dict takes precedence over explicit kwargs).
-        if roi is not None:
-            x_min, x_max = roi.get("x_min"), roi.get("x_max")
-            y_min, y_max = roi.get("y_min"), roi.get("y_max")
-
-        if x_min is None and x_max is None and y_min is None and y_max is None:
-            tt = self.time_trace(bintime=bintime)
-            matrix = tt["meta"]["matrix"]
-        else:
-            xmn = 0.0 if x_min is None else x_min
-            xmx = self.acquisition_time if x_max is None else x_max
-            tt = self.time_trace(bintime=bintime, tstart=xmn, tend=xmx)
-            trace = tt["y"]
-            full_matrix = tt["meta"]["matrix"]
-            ymn = -np.inf if y_min is None else y_min
-            ymx = np.inf if y_max is None else y_max
-            matrix = full_matrix[(trace >= ymn) & (trace < ymx), :]
-
-        if matrix.shape[0] == 0 or not np.any(matrix):
-            raise ValueError("The selected FLID region contains no photons.")
-
-        # Lifetime axis, peak-shifted to ns, and the fit-window mask.
-        lt_ns = self.lt_time * 1e9
-        lt_roi = matrix.sum(axis=0)
-        t0_ns = lt_ns[int(np.argmax(lt_roi))]
-        lt_tshift = lt_ns - t0_ns
-
-        mask = fit_window_mask(lt_tshift, lt_roi, mode, fraction=fraction,
-                               smoothing=smoothing, start=start, end=end)
-
-        # Bin the lifetime axis to make per-bin fits more robust.
-        group_starts = np.arange(0, matrix.shape[1], bins)
-        if group_starts.size < 2:
-            raise ValueError("bins must leave at least two lifetime groups for fitting.")
-        group_sizes = np.minimum(bins, matrix.shape[1] - group_starts)
-        binned_lt = np.add.reduceat(lt_ns, group_starts) / group_sizes
-        mask = np.add.reduceat(mask, group_starts) > 0
-        binned_lt_tshift = binned_lt - t0_ns
-        t_fit = binned_lt_tshift[mask]
-        if t_fit.size < 2:
-            raise ValueError("The selected FLID fit window contains fewer than two bins.")
-        binned_matrix = np.add.reduceat(matrix, group_starts, axis=1)
-
-        n_binned = len(mask)
-        taus: list[np.ndarray] = []
-        counts: list[float] = []
-        for row in binned_matrix:
-            lt_bin = np.asarray(row, dtype=float)
-            raw_counts = float(np.sum(lt_bin))
-            norm = np.max(lt_bin)
-            if not np.isfinite(norm) or norm == 0:
-                continue
-            lt_bin = lt_bin / norm
-            y_fit = lt_bin[mask]
-            ymax = np.max(y_fit)
-            if not np.isfinite(ymax) or ymax == 0:
-                continue
-            y_fit = y_fit / ymax
-            counts.append(raw_counts)
-            offset = self.dark_counts * bintime / n_binned / norm
-            fit = MultiExpFit(t_fit, y_fit, n_exp, offset, **fit_kwargs)
-            if fit.success:
-                taus.append(np.asarray(fit.parameters()["tau"], dtype=float))
-            else:
-                taus.append(np.full(n_exp, np.nan))
-
-        taus = np.array(taus) if taus else np.empty((0, n_exp))
-        counts = np.array(counts, dtype=float)
-        n_skipped = binned_matrix.shape[0] - len(counts)
-        print(f"{self.filepath.stem}: FLID over {len(counts)} time bins "
-              f"({n_skipped} skipped).")
+        time, taus, counts, bounds = self._fit_time_bin_lifetimes(
+            roi, x_min=x_min, x_max=x_max, y_min=y_min, y_max=y_max,
+            bintime=bintime, n_exp=n_exp, bins=bins, mode=mode,
+            fraction=fraction, smoothing=smoothing, start=start, end=end,
+            **fit_kwargs,
+        )
+        n_fitted = int(np.count_nonzero(np.all(np.isfinite(taus), axis=1)))
+        print(f"{self.filepath.stem}: FLID fitted {n_fitted} of {len(time)} time bins.")
 
         cnt_unit = f"counts/{bintime * 1e3:.0f} ms"
         base_meta = {
             "bintime": bintime, "n_exp": n_exp, "lt_bins": bins, "sigma": sigma,
             "lifetime_bins": int(lifetime_bins),
             "intensity_bins": int(intensity_bins),
-            "roi": {"x_min": x_min, "x_max": x_max, "y_min": y_min, "y_max": y_max},
-            "taus": taus, "counts": counts,
+            "roi": bounds, "time": time, "taus": taus, "counts": counts,
         }
 
         def _make_image(tau_vals: np.ndarray, label: str) -> Image:
