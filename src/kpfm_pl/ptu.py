@@ -424,7 +424,10 @@ class PTU:
 
         Each time bin of the (optionally) ROI-restricted matrix is fitted with
         ``n_exp`` exponentials; the resulting ``(lifetime, counts)`` pairs are
-        binned into a 2-D histogram (lifetime on x, counts on y).
+        binned into a 2-D histogram (lifetime on x, counts on y). 
+        Bug: If the ptu file does not have markers PTU((laser_pulse=False),
+        the tt_cache is overwritten by the flid() call. In that case run 
+        laser_triggers() before flid().
 
         Parameters
         ----------
@@ -445,6 +448,7 @@ class PTU:
         lifetime_bins, intensity_bins :
             Number of histogram bins on the fitted-lifetime and raw-count axes.
             Each must be between 1 and 1024, which keeps map allocation bounded.
+            Relevant only for plotting the histogram.
         mode, fraction, smoothing, start, end :
             Fit-window left-bound selection, as in :meth:`fit_lifetime`.
         sigma :
@@ -721,7 +725,6 @@ class PTU:
                 RuntimeWarning,
                 stacklevel=3,
             )
-            return None
         left_idx = nearest_index(time, left_t)
         right_idx = nearest_index(time, right_t)
         return trigger_dict(
