@@ -213,6 +213,7 @@ class Match:
         # 1) shift the time trace so its left trigger meets the KPFM left trigger.
         offset = t_left - k_left
         t_t_shift = t_t - offset
+        self.offset = offset
 
         # Validate overlap before scaling so invalid inputs fail consistently,
         # independent of the selected scaling mode.
@@ -385,7 +386,7 @@ class Match:
         """Aligned, amplitude-scaled time trace -- shared grid or native axis."""
         info = self._info
         meta = {"scale": self.scale, "shift": self.shift, "scaling": self.scaling,
-                "triggers": self.triggers, "smoothing": self._t_smooth,
+                "triggers": self.triggers, "smoothing": self._t_smooth, "time_shift" : self.offset,
                 "source": {"label": self.timetrace.label,
                            "units": dict(self.timetrace.units),
                            "meta": dict(self.timetrace.meta)}}
