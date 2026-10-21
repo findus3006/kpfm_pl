@@ -18,7 +18,13 @@ import numpy as np
 
 from .core import Image, Signal
 from .fitting import MultiExpFit
-from .utils import TriggerPair, fit_window_mask, nearest_index, trigger_dict
+from .utils import (
+    TriggerPoint, 
+    TriggerPair, 
+    TriggerCollection, 
+    fit_window_mask, 
+    nearest_index, 
+    trigger_dict)
 
 __all__ = ["PTU"]
 
@@ -737,17 +743,34 @@ class PTU:
 
     # -------------------------------------------------------------- triggers
     def laser_triggers(self, marker_channel: int = 4, *,
-                       reference: Signal | None = None) -> TriggerPair | None:
-        """First and last laser-trigger markers as ``{"left": ..., "right": ...}``.
-
-        With only a single marker on the channel, a warning is emitted and the
-        left and right triggers coincide (usable as a single-trigger spec for
-        :class:`~kpfm_pl.match.Match`). Falls back to the time-trace edges
-        (when ``laser_pulse=False`` was used) if no hardware marker is present.
-        When ``reference`` is supplied, indices and times are mapped to its
-        time axis. Markers outside the reference are rejected rather than
-        clamped to an unrelated endpoint.
+                       reference: Signal | None = None) -> TriggerCollection | None:
+        """Locate the laser triggers in the marker channel (default).
+            With only a single marker on the channel, a warning is emitted and the
+            left and right triggers coincide (usable as a single-trigger spec for
+            :class:`~kpfm_pl.match.Match`). Falls back to the time-trace edges
+            (when ``laser_pulse=False`` was used) if no hardware marker is present.
+            For this legacy case only the first and last trigger work.
+            When ``reference`` is supplied, indices and times are mapped to its
+            time axis. Markers outside the reference are rejected rather than
+            clamped to an unrelated endpoint.
+    
+            Parameters
+            ----------
+            marker_channel :
+                The PicoHarps marker channel where the laser trigger is detected.
+            reference :
+                Optional binned :class:`Signal`; when given, trigger indices are
+                mapped onto its (binned) time axis. Default: None
+    
+            Returns
+            -------
+            dict or None
+            ``{"left": {"index", "time"}, "right": {"index", "time"},
+            "all": [{"index", "time"}, ...]}``. The ``"all"`` list holds
+            every detected marker in the same point format as ``left`` and
+            ``right``. ``None`` if no trigger is found.
         """
+        
         self._require_pulsed()
         if self.marker.get(marker_channel):
             markers = self.marker[marker_channel]
@@ -763,17 +786,26 @@ class PTU:
                 self.time_trace()
             if reference is None:
                 reference = self._tt_cache["signal"]
+            ref_t = np.asarray(reference["x"], dtype=float)
+            all_times = [marker*self.rep_time for marker in markers]
             left_t = markers[0] * self.rep_time
             right_t = markers[-1] * self.rep_time
-            triggers = self._map_triggers(reference, left_t, right_t)
-        elif self._tt_cache.get("triggers"):
+            left_idx = nearest_index(ref_t, left_t)
+            right_idx = nearest_index(ref_t, right_t)
+            triggers = trigger_dict(left_idx, left_t, right_t, right_idx)
+            all_idx = np.unique(np.array([nearest_index(ref_t, t) for t in all_times], dtype=int))
+            points: list[TriggerPoint] = [
+                        {"index": int(index), "time": float(trigger_time)}
+                        for index, trigger_time in zip(all_idx, all_times, strict=True)]
+            return {**triggers, "all": points}
+        elif self._tt_cache.get("triggers"): # this is the legacy bit. Only works for 2 triggers
             triggers = self._tt_cache["triggers"]
             if reference is not None:
-                triggers = self._map_triggers(
-                    reference,
-                    triggers["left"]["time"],
-                    triggers["right"]["time"],
-                )
+                left_t = triggers["left"]["time"]
+                right_t = triggers["right"]["time"]
+                left_idx = nearest_index(ref_t, left_t)
+                right_idx = nearest_index(ref_t, right_t)
+                triggers = trigger_dict(left_idx, left_t, right_idx, right_t)
         else:
             warnings.warn(
                 f"{self.filepath.stem}: no laser triggers found.",
@@ -786,25 +818,6 @@ class PTU:
         print(f"{self.filepath.stem}: trigger spacing "
               f"{triggers['right']['time'] - triggers['left']['time']:.2f} s")
         return triggers
-
-    def _map_triggers(self, reference: Signal, left_t: float, right_t: float
-                      ) -> TriggerPair | None:
-        """Map absolute trigger times to a reference while preserving invariants."""
-        time = np.asarray(reference["x"], dtype=float)
-        if time.ndim != 1 or time.size == 0 or not np.all(np.isfinite(time)):
-            raise ValueError("reference must have a non-empty finite 1-D time axis.")
-        low, high = float(np.min(time)), float(np.max(time))
-        if left_t < low or right_t > high:
-            warnings.warn(
-                f"{self.filepath.stem}: laser triggers lie outside the reference time axis.",
-                RuntimeWarning,
-                stacklevel=3,
-            )
-        left_idx = nearest_index(time, left_t)
-        right_idx = nearest_index(time, right_t)
-        return trigger_dict(
-            left_idx, time[left_idx], right_idx, time[right_idx]
-        )
 
     def get_markers(self, marker_channel: int = 4) -> np.ndarray | None:
         """All marker times (seconds) on ``marker_channel``."""

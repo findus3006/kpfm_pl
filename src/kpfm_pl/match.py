@@ -29,6 +29,7 @@ from .utils import (
     derivative,
     feature_scale_params,
     resample,
+    nearest_index,
     smooth,
     zscore_params,
 )
@@ -263,8 +264,8 @@ class Match:
 
         # Store trigger points in the shared loader shape. Their indices and
         # times refer to the common grid, so the point invariant always holds.
-        left_index = int(np.argmin(np.abs(grid - k_left)))
-        right_index = int(np.argmin(np.abs(grid - k_right)))
+        left_index = nearest_index(grid - k_left)
+        right_index = nearest_index(grid - k_right)
         self.triggers: TriggerPair = {
             "left": {"index": left_index, "time": float(grid[left_index])},
             "right": {"index": right_index, "time": float(grid[right_index])},
