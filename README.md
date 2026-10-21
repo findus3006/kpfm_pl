@@ -60,34 +60,34 @@ stream_names = z.stream_names()
 kpfm = z.average(stream_names[0], bintime=0.05)            # Signal
 z_triggers = z.laser_triggers(stream_names[1], reference=kpfm, method="slope")
 
-# Align on the laser triggers
+# Align on the first laser trigger and resample onto a shared grid
 m = Match(kpfm, tt,
           kpfm_triggers=z_triggers,
           timetrace_triggers=tt_triggers,
           kpfm_smoothing=20, timetrace_smoothing=1)
 
-aligned = m.to_dict()
-print("Pearson:", m.pearson())
-print("Best lag (s):", m.cross_correlation()["best_lag"])
-
-k = m.kpfm_signal()        # aligned KPFM Signal (on shared grid)
-t = m.timetrace_signal()   # aligned time trace Signal (on shared grid)
+# Cut out the region of interest: between two triggers or two times (s)
+window = m.extract(m.triggers[0], m.triggers[-1])   # or m.extract(10.0, 300.0)
+k = window["kpfm"]        # aligned KPFM Signal
+t = window["timetrace"]   # aligned time trace Signal, same x axis
 
 fig, ax = plt.subplots(figsize=(16, 9))
-ax.plot(k["x"], k["y"], label=k["label"])
-ax.plot(t["x"], t["y"], label=t["label"])
-ax.axvline(k["meta"]["triggers"]["left"]["time"], color="k", linestyle="--", label="Left laser trigger")
-ax.axvline(k["meta"]["triggers"]["right"]["time"], color="k", linestyle="--", label="Right laser trigger")
-ax.set_ylabel("Amplitude (V)")
+ax2 = ax.twinx()
+ax.plot(k["x"], k["y"], label=k["label"], c="red")
+ax2.plot(t["x"], t["y"], label=t["label"], c="blue")
+for point in k["meta"]["triggers"]:
+    ax.axvline(point["time"], color="k", linestyle="--")
+ax.set_ylabel("KPFM signal (V)")
+ax2.set_ylabel("Counts")
 ax.set_xlabel("Time (s)")
-ax.set_title("Correlation between KPFM signal and time trace")
+ax.set_title("KPFM signal and time trace")
 ax.grid(True)
-ax.legend()
+fig.legend()
 plt.show()
 ```
 
-See [`docs/match.md`](docs/match.md) for the full alignment, scaling and
-statistics manual.
+See [`docs/match.md`](docs/match.md) for the full alignment and extraction
+manual.
 
 ### Fit a lifetime histogram
 
@@ -161,7 +161,7 @@ Detailed per-module manuals live in [`docs/`](docs):
 | [`docs/ptu.md`](docs/ptu.md) | `PTU` – TCSPC time traces, FLID, thresholding, lifetime fitting |
 | [`docs/zurich.md`](docs/zurich.md) | `Zurich` – lock-in `.txt` streams and laser triggers |
 | [`docs/jpk.md`](docs/jpk.md) | `JPK` – AFM channel loading, calibration and processing |
-| [`docs/match.md`](docs/match.md) | `Match` – alignment, scaling and correlation of a PL/KPFM pair |
+| [`docs/match.md`](docs/match.md) | `Match` – alignment and extraction of a PL/KPFM pair |
 | [`docs/database.md`](docs/database.md) | `database` – searchable databank of measurement pairs |
 
 ## Tests

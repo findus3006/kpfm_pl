@@ -1,16 +1,19 @@
-# Match: correlating a PL time trace with a KPFM signal (`kpfm_pl.Match`)
+# Match: aligning a PL time trace with a KPFM signal (`kpfm_pl.Match`)
 
 `Match` takes two [`Signal`](../src/kpfm_pl/core.py) traces – a KPFM lock-in
 signal and a photoluminescence (PL) time trace – plus the laser triggers of
 each, and:
 
-1. **shifts** the time axes so the *left* laser triggers coincide,
-2. **amplitude-scales** the two signals with a selectable method,
-3. **resamples** both onto a shared, uniform time grid.
+1. **shifts** the time trace so one chosen trigger coincides with its KPFM
+   counterpart,
+2. **resamples** both signals onto a shared, uniform time grid that spans
+   every data point of both signals,
+3. **maps every KPFM trigger** onto that grid.
 
-It then offers statistical helpers (Pearson correlation, cross-correlation /
-lag) over the trigger-bounded overlap region. There is no plotting inside the
-class – everything is returned as `Signal`/`dict` objects.
+You then pick the region you care about with `extract`, either between two
+triggers or between two times. There is no amplitude scaling, no statistics
+and no plotting inside the class – everything is returned as `Signal`/`dict`
+objects, ready for your own post-processing.
 
 The runnable example is
 [`examples/example_correlate.py`](../examples/example_correlate.py), which uses
@@ -41,96 +44,98 @@ m = k.Match(kpfm, tt,
             timetrace_triggers=tt_triggers,
             kpfm_smoothing=20, timetrace_smoothing=1)
 
-k_sig = m.kpfm_signal()        # aligned KPFM Signal on the shared grid
-t_sig = m.timetrace_signal()   # aligned time trace on the shared grid
-print("Pearson:", m.pearson())
-print("Best lag (s):", m.cross_correlation()["best_lag"])
+window = m.extract(m.triggers[0], m.triggers[-1])   # first to last trigger
+k_sig, t_sig = window["kpfm"], window["timetrace"]
 ```
+
+## Triggers
+
+A trigger is a point `{"index": int, "time": float}`; a collection of triggers
+is a chronological list of such points. This is what
+[`PTU.laser_triggers`](ptu.md#laser-triggers-and-markers) and
+[`Zurich.laser_triggers`](zurich.md#laser-triggers) return. `Match` also
+accepts a single point, or plain time(s) in seconds – e.g. the exact hardware
+marker times from `ptu.get_markers()`.
 
 ## Constructor parameters
 
 ```python
 Match(kpfm, timetrace, *, kpfm_triggers, timetrace_triggers,
-      n_points=None, kpfm_smoothing=1, timetrace_smoothing=1,
-      scaling="none", trigger_window=5)
+      align=0, dt=None, kpfm_smoothing=1, timetrace_smoothing=1)
 ```
 
 | Parameter | Default | Meaning |
 |-----------|---------|---------|
 | `kpfm`, `timetrace` | – | the two `Signal` traces to align |
-| `kpfm_triggers`, `timetrace_triggers` | – | trigger dicts (`{"left": {"index","time"}, "right": ...}`) from the loaders, or a single `float` time |
-| `n_points` | `None` | samples in the shared grid; `None` uses the finer native resolution over the overlap; an explicit value must be an integer of at least 2 |
+| `kpfm_triggers`, `timetrace_triggers` | – | a list of trigger points, a single point, or time(s) in seconds |
+| `align` | `0` | position of the trigger in **both** lists used for alignment; negative values count from the end |
+| `dt` | `None` | grid spacing in seconds; `None` uses the finer of the two native resolutions |
 | `kpfm_smoothing`, `timetrace_smoothing` | `1` | moving-average window applied to each signal before alignment |
-| `scaling` | `"none"` | amplitude-scaling method (see below) |
-| `trigger_window` | `5` | half-width (samples) of the median filter on each trigger anchor when `scaling="trigger"` |
 
-A single `float` trigger sets the right trigger equal to the left (only the
-time-shift/resampling is well defined) and disallows `scaling="trigger"`.
-With a single trigger there is no laser-on window, so the
-`"feature"`/`"zscore"` statistics (and the trigger-bounded statistics below)
-fall back to the full overlap.
+The time trace is shifted by
+`offset = timetrace_triggers[align]["time"] - kpfm_triggers[align]["time"]`.
+Both loaders report rising flanks by default, so the lists normally pair up
+one-to-one. If they don't (e.g. a legacy file read with `flank="both"`), pick
+the pair with `align`, or slice the lists before passing them.
 
-## Scaling methods
+## Grid and triggers
 
-| `scaling` | Effect |
-|-----------|--------|
-| `"none"` (default) | only shift + resample; y axes, and units are preserved |
-| `"feature"` | min-max scale each signal to `[0, 1]`; output y units are dimensionless (`"1"`) |
-| `"zscore"` | standardize each signal to zero mean / unit std; output y units are dimensionless (`"1"`) |
-| `"trigger"` | quantitative two-point calibration mapping the PL trace onto the KPFM target scale; both output y units match the KPFM input unit |
+```python
+m.offset     # time shift subtracted from the time-trace axis (s)
+m.grid       # shared uniform grid (s), KPFM time frame
+m.dt         # grid spacing (s)
+m.triggers   # every KPFM trigger mapped onto m.grid
+```
 
-For `"feature"`/`"zscore"` the statistics are taken over the laser-on
-(trigger-bounded) window so the laser-off baseline cannot dominate. For
-`"trigger"` the KPFM signal is left untouched and the time trace is anchored to
-the KPFM values at the two triggers (its natural rising orientation is
-preserved via `abs()` of the scale).
+- The grid spans **all** samples of both signals. Where one signal has no data
+  of its own, its grid values are `NaN`.
+- The grid passes exactly through the aligned trigger. With `dt` equal to the
+  PTU `bintime`, the shifted PTU bins land exactly on grid points, so the
+  photon counts are carried over unchanged rather than interpolated.
+- After alignment both signals live in the same frame, so there is one
+  trigger list: `m.triggers`, taken from the KPFM triggers. Every point
+  satisfies `m.grid[point["index"]] == point["time"]`.
 
 ## Outputs
 
 ```python
-m.kpfm_signal(on_grid=True)       # aligned KPFM Signal
-m.timetrace_signal(on_grid=True)  # aligned, scaled time trace Signal
-m.to_dict()                       # both signals on the grid + metadata
-m.kpfm_derivative(smoothing=1)    # dΦ/dt of the aligned KPFM signal
+m.extract(start=None, stop=None)  # {"kpfm": Signal, "timetrace": Signal}
+m.kpfm_signal(on_grid=True)       # full aligned KPFM Signal
+m.timetrace_signal(on_grid=True)  # full aligned time trace Signal
+m.to_dict()                       # both full signals on the grid + metadata
+```
+
+`extract` cuts both signals to an inclusive window on the shared grid. Each
+bound is a time in seconds or a trigger point; `None` defaults to the start /
+end of the region where **both** signals have data:
+
+```python
+m.extract(m.triggers[0], m.triggers[-1])  # same window as the legacy code
+m.extract(10.0, 300.0)                    # from 10 s to 300 s
+m.extract()                               # the full overlap
 ```
 
 - `kpfm_signal` / `timetrace_signal` return the aligned signals on the shared
-  grid (`on_grid=True`) or their native axes (`on_grid=False`). The trigger
-  locations on the common (KPFM) reference frame are stored in the
-  loader-compatible form `{"left": {"index", "time"}, "right":
-  {"index", "time"}}`. Indices refer to the common grid, and
-  `grid[point["index"]] == point["time"]`.
-- Each output records the original label, units, and metadata in
-  `signal["meta"]["source"]`.
-- `to_dict()` bundles `grid`, both signals, the scaling method, the per-signal
-  `scale`/`shift` and `kpfm_scale`/`kpfm_shift`, and the trigger times.
+  grid (`on_grid=True`) or their native axes (`on_grid=False`, the time-trace
+  axis shifted by `offset`).
+- Every output keeps the source `label` and y `units`, and stores
+  `meta["triggers"]` (the triggers inside that signal, indexed onto its own
+  axis), `meta["time_shift"]` (`0` for KPFM, `offset` for the time trace),
+  `meta["smoothing"]`, and the original label/units/metadata in
+  `meta["source"]`.
+- `to_dict()` bundles `grid`, both signals, `offset` and `triggers`.
 
-## Statistics
-
-```python
-m.pearson(within_triggers=True)
-# -> {"statistic": r, "pvalue": p}
-
-m.cross_correlation(within_triggers=True, normalize=True)
-# -> {"lag": <s array>, "correlation": <array>, "best_lag": <s>,
-#     "best_correlation": <float>}
-```
-
-Both restrict to the laser-on window between the triggers by default. For the
-cross-correlation, a **positive** `best_lag` means the time trace leads the
-KPFM signal (the KPFM signal lags); a **negative** `best_lag` means the time
-trace lags. Statistics use only paired finite samples and raise `ValueError`
-when fewer than two pairs remain or either signal is constant. Construction
-also rejects empty, non-finite, or non-increasing time axes and signals with no
-overlapping time span.
+Construction rejects empty, non-finite, or non-increasing time axes, invalid
+triggers, and signals with no overlapping time span after the shift.
 
 ## Plotting tip
 
-The aligned signals share the same time grid, so a twin-axis plot works well.
-From the example, the trigger lines come straight from the signal metadata:
+The extracted signals share the same time axis, so a twin-axis plot works
+well. The trigger lines come straight from the signal metadata:
 
 ```python
-k_sig = m.kpfm_signal()
-ax.axvline(k_sig["meta"]["triggers"]["left"]["time"], color="k", linestyle="--")
-ax.axvline(k_sig["meta"]["triggers"]["right"]["time"], color="k", linestyle="--")
+w = m.extract(m.triggers[0], m.triggers[-1])
+ax.plot(w["kpfm"]["x"], w["kpfm"]["y"])
+for point in w["kpfm"]["meta"]["triggers"]:
+    ax.axvline(point["time"], color="k", linestyle="--")
 ```

@@ -215,17 +215,18 @@ triggers = ptu.laser_triggers(marker_channel=4, reference=tt)
 markers  = ptu.get_markers(marker_channel=4)   # all marker times (s)
 ```
 
-`laser_triggers` returns `{"left": {"index", "time"}, "right": {"index",
-"time"}}` from the first and last hardware markers, falling back to the
-time-trace edges (when `laser_pulse=False` was used). This is the trigger
-format consumed by [`Match`](match.md). Both methods warn and return `None` if
-no marker is found. `laser_triggers` returns exactly two triggers no matter how
-many triggers are in the specified marker channel; with only a *single* marker
-it warns and returns a pair whose left and right triggers coincide (usable as a
-single-trigger spec for `Match`). `get_markers` returns all triggers in the
-specified marker channel.
-Pass the time trace used downstream as `reference` to map both indices and
-times onto that axis. A marker pair outside the reference window warns and
-returns `None`, rather than clamping an index while retaining an unrelated
-absolute marker time. `get_markers()` remains the source of exact hardware
-marker times.
+`laser_triggers` returns **every** marker on the channel as a chronological
+list of trigger points `[{"index", "time"}, ...]` – the format consumed by
+[`Match`](match.md). A single marker gives a one-point list. Without a hardware
+marker it falls back to the two time-trace edges stored by
+`time_trace(laser_pulse=False)` (legacy files). It warns and returns `None` if
+no trigger is found.
+
+Indices and times are mapped onto `reference` (default: the most recent time
+trace), so `reference.x[point["index"]] == point["time"]`. Markers outside the
+reference axis are dropped with a warning rather than clamped to an unrelated
+endpoint.
+
+`get_markers` is deliberately simple: it returns the exact hardware marker
+times (s) on the channel as an array, useful for debugging. These exact times
+can also be passed straight to `Match`.

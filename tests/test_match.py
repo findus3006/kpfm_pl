@@ -2,14 +2,11 @@ import numpy as np
 import pytest
 
 from kpfm_pl.core import Signal
-from kpfm_pl.match import Match, _robust_trigger_value, _trigger_times
+from kpfm_pl.match import Match, _bound_time, _trigger_times
 
 
-def _triggers(left_idx, left_t, right_idx, right_t):
-    return {
-        "left": {"index": left_idx, "time": left_t},
-        "right": {"index": right_idx, "time": right_t},
-    }
+def _points(*pairs):
+    return [{"index": index, "time": time} for index, time in pairs]
 
 
 def _make_pair(k_y=None, t_y=None):
@@ -25,263 +22,221 @@ def _make_pair(k_y=None, t_y=None):
 
 
 # --------------------------------------------------------------- helpers
-def test_trigger_times_from_dict():
-    trig = _triggers(1, 2.0, 3, 8.0)
-    assert _trigger_times(trig) == (2.0, 8.0)
+def test_trigger_times_from_points():
+    assert list(_trigger_times(_points((1, 2.0), (3, 8.0)), "t")) == [2.0, 8.0]
 
 
-def test_trigger_times_from_float():
-    assert _trigger_times(3.5) == (3.5, 3.5)
+def test_trigger_times_from_single_point_or_time():
+    assert list(_trigger_times({"index": 1, "time": 2.0}, "t")) == [2.0]
+    assert list(_trigger_times(3.5, "t")) == [3.5]
 
 
-def test_robust_trigger_value_single_sample():
-    y = np.array([0.0, 5.0, 10.0])
-    assert _robust_trigger_value(y, 1, window=1) == 5.0
+def test_trigger_times_from_plain_times():
+    assert list(_trigger_times(np.array([1.5, 2.5]), "t")) == [1.5, 2.5]
 
 
-def test_robust_trigger_value_median_window():
-    y = np.array([0.0, 100.0, 2.0, 3.0, 4.0])
-    # median over indices 0..4 suppresses the spike at index 1.
-    assert _robust_trigger_value(y, 2, window=2) == 3.0
+@pytest.mark.parametrize("bad", [
+    [], [np.nan], "abc", None,
+    # the retired left/right pair format is rejected, not silently misread
+    {"left": {"index": 0, "time": 1.0}, "right": {"index": 1, "time": 2.0}},
+])
+def test_trigger_times_rejects_invalid(bad):
+    with pytest.raises(ValueError):
+        _trigger_times(bad, "t")
 
 
-# --------------------------------------------------------------- scaling
-def test_none_scaling_is_identity():
+def test_bound_time_accepts_time_point_and_default():
+    assert _bound_time(None, 4.0, "start") == 4.0
+    assert _bound_time(2.5, 4.0, "start") == 2.5
+    assert _bound_time({"index": 0, "time": 3.0}, 4.0, "start") == 3.0
+
+
+# --------------------------------------------------------------- alignment
+def test_time_shift_aligns_first_triggers():
     kpfm, tt = _make_pair()
     m = Match(kpfm, tt,
-              kpfm_triggers=_triggers(20, 2.0, 80, 8.0),
-              timetrace_triggers=_triggers(20, 2.0, 80, 8.0),
-              scaling="none")
-    assert m.kpfm_scale == 1.0 and m.kpfm_shift == 0.0
-    assert m.scale == 1.0 and m.shift == 0.0
+              kpfm_triggers=_points((20, 2.0), (80, 8.0)),
+              timetrace_triggers=_points((25, 2.5), (85, 8.5)))
+    assert m.offset == pytest.approx(0.5)
     native = m.timetrace_signal(on_grid=False)
+    assert np.allclose(native["x"], tt["x"] - 0.5)
     assert np.allclose(native["y"], tt["y"])
 
 
-def test_time_shift_aligns_left_triggers():
+def test_align_selects_trigger_pair():
     kpfm, tt = _make_pair()
     m = Match(kpfm, tt,
-              kpfm_triggers=_triggers(20, 2.0, 80, 8.0),
-              timetrace_triggers=_triggers(25, 2.5, 85, 8.5),
-              scaling="none")
-    # common frame uses the KPFM trigger times
-    assert m.triggers == {
-        "left": {"index": 20, "time": 2.0},
-        "right": {"index": 80, "time": 8.0},
-    }
-    # timetrace axis is shifted by (t_left - k_left) = 0.5
-    assert np.allclose(m.timetrace_signal(on_grid=False)["x"], tt["x"] - 0.5)
+              kpfm_triggers=_points((20, 2.0), (80, 8.0)),
+              timetrace_triggers=_points((25, 2.5), (90, 9.0)),
+              align=-1)
+    assert m.offset == pytest.approx(1.0)
 
 
-def test_feature_scaling_maps_window_to_unit_range():
+@pytest.mark.parametrize("align", [2, -3, 0.5, True])
+def test_invalid_align_raises(align):
     kpfm, tt = _make_pair()
-    m = Match(kpfm, tt,
-              kpfm_triggers=_triggers(20, 2.0, 80, 8.0),
-              timetrace_triggers=_triggers(20, 2.0, 80, 8.0),
-              scaling="feature")
-    ks = m.kpfm_signal(on_grid=True)
-    win = (ks["x"] >= 2.0) & (ks["x"] <= 8.0)
-    y = ks["y"][win]
-    assert np.nanmin(y) == pytest.approx(0.0, abs=1e-6)
-    assert np.nanmax(y) == pytest.approx(1.0, abs=1e-6)
-
-
-def test_zscore_scaling_standardizes_window():
-    kpfm, tt = _make_pair()
-    m = Match(kpfm, tt,
-              kpfm_triggers=_triggers(20, 2.0, 80, 8.0),
-              timetrace_triggers=_triggers(20, 2.0, 80, 8.0),
-              scaling="zscore")
-    ks = m.kpfm_signal(on_grid=False)
-    win = (ks["x"] >= 2.0) & (ks["x"] <= 8.0)
-    y = ks["y"][win]
-    assert np.mean(y) == pytest.approx(0.0, abs=1e-6)
-    assert np.std(y) == pytest.approx(1.0, abs=1e-6)
-
-
-def test_trigger_scaling_matches_anchors():
-    kpfm, tt = _make_pair()
-    m = Match(kpfm, tt,
-              kpfm_triggers=_triggers(20, 2.0, 80, 8.0),
-              timetrace_triggers=_triggers(25, 2.5, 85, 8.5),
-              scaling="trigger", trigger_window=1)
-    assert m.kpfm_scale == 1.0 and m.kpfm_shift == 0.0
-    assert m.scale == pytest.approx(0.1)
-    assert m.shift == pytest.approx(-0.05)
-    tt_native = m.timetrace_signal(on_grid=False)["y"]
-    # scaled time-trace anchors coincide with the KPFM trigger amplitudes
-    assert tt_native[25] == pytest.approx(kpfm["y"][20])
-    assert tt_native[85] == pytest.approx(kpfm["y"][80])
-
-
-def test_trigger_scaling_degenerate_anchors_warn_and_use_unit_scale():
-    kpfm, tt = _make_pair()
-    trig = _triggers(20, 2.0, 20, 2.0)  # left == right -> zero denominator
-    with pytest.warns(RuntimeWarning, match="degenerate anchors"):
-        m = Match(kpfm, tt, kpfm_triggers=trig, timetrace_triggers=trig,
-                  scaling="trigger", trigger_window=1)
-    assert m.scale == 1.0
-
-
-def test_trigger_scaling_requires_dict_triggers():
-    kpfm, tt = _make_pair()
-    with pytest.raises(ValueError):
-        Match(kpfm, tt, kpfm_triggers=2.0, timetrace_triggers=2.0,
-              scaling="trigger")
-
-
-def test_unknown_scaling_raises():
-    kpfm, tt = _make_pair()
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="align"):
         Match(kpfm, tt,
-              kpfm_triggers=_triggers(20, 2.0, 80, 8.0),
-              timetrace_triggers=_triggers(20, 2.0, 80, 8.0),
-              scaling="bogus")
+              kpfm_triggers=_points((20, 2.0), (80, 8.0)),
+              timetrace_triggers=_points((20, 2.0), (80, 8.0)),
+              align=align)
 
 
-# --------------------------------------------------------------- stats
-def test_pearson_perfectly_correlated():
-    x = np.linspace(0.0, 10.0, 201)
-    y = np.sin(x)
-    kpfm, tt = _make_pair(k_y=y, t_y=y)
-    kpfm = Signal(x, y)
-    tt = Signal(x, y)
-    m = Match(kpfm, tt,
-              kpfm_triggers=_triggers(40, 2.0, 160, 8.0),
-              timetrace_triggers=_triggers(40, 2.0, 160, 8.0),
-              scaling="none")
-    r = m.pearson()
-    assert r["statistic"] == pytest.approx(1.0, abs=1e-6)
-    assert 0.0 <= r["pvalue"] <= 1.0
+def test_plain_floats_align_like_points():
+    kpfm, tt = _make_pair()
+    m = Match(kpfm, tt, kpfm_triggers=2.0, timetrace_triggers=2.5)
+    assert m.offset == pytest.approx(0.5)
+    assert m.triggers == [{"index": m.triggers[0]["index"], "time": 2.0}]
 
 
-def test_cross_correlation_zero_lag_for_identical_signals():
-    x = np.linspace(0.0, 10.0, 201)
-    y = np.sin(x)
-    m = Match(Signal(x, y), Signal(x, y),
-              kpfm_triggers=_triggers(40, 2.0, 160, 8.0),
-              timetrace_triggers=_triggers(40, 2.0, 160, 8.0),
-              scaling="none")
-    out = m.cross_correlation()
-    assert set(out) == {"lag", "correlation", "best_lag", "best_correlation"}
-    assert out["best_lag"] == pytest.approx(0.0, abs=1e-2)
-    assert np.max(out["correlation"]) == pytest.approx(1.0, abs=1e-6)
+# --------------------------------------------------------------- grid
+def test_grid_spans_all_samples_of_both_signals():
+    kpfm, tt = _make_pair()
+    m = Match(kpfm, tt, kpfm_triggers=2.0, timetrace_triggers=4.0)
+    # time trace shifted by 2 s -> combined span is [-2, 10]
+    assert m.grid[0] == pytest.approx(-2.0)
+    assert m.grid[-1] == pytest.approx(10.0)
+    k_grid, t_grid = m.kpfm_signal()["y"], m.timetrace_signal()["y"]
+    # each signal is NaN only where it has no data of its own
+    assert np.all(np.isnan(k_grid[m.grid < -1e-9]))
+    assert np.all(np.isfinite(k_grid[m.grid >= -1e-9]))
+    assert np.all(np.isnan(t_grid[m.grid > 8.0 + 1e-9]))
+    assert np.all(np.isfinite(t_grid[m.grid <= 8.0 + 1e-9]))
 
 
-def test_cross_correlation_lag_sign_for_shifted_pair():
-    # The KPFM bump occurs 0.5 s *after* the time-trace bump: the time trace
-    # leads the KPFM signal, so best_lag must come out positive.
-    x = np.linspace(0.0, 10.0, 1001)
-    tt_y = np.exp(-((x - 4.0) ** 2) / 0.125)
-    k_y = np.exp(-((x - 4.5) ** 2) / 0.125)
-    m = Match(Signal(x, k_y), Signal(x, tt_y),
-              kpfm_triggers=2.0, timetrace_triggers=2.0,
-              scaling="none")
-    out = m.cross_correlation()
-    assert out["best_lag"] == pytest.approx(0.5, abs=0.02)
+def test_grid_passes_through_aligned_trigger_at_native_spacing():
+    kpfm, tt = _make_pair()
+    m = Match(kpfm, tt, kpfm_triggers=2.03, timetrace_triggers=2.03)
+    assert m.dt == pytest.approx(0.1)
+    assert np.any(m.grid == 2.03)
+    assert np.allclose(np.diff(m.grid), m.dt)
 
 
-def test_pearson_full_range_ignores_window():
+def test_matching_bin_spacing_keeps_samples_exact():
+    # with dt equal to the time-trace spacing, shifted bins land on the grid
+    x = np.arange(0.0, 10.0, 0.5)
+    counts = np.arange(len(x), dtype=float) ** 2
+    kpfm = Signal(np.linspace(0.0, 12.0, 25), np.zeros(25))
+    m = Match(kpfm, Signal(x, counts), kpfm_triggers=3.0, timetrace_triggers=1.0)
+    t_grid = m.timetrace_signal()["y"]
+    assert np.array_equal(t_grid[np.isfinite(t_grid)], counts)
+
+
+def test_explicit_dt_controls_grid_spacing():
+    kpfm, tt = _make_pair()
+    m = Match(kpfm, tt, kpfm_triggers=2.0, timetrace_triggers=2.0, dt=0.25)
+    assert np.allclose(np.diff(m.grid), 0.25)
+    assert len(m.grid) == 41
+
+
+@pytest.mark.parametrize("dt", [0, -1.0, np.inf, True])
+def test_invalid_dt_raises(dt):
+    kpfm, tt = _make_pair()
+    with pytest.raises(ValueError, match="dt"):
+        Match(kpfm, tt, kpfm_triggers=2.0, timetrace_triggers=2.0, dt=dt)
+
+
+# --------------------------------------------------------------- triggers
+def test_all_triggers_are_mapped_onto_grid():
     kpfm, tt = _make_pair()
     m = Match(kpfm, tt,
-              kpfm_triggers=_triggers(20, 2.0, 80, 8.0),
-              timetrace_triggers=_triggers(20, 2.0, 80, 8.0),
-              scaling="none")
-    full = m.pearson(within_triggers=False)
-    windowed = m.pearson(within_triggers=True)
-    # both are strong positive correlations of two ramps
-    assert full["statistic"] == pytest.approx(1.0, abs=1e-6)
-    assert windowed["statistic"] == pytest.approx(1.0, abs=1e-6)
+              kpfm_triggers=_points((20, 2.03), (50, 5.0), (80, 7.97)),
+              timetrace_triggers=_points((20, 2.03), (80, 7.97)),
+              dt=0.2)
+    assert len(m.triggers) == 3
+    for point in m.triggers:
+        assert point["time"] == m.grid[point["index"]]
+    assert m.kpfm_signal().meta["triggers"] == m.triggers
+    assert m.timetrace_signal().meta["triggers"] == m.triggers
+
+
+def test_native_triggers_refer_to_native_axis():
+    kpfm, tt = _make_pair()
+    m = Match(kpfm, tt,
+              kpfm_triggers=_points((20, 2.0), (80, 8.0)),
+              timetrace_triggers=_points((25, 2.5), (85, 8.5)))
+    native = m.timetrace_signal(on_grid=False)
+    assert [p["index"] for p in native.meta["triggers"]] == [25, 85]
+    for point in native.meta["triggers"]:
+        assert point["time"] == native["x"][point["index"]]
+
+
+# --------------------------------------------------------------- extract
+def test_extract_between_triggers_is_inclusive():
+    kpfm, tt = _make_pair()
+    m = Match(kpfm, tt,
+              kpfm_triggers=_points((20, 2.0), (80, 8.0)),
+              timetrace_triggers=_points((20, 2.0), (80, 8.0)))
+    out = m.extract(m.triggers[0], m.triggers[-1])
+    assert set(out) == {"kpfm", "timetrace"}
+    k = out["kpfm"]
+    assert k["x"][0] == pytest.approx(2.0) and k["x"][-1] == pytest.approx(8.0)
+    assert len(k["x"]) == 61
+    # triggers are re-indexed onto the cropped grid
+    assert [p["index"] for p in k.meta["triggers"]] == [0, 60]
+    assert np.allclose(out["timetrace"]["y"], np.linspace(2.0, 8.0, 61))
+
+
+def test_extract_between_times():
+    kpfm, tt = _make_pair()
+    m = Match(kpfm, tt, kpfm_triggers=_points((20, 2.0), (80, 8.0)),
+              timetrace_triggers=_points((20, 2.0), (80, 8.0)))
+    out = m.extract(3.0, 5.0)
+    assert out["kpfm"]["x"][0] == pytest.approx(3.0)
+    assert out["kpfm"]["x"][-1] == pytest.approx(5.0)
+    assert out["kpfm"].meta["triggers"] == []
+
+
+def test_extract_defaults_to_overlap():
+    kpfm, tt = _make_pair()
+    m = Match(kpfm, tt, kpfm_triggers=2.0, timetrace_triggers=4.0)
+    out = m.extract()
+    assert out["kpfm"]["x"][0] == pytest.approx(0.0)
+    assert out["kpfm"]["x"][-1] == pytest.approx(8.0)
+    assert np.all(np.isfinite(out["kpfm"]["y"]))
+    assert np.all(np.isfinite(out["timetrace"]["y"]))
+
+
+def test_extract_rejects_reversed_or_empty_window():
+    kpfm, tt = _make_pair()
+    m = Match(kpfm, tt, kpfm_triggers=2.0, timetrace_triggers=2.0)
+    with pytest.raises(ValueError, match="precede"):
+        m.extract(5.0, 3.0)
+    with pytest.raises(ValueError, match="no grid samples"):
+        m.extract(20.0, 30.0)
 
 
 # --------------------------------------------------------------- output
-def test_to_dict_structure():
-    kpfm, tt = _make_pair()
-    m = Match(kpfm, tt,
-              kpfm_triggers=_triggers(20, 2.0, 80, 8.0),
-              timetrace_triggers=_triggers(20, 2.0, 80, 8.0),
-              scaling="feature")
-    d = m.to_dict()
-    assert set(d) >= {"grid", "kpfm", "timetrace", "scaling", "scale",
-                      "shift", "kpfm_scale", "kpfm_shift", "triggers"}
-    assert d["scaling"] == "feature"
-    assert len(d["grid"]) == len(m.grid)
-
-
-def test_kpfm_derivative_of_ramp_is_constant():
-    kpfm, tt = _make_pair()
-    m = Match(kpfm, tt,
-              kpfm_triggers=_triggers(20, 2.0, 80, 8.0),
-              timetrace_triggers=_triggers(20, 2.0, 80, 8.0),
-              scaling="none")
-    d = m.kpfm_derivative(on_grid=True)
-    # d/dt of a 0..1 ramp over 0..10 s is 0.1 /s
-    assert np.allclose(d["y"], 0.1, atol=1e-6)
-
-
-def test_single_float_trigger_window_falls_back_to_full_overlap():
-    kpfm, tt = _make_pair()
-    m = Match(kpfm, tt, kpfm_triggers=2.0, timetrace_triggers=2.0,
-              scaling="feature")
-    # left == right -> no laser-on window, mask is the whole grid
-    mask = m._window_mask(m.grid)
-    assert mask.all()
-
-
-def test_explicit_n_points_controls_grid_length():
-    kpfm, tt = _make_pair()
-    m = Match(kpfm, tt,
-              kpfm_triggers=_triggers(20, 2.0, 80, 8.0),
-              timetrace_triggers=_triggers(20, 2.0, 80, 8.0),
-              n_points=50, scaling="none")
-    assert len(m.grid) == 50
-
-
-def test_none_scaling_preserves_labels_and_units():
+def test_outputs_preserve_labels_and_units():
     kpfm, tt = _make_pair()
     m = Match(kpfm, tt, kpfm_triggers=2.0, timetrace_triggers=2.0)
     assert m.kpfm_signal().label == "kpfm"
     assert m.kpfm_signal().units == {"x": "s", "y": "V"}
     assert m.timetrace_signal().label == "tt"
     assert m.timetrace_signal().units == {"x": "s", "y": "counts"}
+    assert m.timetrace_signal().meta["source"]["label"] == "tt"
 
 
-@pytest.mark.parametrize("scaling", ["feature", "zscore"])
-def test_normalized_scaling_with_off_grid_single_trigger(scaling):
-    # 2.03 lies between grid samples: with a single float trigger the window
-    # mask would otherwise be empty, so the statistics must fall back to the
-    # full overlap instead of raising.
+def test_to_dict_structure():
     kpfm, tt = _make_pair()
-    m = Match(kpfm, tt, kpfm_triggers=2.03, timetrace_triggers=2.03,
-              scaling=scaling)
-    y = m.kpfm_signal(on_grid=False)["y"]
-    if scaling == "feature":
-        assert np.nanmin(y) == pytest.approx(0.0, abs=1e-6)
-        assert np.nanmax(y) == pytest.approx(1.0, abs=1e-6)
-    else:
-        assert np.mean(y) == pytest.approx(0.0, abs=1e-6)
-        assert np.std(y) == pytest.approx(1.0, abs=1e-6)
+    m = Match(kpfm, tt, kpfm_triggers=2.0, timetrace_triggers=2.5)
+    d = m.to_dict()
+    assert set(d) == {"grid", "kpfm", "timetrace", "offset", "triggers"}
+    assert d["offset"] == pytest.approx(0.5)
+    assert len(d["grid"]) == len(m.grid)
 
 
-@pytest.mark.parametrize("scaling", ["feature", "zscore"])
-def test_normalized_scaling_is_dimensionless(scaling):
-    kpfm, tt = _make_pair()
-    m = Match(kpfm, tt, kpfm_triggers=2.0, timetrace_triggers=2.0,
-              scaling=scaling)
-    assert m.kpfm_signal().units["y"] == "1"
-    assert m.timetrace_signal().units["y"] == "1"
+def test_smoothing_is_applied_before_alignment():
+    x = np.linspace(0.0, 10.0, 101)
+    y = np.zeros(101)
+    y[50] = 9.0
+    m = Match(Signal(x, y), Signal(x, y), kpfm_triggers=2.0,
+              timetrace_triggers=2.0, kpfm_smoothing=3)
+    assert np.max(m.kpfm_signal(on_grid=False)["y"]) == pytest.approx(3.0)
+    assert np.max(m.timetrace_signal(on_grid=False)["y"]) == pytest.approx(9.0)
 
 
-def test_trigger_scaling_uses_target_unit():
-    kpfm, tt = _make_pair()
-    m = Match(kpfm, tt,
-              kpfm_triggers=_triggers(20, 2.0, 80, 8.0),
-              timetrace_triggers=_triggers(20, 2.0, 80, 8.0),
-              scaling="trigger", trigger_window=1)
-    assert m.kpfm_signal().units["y"] == "V"
-    assert m.timetrace_signal().units["y"] == "V"
-
-
+# --------------------------------------------------------------- validation
 @pytest.mark.parametrize(
     ("x", "match"),
     [
@@ -304,38 +259,9 @@ def test_nonoverlapping_signals_raise():
               kpfm_triggers=0.0, timetrace_triggers=0.0)
 
 
-@pytest.mark.parametrize("n_points", [0, 1, 2.5, True])
-def test_invalid_n_points_raises(n_points):
+@pytest.mark.parametrize("smoothing", [0, 1.5, True])
+def test_invalid_smoothing_raises(smoothing):
     kpfm, tt = _make_pair()
-    with pytest.raises(ValueError, match="n_points"):
+    with pytest.raises(ValueError, match="smoothing"):
         Match(kpfm, tt, kpfm_triggers=2.0, timetrace_triggers=2.0,
-              n_points=n_points)
-
-
-def test_statistics_reject_too_few_paired_samples():
-    x = np.arange(3.0)
-    m = Match(Signal(x, [0.0, np.nan, 2.0]),
-              Signal(x, [0.0, np.nan, np.nan]),
-              kpfm_triggers=0.0, timetrace_triggers=0.0)
-    with pytest.raises(ValueError, match="at least two"):
-        m.pearson()
-    with pytest.raises(ValueError, match="at least two"):
-        m.cross_correlation()
-
-
-def test_statistics_reject_constant_signals():
-    x = np.arange(3.0)
-    m = Match(Signal(x, np.ones(3)), Signal(x, np.arange(3.0)),
-              kpfm_triggers=0.0, timetrace_triggers=0.0)
-    with pytest.raises(ValueError, match="non-constant"):
-        m.pearson()
-
-
-def test_trigger_metadata_points_refer_to_common_grid():
-    kpfm, tt = _make_pair()
-    m = Match(kpfm, tt,
-              kpfm_triggers=_triggers(20, 2.03, 80, 7.97),
-              timetrace_triggers=_triggers(20, 2.03, 80, 7.97),
-              n_points=50)
-    for point in m.kpfm_signal().meta["triggers"].values():
-        assert point["time"] == m.grid[point["index"]]
+              kpfm_smoothing=smoothing)

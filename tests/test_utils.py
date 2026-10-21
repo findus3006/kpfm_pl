@@ -6,7 +6,6 @@ from kpfm_pl.utils import (
     derivative,
     downsample_sum,
     feature_scale,
-    feature_scale_params,
     fit_window_mask,
     inflection_left_bound,
     left_bound_fraction,
@@ -15,9 +14,7 @@ from kpfm_pl.utils import (
     resample,
     set_zero,
     smooth,
-    trigger_dict,
-    zscore,
-    zscore_params,
+    trigger_points,
 )
 
 
@@ -134,48 +131,43 @@ def test_nearest_index_exact_and_between():
     assert nearest_index(axis, 2.6) == 3
 
 
-def test_trigger_dict_shape_and_casts():
-    trig = trigger_dict(np.int64(3), np.float32(1.5), 7, 4)
-    assert trig == {"left": {"index": 3, "time": 1.5},
-                    "right": {"index": 7, "time": 4.0}}
-    assert isinstance(trig["left"]["index"], int)
-    assert isinstance(trig["right"]["time"], float)
+def test_trigger_points_snap_to_axis_samples():
+    axis = np.array([0.0, 0.25, 0.5, 0.75, 1.0])
+    points = trigger_points(np.array([0.2, 0.8]), axis)
+    assert points == [{"index": 1, "time": 0.25}, {"index": 3, "time": 0.75}]
+    assert isinstance(points[0]["index"], int)
+    assert isinstance(points[0]["time"], float)
 
 
-def test_feature_scale_params_with_mask():
+def test_trigger_points_drop_times_outside_axis():
+    axis = np.array([0.5, 0.75])
+    # 0.8 is within half a step of the axis end and is kept; 0.2 is not
+    with pytest.warns(RuntimeWarning, match="1 trigger"):
+        points = trigger_points(np.array([0.2, 0.8]), axis)
+    assert points == [{"index": 1, "time": 0.75}]
+
+
+def test_trigger_points_collapse_consecutive_duplicates():
+    axis = np.arange(5.0)
+    points = trigger_points(np.array([1.0, 1.1, 3.0]), axis)
+    assert [p["index"] for p in points] == [1, 3]
+
+
+def test_trigger_points_single_time():
+    assert trigger_points(2.0, np.arange(5.0)) == [{"index": 2, "time": 2.0}]
+
+
+def test_feature_scale_with_mask():
     y = np.array([0.0, 10.0, 20.0, 30.0])
     mask = np.array([False, True, True, False])
-    scale, shift = feature_scale_params(y, mask)
-    # min/max taken over the masked window (10..20)
-    scaled = scale * y + shift
-    assert scaled[1] == pytest.approx(0.0)
-    assert scaled[2] == pytest.approx(1.0)
+    # min/max taken over the masked window (10..20), map applied to all of y
+    assert np.allclose(feature_scale(y, mask), [-1.0, 0.0, 1.0, 2.0])
 
 
 def test_feature_scale_empty_mask_falls_back_to_full():
     y = np.array([2.0, 4.0, 6.0])
     mask = np.zeros(3, bool)
     assert np.allclose(feature_scale(y, mask), [0.0, 0.5, 1.0])
-
-
-def test_zscore_standardizes():
-    y = np.array([1.0, 2.0, 3.0, 4.0])
-    z = zscore(y)
-    assert z.mean() == pytest.approx(0.0)
-    assert z.std() == pytest.approx(1.0)
-
-
-def test_zscore_constant_input_is_zero():
-    assert np.all(zscore(np.full(4, 5.0)) == 0.0)
-
-
-def test_zscore_params_with_mask():
-    y = np.array([0.0, 1.0, 2.0, 3.0, 100.0])
-    mask = np.array([True, True, True, True, False])
-    scale, shift = zscore_params(y, mask)
-    sub = (scale * y + shift)[:4]
-    assert sub.mean() == pytest.approx(0.0)
-    assert sub.std() == pytest.approx(1.0)
 
 
 def test_smooth_gaussian_reduces_variance():

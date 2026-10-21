@@ -18,13 +18,7 @@ import numpy as np
 
 from .core import Image, Signal
 from .fitting import MultiExpFit
-from .utils import (
-    TriggerPoint, 
-    TriggerPair, 
-    TriggerCollection, 
-    fit_window_mask, 
-    nearest_index, 
-    trigger_dict)
+from .utils import TriggerPoint, fit_window_mask, trigger_points
 
 __all__ = ["PTU"]
 
@@ -278,8 +272,9 @@ class PTU:
             ``False`` is a legacy work-around for files where no marker was
             picked up (e.g. the pulse generator only ran while the laser was
             on): the non-zero portion of the trace is centred and zero-padded,
-            and its rising/falling edges are stored as triggers. This is bad
-            practice and only kept for backwards compatibility.
+            and its rising/falling edges are stored as two triggers in
+            ``meta["triggers"]``. This is bad practice and only kept for
+            backwards compatibility.
         """
         self._require_pulsed()
         if not np.isfinite(bintime) or bintime <= 0:
@@ -335,8 +330,7 @@ class PTU:
                 meta["matrix"] = sliced
                 meta["bin_durations"] = bin_durations
                 nz2 = np.nonzero(trace)[0]
-                meta["triggers"] = trigger_dict(
-                    nz2[0], time[nz2[0]], nz2[-1], time[nz2[-1]])
+                meta["triggers"] = trigger_points(time[[nz2[0], nz2[-1]]], time)
         self._tt_cache = {
             "time": time, "trace": trace, "matrix": sliced, "bintime": bintime,
             "bin_durations": bin_durations,
@@ -743,70 +737,37 @@ class PTU:
 
     # -------------------------------------------------------------- triggers
     def laser_triggers(self, marker_channel: int = 4, *,
-                       reference: Signal | None = None) -> TriggerCollection | None:
+                       reference: Signal | None = None) -> list[TriggerPoint] | None:
         """Locate the laser triggers in the marker channel (default).
-            With only a single marker on the channel, a warning is emitted and the
-            left and right triggers coincide (usable as a single-trigger spec for
-            :class:`~kpfm_pl.match.Match`). Falls back to the time-trace edges
-            (when ``laser_pulse=False`` was used) if no hardware marker is present.
-            For this legacy case only the first and last trigger work.
-            When ``reference`` is supplied, indices and times are mapped to its
-            time axis. Markers outside the reference are rejected rather than
-            clamped to an unrelated endpoint.
-    
-            Parameters
-            ----------
-            marker_channel :
-                The PicoHarps marker channel where the laser trigger is detected.
-            reference :
-                Optional binned :class:`Signal`; when given, trigger indices are
-                mapped onto its (binned) time axis. Default: None
-    
-            Returns
-            -------
-            dict or None
-            ``{"left": {"index", "time"}, "right": {"index", "time"},
-            "all": [{"index", "time"}, ...]}``. The ``"all"`` list holds
-            every detected marker in the same point format as ``left`` and
-            ``right``. ``None`` if no trigger is found.
+
+        Every marker on ``marker_channel`` becomes one trigger. If no hardware
+        marker is present, falls back to the two time-trace edges stored by
+        :meth:`time_trace` with ``laser_pulse=False`` (legacy files).
+
+        Parameters
+        ----------
+        marker_channel :
+            The PicoHarp marker channel where the laser trigger is detected.
+        reference :
+            Optional binned :class:`Signal`; when given, trigger indices and
+            times are mapped onto its time axis. Default: the most recent
+            :meth:`time_trace`. Markers outside the reference are dropped with
+            a warning rather than clamped to an unrelated endpoint.
+
+        Returns
+        -------
+        list[TriggerPoint] or None
+            Every trigger as ``[{"index", "time"}, ...]`` in chronological
+            order (see :func:`~kpfm_pl.utils.trigger_points`). ``None`` if no
+            trigger is found. Use :meth:`get_markers` for the exact hardware
+            marker times.
         """
-        
         self._require_pulsed()
         if self.marker.get(marker_channel):
-            markers = self.marker[marker_channel]
-            if len(markers) == 1:
-                warnings.warn(
-                    f"{self.filepath.stem}: only one laser trigger found on "
-                    f"marker channel {marker_channel}; left and right triggers "
-                    "coincide.",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-            if reference is None and not self._tt_cache:
-                self.time_trace()
-            if reference is None:
-                reference = self._tt_cache["signal"]
-            ref_t = np.asarray(reference["x"], dtype=float)
-            all_times = [marker*self.rep_time for marker in markers]
-            left_t = markers[0] * self.rep_time
-            right_t = markers[-1] * self.rep_time
-            left_idx = nearest_index(ref_t, left_t)
-            right_idx = nearest_index(ref_t, right_t)
-            triggers = trigger_dict(left_idx, left_t, right_idx, right_t)
-            all_idx = np.unique(np.array([nearest_index(ref_t, t) for t in all_times], dtype=int))
-            points: list[TriggerPoint] = [
-                        {"index": int(index), "time": float(trigger_time)}
-                        for index, trigger_time in zip(all_idx, all_times, strict=True)]
-            return {**triggers, "all": points}
-        elif self._tt_cache.get("triggers"): # this is the legacy bit. Only works for 2 triggers
-            triggers = self._tt_cache["triggers"]
-            if reference is not None:
-                ref_t = np.asarray(reference["x"], dtype=float)
-                left_t = triggers["left"]["time"]
-                right_t = triggers["right"]["time"]
-                left_idx = nearest_index(ref_t, left_t)
-                right_idx = nearest_index(ref_t, right_t)
-                triggers = trigger_dict(left_idx, left_t, right_idx, right_t)
+            times = np.asarray(self.marker[marker_channel], dtype=float) * self.rep_time
+        elif self._tt_cache.get("triggers"):
+            # Legacy laser_pulse=False trace: its two edges act as triggers.
+            times = np.array([point["time"] for point in self._tt_cache["triggers"]])
         else:
             warnings.warn(
                 f"{self.filepath.stem}: no laser triggers found.",
@@ -814,11 +775,11 @@ class PTU:
                 stacklevel=2,
             )
             return None
-        if triggers is None:
-            return None
-        print(f"{self.filepath.stem}: trigger spacing "
-              f"{triggers['right']['time'] - triggers['left']['time']:.2f} s")
-        return triggers
+        if reference is None:
+            if not self._tt_cache:
+                self.time_trace()
+            reference = self._tt_cache["signal"]
+        return trigger_points(times, np.asarray(reference["x"], dtype=float)) or None
 
     def get_markers(self, marker_channel: int = 4) -> np.ndarray | None:
         """All marker times (seconds) on ``marker_channel``."""

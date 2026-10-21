@@ -6,6 +6,7 @@ reuse across the loaders and the :class:`~kpfm_pl.match.Match` class.
 
 from __future__ import annotations
 
+import warnings
 from typing import TypedDict
 
 import numpy as np
@@ -13,12 +14,7 @@ from scipy import ndimage
 
 __all__ = [
     "TriggerPoint",
-    "TriggerPair",
-    "TriggerCollection",
     "feature_scale",
-    "feature_scale_params",
-    "zscore",
-    "zscore_params",
     "smooth",
     "derivative",
     "resample",
@@ -30,86 +26,35 @@ __all__ = [
     "set_zero",
     "downsample_sum",
     "nearest_index",
-    "trigger_dict",
+    "trigger_points",
 ]
 
 
 class TriggerPoint(TypedDict):
-    """One trigger location on a signal axis."""
+    """One trigger location on a signal axis.
+
+    A single trigger is one such point; a collection of triggers is a plain,
+    chronological ``list[TriggerPoint]``.
+    """
 
     index: int
     time: float
 
 
-class TriggerPair(TypedDict):
-    """The shared left/right trigger representation used by the loaders."""
+def feature_scale(y: np.ndarray, mask: np.ndarray | None = None) -> np.ndarray:
+    """Min-max scale ``y`` to the ``[0, 1]`` range.
 
-    left: TriggerPoint
-    right: TriggerPoint
-
-
-class TriggerCollection(TriggerPair):
-    """A trigger pair plus every detected flank in chronological order."""
-
-    all: list[TriggerPoint]
-
-
-def feature_scale_params(
-    y: np.ndarray, mask: np.ndarray | None = None
-) -> tuple[float, float]:
-    """``(scale, shift)`` of the affine map that min-max scales ``y`` to ``[0, 1]``.
-
-    The returned coefficients satisfy ``y_scaled = scale * y + shift``. When
-    ``mask`` is given, the min/max are computed over ``y[mask]`` (falling back to
-    the full array if the mask is empty) but the map still applies to all of
-    ``y``. Constant input yields ``(0.0, 0.0)`` (i.e. all zeros, no NaNs).
+    When ``mask`` is given, the min/max are computed over ``y[mask]`` (falling
+    back to the full array if the mask is empty) but the map still applies to
+    all of ``y``. Robust against constant input (returns zeros instead of NaNs).
     """
     y = np.asarray(y, dtype=float)
     sub = y[mask] if mask is not None and np.any(mask) else y
     lo = float(np.min(sub))
     span = float(np.max(sub) - lo)
     if span == 0 or not np.isfinite(span):
-        return 0.0, 0.0
-    return 1.0 / span, -lo / span
-
-
-def feature_scale(y: np.ndarray, mask: np.ndarray | None = None) -> np.ndarray:
-    """Min-max scale ``y`` to the ``[0, 1]`` range.
-
-    Robust against constant input (returns zeros instead of NaNs). See
-    :func:`feature_scale_params` for the optional ``mask`` semantics.
-    """
-    scale, shift = feature_scale_params(y, mask)
-    return scale * np.asarray(y, dtype=float) + shift
-
-
-def zscore_params(
-    y: np.ndarray, mask: np.ndarray | None = None
-) -> tuple[float, float]:
-    """``(scale, shift)`` of the affine map that standardizes ``y``.
-
-    The returned coefficients satisfy ``y_scaled = scale * y + shift`` and map
-    ``y`` to zero mean / unit standard deviation. When ``mask`` is given, the
-    mean/std are computed over ``y[mask]`` (falling back to the full array if the
-    mask is empty). Constant input yields ``(0.0, 0.0)``.
-    """
-    y = np.asarray(y, dtype=float)
-    sub = y[mask] if mask is not None and np.any(mask) else y
-    mean = float(np.mean(sub))
-    std = float(np.std(sub))
-    if std == 0 or not np.isfinite(std):
-        return 0.0, 0.0
-    return 1.0 / std, -mean / std
-
-
-def zscore(y: np.ndarray, mask: np.ndarray | None = None) -> np.ndarray:
-    """Standardize ``y`` to zero mean / unit standard deviation.
-
-    Robust against constant input (returns zeros). See :func:`zscore_params` for
-    the optional ``mask`` semantics.
-    """
-    scale, shift = zscore_params(y, mask)
-    return scale * np.asarray(y, dtype=float) + shift
+        return np.zeros_like(y)
+    return (y - lo) / span
 
 
 def smooth(y: np.ndarray, window: int = 1, method: str = "moving_average") -> np.ndarray:
@@ -313,16 +258,39 @@ def nearest_index(axis: np.ndarray, value: float) -> int:
     return int(np.argmin(np.abs(axis - value)))
 
 
-def trigger_dict(
-    left_index: int, left_time: float, right_index: int, right_time: float
-) -> TriggerPair:
-    """Assemble the standard laser-trigger dict shared by all loaders.
+def trigger_points(times: np.ndarray, axis: np.ndarray) -> list[TriggerPoint]:
+    """Map trigger ``times`` onto the samples of a time ``axis``.
 
-    Returns ``{"left": {"index", "time"}, "right": {"index", "time"}}`` with the
-    indices cast to ``int`` and the times to ``float``. This is the trigger
-    format consumed by :class:`~kpfm_pl.match.Match`.
+    Each time is snapped to its nearest sample, so every returned point
+    satisfies ``axis[point["index"]] == point["time"]``. This is the trigger
+    format returned by the loaders and consumed by :class:`~kpfm_pl.match.Match`.
+
+    Times more than half a sample step outside ``axis`` are dropped with a
+    warning rather than clamped to an unrelated endpoint. Consecutive times
+    that snap to the same sample collapse into one point.
+
+    Returns
+    -------
+    list[TriggerPoint]
+        ``[{"index": int, "time": float}, ...]`` in the order of ``times``.
     """
-    return {
-        "left": {"index": int(left_index), "time": float(left_time)},
-        "right": {"index": int(right_index), "time": float(right_time)},
-    }
+    axis = np.asarray(axis, dtype=float)
+    times = np.atleast_1d(np.asarray(times, dtype=float))
+    if axis.ndim != 1 or axis.size == 0 or not np.all(np.isfinite(axis)):
+        raise ValueError("axis must be a non-empty finite 1-D time axis.")
+    half_step = 0.5 * float(np.median(np.abs(np.diff(axis)))) if axis.size > 1 else 0.0
+    inside = (times >= axis.min() - half_step) & (times <= axis.max() + half_step)
+    if not np.all(inside):
+        warnings.warn(
+            f"{int(np.count_nonzero(~inside))} trigger(s) outside the time axis "
+            "were dropped.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+    points: list[TriggerPoint] = []
+    for t in times[inside]:
+        index = nearest_index(axis, t)
+        if points and points[-1]["index"] == index:
+            continue
+        points.append({"index": index, "time": float(axis[index])})
+    return points

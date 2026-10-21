@@ -87,7 +87,7 @@ def test_build_database_pairs_and_parses(tmp_path):
 
     e = by_key[("JS249", None, "DR1", 100.0)]
     assert e.kpfm_gain == 17
-    assert e.kpfm_amplitude_v is None
+    assert e.kpfm_amplitude_v == 1.0  # default, absent from the filename
 
     # -- JV001 -- DR missing from .ptu names, matched via power+wavelength -------
     jv_entries = [e for e in entries if e.sample == "JV001"]

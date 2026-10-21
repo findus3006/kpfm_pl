@@ -90,12 +90,14 @@ TRIGGER = """% TrigStream, chunk info
 
 def test_laser_triggers_threshold(tmp_path):
     z = Zurich(_write(tmp_path, TRIGGER))
-    trig = z.laser_triggers("TrigStream")
-    assert {"left", "right", "all"} <= set(trig)
-    assert trig["left"]["index"] == 3
-    assert trig["right"]["index"] == 5
-    # "all" uses the same point dictionaries as the selected pair.
-    assert [point["index"] for point in trig["all"]] == [3, 5]
+    # default: rising flank only, like the PicoHarp marker channel
+    assert z.laser_triggers("TrigStream") == [
+        {"index": 3, "time": float(z.streams["TrigStream"]["time"][3])}
+    ]
+    trig = z.laser_triggers("TrigStream", flank="both")
+    assert [point["index"] for point in trig] == [3, 5]
+    t_axis = z.streams["TrigStream"]["time"]
+    assert all(point["time"] == t_axis[point["index"]] for point in trig)
 
 
 def test_laser_triggers_none_when_flat(tmp_path):
@@ -118,16 +120,11 @@ def test_laser_triggers_threshold_single_on_sample_returns_none(tmp_path):
 def test_laser_triggers_with_reference_maps_indices(tmp_path):
     z = Zurich(_write(tmp_path, TRIGGER))
     ref = Signal(np.linspace(0.0, 8.0, 5), np.zeros(5))
-    trig = z.laser_triggers("TrigStream", reference=ref)
-    # indices now point into the coarse reference axis
-    assert 0 <= trig["left"]["index"] < len(ref["x"])
-    assert 0 <= trig["right"]["index"] < len(ref["x"])
-    # every point is remapped onto the reference axis too
-    assert len(trig["all"]) == 2
-    assert all(0 <= point["index"] < len(ref["x"]) for point in trig["all"])
-    assert all(
-        point["time"] == ref["x"][point["index"]] for point in trig["all"]
-    )
+    trig = z.laser_triggers("TrigStream", reference=ref, flank="both")
+    # every point is remapped onto the coarse reference axis
+    assert len(trig) == 2
+    assert all(0 <= point["index"] < len(ref["x"]) for point in trig)
+    assert all(point["time"] == ref["x"][point["index"]] for point in trig)
 
 
 # Multi-pulse trigger signal: on/off/on/off -> four flanks total.
@@ -147,25 +144,48 @@ MULTI_TRIGGER = """% TrigStream, chunk info
 
 def test_laser_triggers_slope_finds_all_flanks(tmp_path):
     z = Zurich(_write(tmp_path, MULTI_TRIGGER))
-    trig = z.laser_triggers("TrigStream", method="slope")
+    trig = z.laser_triggers("TrigStream", method="slope", flank="both")
     assert trig is not None
     # four flanks: rise@2, fall@4, rise@6, fall@8 (post-transition samples)
-    assert [point["index"] for point in trig["all"]] == [2, 4, 6, 8]
-    # first and last flank become left/right; times track the parsed axis
+    assert [point["index"] for point in trig] == [2, 4, 6, 8]
+    # times track the parsed axis
     t_axis = z.streams["TrigStream"]["time"]
-    assert trig["left"]["index"] == 2
-    assert trig["right"]["index"] == 8
-    assert trig["left"]["time"] == float(t_axis[2])
-    assert trig["right"]["time"] == float(t_axis[8])
+    assert all(point["time"] == float(t_axis[point["index"]]) for point in trig)
 
 
 def test_laser_triggers_threshold_finds_each_contiguous_window(tmp_path):
     z = Zurich(_write(tmp_path, MULTI_TRIGGER))
-    trig = z.laser_triggers("TrigStream", method="threshold")
+    trig = z.laser_triggers("TrigStream", method="threshold", flank="both")
     assert trig is not None
-    assert [point["index"] for point in trig["all"]] == [2, 3, 6, 7]
-    assert trig["left"] == trig["all"][0]
-    assert trig["right"] == trig["all"][-1]
+    assert [point["index"] for point in trig] == [2, 3, 6, 7]
+
+
+@pytest.mark.parametrize(("method", "flank", "expected"), [
+    ("slope", "rising", [2, 6]),
+    ("slope", "falling", [4, 8]),
+    ("threshold", "rising", [2, 6]),
+    ("threshold", "falling", [3, 7]),
+])
+def test_laser_triggers_flank_selection(tmp_path, method, flank, expected):
+    z = Zurich(_write(tmp_path, MULTI_TRIGGER))
+    trig = z.laser_triggers("TrigStream", method=method, flank=flank)
+    assert [point["index"] for point in trig] == expected
+
+
+def test_laser_triggers_none_without_requested_flank(tmp_path):
+    # a single rising step has no falling flank
+    text = "% TrigStream, x\n" + "".join(
+        f"{i}.0;{0.0 if i < 3 else 1.0}\n" for i in range(6)
+    )
+    z = Zurich(_write(tmp_path, text))
+    with pytest.warns(RuntimeWarning, match="no falling flank"):
+        assert z.laser_triggers("TrigStream", method="slope", flank="falling") is None
+
+
+def test_laser_triggers_unknown_flank_raises(tmp_path):
+    z = Zurich(_write(tmp_path, TRIGGER))
+    with pytest.raises(ValueError, match="Unknown flank"):
+        z.laser_triggers("TrigStream", flank="up")
 
 
 def test_laser_triggers_slope_none_when_flat(tmp_path):
@@ -175,14 +195,29 @@ def test_laser_triggers_slope_none_when_flat(tmp_path):
         assert z.laser_triggers("Flat", method="slope") is None
 
 
-def test_laser_triggers_slope_single_flank_returns_none(tmp_path):
-    # only one rising edge, no falling edge -> fewer than two flanks
+def test_laser_triggers_slope_single_flank_is_one_trigger(tmp_path):
+    # only one rising edge, no falling edge -> a single trigger
     text = "% TrigStream, x\n" + "".join(
         f"{i}.0;{0.0 if i < 3 else 1.0}\n" for i in range(6)
     )
     z = Zurich(_write(tmp_path, text))
-    with pytest.warns(RuntimeWarning, match="fewer than two flanks"):
-        assert z.laser_triggers("TrigStream", method="slope") is None
+    trig = z.laser_triggers("TrigStream", method="slope")
+    assert [point["index"] for point in trig] == [3]
+
+
+def test_find_peaks_returns_trigger_points(tmp_path):
+    z = Zurich(_write(tmp_path, MULTI_TRIGGER))
+    stream = z.signal("TrigStream")
+    onsets = z.find_peaks(stream, prominence=0.5, left_drop=0.5)
+    assert [point["index"] for point in onsets] == [1, 5]
+    assert all(point["time"] == stream.x[point["index"]] for point in onsets)
+
+
+def test_find_peaks_none_when_flat(tmp_path):
+    text = ("% Flat, x\n" + "".join(f"{i}.0;0.0\n" for i in range(5)))
+    z = Zurich(_write(tmp_path, text))
+    with pytest.warns(RuntimeWarning, match="no peaks"):
+        assert z.find_peaks(z.signal("Flat")) is None
 
 
 def test_laser_triggers_unknown_method_raises(tmp_path):

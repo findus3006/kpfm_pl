@@ -88,7 +88,11 @@ def test_laser_pulse_false_records_edge_triggers():
     tt = p.time_trace(bintime=0.5, laser_pulse=False)
     trig = tt["meta"].get("triggers")
     assert trig is not None
-    assert trig["left"]["index"] < trig["right"]["index"]
+    # the two trace edges, in the shared point format
+    assert len(trig) == 2
+    assert trig[0]["index"] < trig[1]["index"]
+    for point in trig:
+        assert point["time"] == tt.x[point["index"]]
     # laser_triggers falls back to these trace edges
     got = p.laser_triggers()
     assert got == trig
@@ -285,12 +289,21 @@ def test_laser_triggers_map_times_to_reference_samples():
     p.rep_time = 0.1
     ref = Signal(np.array([0.0, 0.25, 0.5, 0.75, 1.0]), np.ones(5))
     triggers = p.laser_triggers(reference=ref)
-    assert triggers == {
-        "left": {"index": 1, "time": 0.25},
-        "right": {"index": 3, "time": 0.75},
-    }
+    assert triggers == [{"index": 1, "time": 0.25}, {"index": 3, "time": 0.75}]
     with pytest.warns(RuntimeWarning, match="outside"):
-        assert p.laser_triggers(reference=Signal([0.5, 0.75], [1, 1])) is None
+        assert p.laser_triggers(reference=Signal([2.0, 2.25], [1, 1])) is None
+
+
+def test_laser_triggers_return_every_marker():
+    p = _synthetic_ptu(np.ones((5, 2), dtype=np.uint32), bintime=0.25,
+                       acquisition_time=1.25)
+    p.marker = {4: [2, 5, 8]}
+    p.rep_time = 0.1
+    ref = Signal(np.array([0.0, 0.25, 0.5, 0.75, 1.0]), np.ones(5))
+    triggers = p.laser_triggers(reference=ref)
+    assert [point["index"] for point in triggers] == [1, 2, 3]
+    for point in triggers:
+        assert point["time"] == ref.x[point["index"]]
 
 
 def test_invalid_file_raises(tmp_path):
@@ -300,17 +313,13 @@ def test_invalid_file_raises(tmp_path):
         PTU(bad)
 
 
-def test_laser_triggers_single_marker_warns_and_coincides():
+def test_laser_triggers_single_marker_is_a_one_point_list():
     p = _synthetic_ptu(np.ones((5, 2), dtype=np.uint32), bintime=0.25,
                        acquisition_time=1.25)
     p.marker = {4: [2]}
     p.rep_time = 0.1
     ref = Signal(np.array([0.0, 0.25, 0.5, 0.75, 1.0]), np.ones(5))
-    with pytest.warns(RuntimeWarning, match="only one laser trigger"):
-        triggers = p.laser_triggers(reference=ref)
-    # left and right coincide so the pair can serve as a single-trigger
-    # spec for Match.
-    assert triggers["left"] == triggers["right"] == {"index": 1, "time": 0.25}
+    assert p.laser_triggers(reference=ref) == [{"index": 1, "time": 0.25}]
 
 
 def test_time_trace_y_is_float():

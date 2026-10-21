@@ -25,20 +25,21 @@ for file in files:
         z = k.Zurich(file)
         stream_names = z.stream_names()
         kpfm = z.average(stream_names[0], bintime=0.05)                               # Signal
-        z_triggers = z.laser_triggers(stream_names[1], reference=kpfm, method="slope")
+        # Legacy trigger stream drops at laser-on, so keep both flanks
+        z_triggers = z.laser_triggers(stream_names[1], reference=kpfm, method="slope", flank="both")
 
-# Correlate the data, set smoothing parameters
+# Align the data on the first laser trigger, set smoothing parameters
 m = k.Match(kpfm, tt,
           kpfm_triggers=z_triggers,
           timetrace_triggers=tt_triggers,
           kpfm_smoothing=20, timetrace_smoothing=1)
+print("Time shift (s):", m.offset)
 
-aligned = m.to_dict()
-print("Pearson:", m.pearson())
-print("Best lag (s):", m.cross_correlation()["best_lag"])
-
-k = m.kpfm_signal()
-t = m.timetrace_signal()
+# Extract the overlapping data between the first and last laser trigger.
+# Alternatively use times on the shared grid, e.g. m.extract(10.0, 300.0)
+window = m.extract(m.triggers[0], m.triggers[-1])
+kp = window["kpfm"]
+t = window["timetrace"]
 
 # Plot params setup
 set_scaled_rcparams((16,9))
@@ -46,10 +47,11 @@ set_scaled_rcparams((16,9))
 # Plot on two axis
 fig, ax = plt.subplots(figsize=(16,9))
 ax2 = ax.twinx()
-ax.plot(k["x"], k["y"], label=k["label"], c="red")
+ax.plot(kp["x"], kp["y"], label=kp["label"], c="red")
 ax2.plot(t["x"], feature_scale(t["y"]), label=t["label"], c="blue")
-ax.axvline(k["meta"]["triggers"]["left"]["time"], color="k", linestyle="--", label="Left laser trigger")
-ax.axvline(k["meta"]["triggers"]["right"]["time"], color="k", linestyle="--", label="Right laser trigger")
+for i, point in enumerate(kp["meta"]["triggers"]):
+    ax.axvline(point["time"], color="k", linestyle="--",
+               label="Laser trigger" if i == 0 else None)
 ax.set_title("Correlation of KPFM and time trace")
 ax.set_xlabel("Time (s)")
 ax.set_ylabel("Amplitude of KPFM signal (V)")

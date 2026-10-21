@@ -57,9 +57,14 @@ docs/               per-module manuals (ptu, zurich, jpk, match, database)
 - **Return `Signal`/`Image`, not raw arrays**, from public loader/analysis
   methods. Populate `label`, `units` (`{"x","y"}` or `{"x","y","z"}`) and use
   `meta` for extra context (triggers, fit params, matrices, ...).
-- **Triggers** use the shared dict shape
-  `{"left": {"index","time"}, "right": {"index","time"}}` (see
-  `utils.trigger_dict`). `Match` consumes exactly this.
+- **Triggers** are a single point `{"index", "time"}` (`utils.TriggerPoint`)
+  or a chronological `list` of such points. Build them with
+  `utils.trigger_points(times, axis)`, which snaps each time onto the axis so
+  `axis[index] == time` always holds. Loaders return lists; `Match` consumes
+  them. There is no left/right pair format any more.
+- **`Match` only aligns and resamples** (shift + shared grid over all data).
+  No amplitude scaling or statistics in the core – users do that in post on
+  the output of `Match.extract`.
 - **Keep the core headless.** Never add a top-level `import matplotlib`; put
   plotting behind lazy imports (see `__init__.__getattr__` and the local
   `import matplotlib.pyplot as plt` inside functions).
@@ -98,12 +103,18 @@ docs/               per-module manuals (ptu, zurich, jpk, match, database)
   so laser triggers are read from the marker channel (`laser_triggers` /
   `get_markers`). `laser_pulse=False` is a legacy work-around for files with no
   marker: it centres/zero-pads the non-zero part of the trace and stores its
-  edges in `meta["triggers"]`. Bad practice, kept only for compatibility.
+  two edges as a trigger list in `meta["triggers"]`. Bad practice, kept only
+  for compatibility; `Match(...).extract(m.triggers[0], m.triggers[-1])`
+  reproduces the legacy left/right window.
 - **Zurich time axis** is exported negative and reversed – the parser flips it
   to forward time. Don't "fix" this again.
 - **Zurich triggers vs. averaged signal**: pass `reference=<averaged Signal>`
   to `laser_triggers` so trigger indices line up with the binned axis used by
   `Match`.
+- **Zurich flanks**: `laser_triggers` reports rising flanks only by default,
+  matching the PicoHarp marker channel. Current trigger streams are short
+  pulses (one rising flank per event). Legacy trigger streams are a level that
+  *drops* at laser-on, so legacy files need `flank="both"`.
 - **JPK images** are flipped vertically on load; only the thumbnail page
   carries the scan factors `dx`/`dy`. Channel calibration is keyed by a private
   TIFF tag (see `_CHANNEL_CALIBRATION`).

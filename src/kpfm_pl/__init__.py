@@ -3,7 +3,7 @@
 Loaders return plotting-friendly :class:`~kpfm_pl.core.Signal` and
 :class:`~kpfm_pl.core.Image` containers (dict-like, with ``x``/``y``/``label``/
 ``units``/``meta``). The :class:`~kpfm_pl.match.Match` class aligns a PL time
-trace with a KPFM signal for joint statistical analysis.
+trace with a KPFM signal on a shared time grid for joint analysis.
 
 Example
 -------
@@ -15,7 +15,7 @@ Example
 >>> m = Match(kpfm, tt,
 ...           kpfm_triggers=z.laser_triggers(reference=kpfm, method="slope"),
 ...           timetrace_triggers=ptu.laser_triggers())
->>> result = m.to_dict()
+>>> window = m.extract(m.triggers[0], m.triggers[-1])
 """
 
 from __future__ import annotations # This is done so python does not raise a NameError when a class is referenced before it is defined. It allows for forward references in type hints.
@@ -38,14 +38,11 @@ from .jpk import JPK
 from .match import Match
 from .ptu import PTU
 from .utils import (
-    TriggerCollection,
-    TriggerPair,
     TriggerPoint,
     bin_average,
     derivative,
     downsample_sum,
     feature_scale,
-    feature_scale_params,
     fit_window_mask,
     inflection_left_bound,
     left_bound_fraction,
@@ -54,9 +51,7 @@ from .utils import (
     resample,
     set_zero,
     smooth,
-    trigger_dict,
-    zscore,
-    zscore_params,
+    trigger_points,
 )
 from .zurich import Zurich
 
@@ -73,12 +68,7 @@ __all__ = [
     "fit_gaussian2d",
     "peak_power_density",
     "TriggerPoint",
-    "TriggerPair",
-    "TriggerCollection",
     "feature_scale",
-    "feature_scale_params",
-    "zscore",
-    "zscore_params",
     "smooth",
     "derivative",
     "resample",
@@ -90,7 +80,7 @@ __all__ = [
     "set_zero",
     "downsample_sum",
     "nearest_index",
-    "trigger_dict",
+    "trigger_points",
     "pick_files",
     "pick_folder",
     "sort_measurement_files",

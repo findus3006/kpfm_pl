@@ -60,31 +60,31 @@ triggers = z.laser_triggers(z.stream_names()[1],
                             reference=kpfm, method="slope")
 ```
 
-Locates the laser triggers in a trigger stream and returns
-`{"left": {"index", "time"}, "right": {"index", "time"}, "all": ...}` – the
-`left`/`right` format consumed by [`Match`](match.md). The `"all"` entry is a
-list of `{"index": int, "time": float}` points, so every trigger location has
-one consistent representation. Returns `None` (with a warning) if no trigger
-is found.
+Locates the laser triggers in a trigger stream and returns them as a
+chronological list of trigger points `[{"index": int, "time": float}, ...]` –
+the format consumed by [`Match`](match.md). Returns `None` (with a warning) if
+no trigger is found.
 
 | Parameter | Default | Meaning |
 |-----------|---------|---------|
 | `stream` | `TRIGGER_STREAM` | trigger stream name |
-| `method` | `"threshold"` | `"threshold"` min-max scales the signal, finds contiguous windows above `0.1`, and stores the first and last sample of every window in `"all"`; `"slope"` detects **all** rising/falling flanks via `np.diff`. Both report the first and last detected points as `left`/`right`. |
+| `method` | `"threshold"` | `"threshold"` min-max scales the signal and finds contiguous windows above `0.1`; the first sample of a window is its rising flank, the last sample its falling flank. `"slope"` finds flanks via `np.diff` of the scaled signal |
+| `flank` | `"rising"` | which flanks become triggers: `"rising"`, `"falling"` or `"both"`. Rising-only matches the PicoHarp marker channel in the PTU files. Legacy files, whose trigger stream drops at laser-on, need `"both"` |
 | `reference` | `None` | optional averaged `Signal`; when given, trigger indices/times are mapped onto its (binned) time axis |
 | `slope_threshold` | `0.1` | fraction of the max `|diff|` used to qualify a slope sample as a flank (only used by `method="slope"`) |
 
-Passing `reference=kpfm` is important when correlating with an averaged KPFM
+A single detected flank gives a one-point list. Passing `reference=kpfm` is important when correlating with an averaged KPFM
 signal, so the trigger `index` values line up with the binned axis used by
 `Match`.
 
 ## Peak detection
 
 ```python
-onsets = z.find_peaks(z.signal(stream=TRIGGER_STREAM, units="V")), prominence=2.0, left_drop=0.3)
+onsets = z.find_peaks(z.signal(stream=TRIGGER_STREAM, units="V"), prominence=2.0, left_drop=0.3)
 ```
 
 Detects trigger onsets via `scipy.signal.find_peaks` and walks back from each
-peak to the point where the signal drops below `left_drop * peak`. Returns an
-`(N, 2)` array of `[index, time]` onset points. Extra keywords are forwarded
-to `scipy.signal.find_peaks`.
+peak to the point where the signal drops below `left_drop * peak`. Returns the
+onsets as a list of trigger points on the stream's axis (the same format as
+`laser_triggers`), or `None` with a warning if no peak is found. Extra keywords
+are forwarded to `scipy.signal.find_peaks`.
