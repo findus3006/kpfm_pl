@@ -113,11 +113,8 @@ docs/               per-module manuals (ptu, zurich, jpk, match, database)
 
 ## Workflow
 - You may invoke subagents to handoff tasks to speed up work or to minimize context window size.
+- Always ask the user to clarify ambiguity in features and prompts. Rather ask more than less.
 
 ## Scope & safety
-
-- Make minimal, focused changes; prefer fixing root causes over adding
-  downstream workarounds.
 - Do not create scratch files, notebooks or scripts in the repo root. Keep the
   workspace clean.
-- Never auto-run destructive or state-mutating commands without approval.

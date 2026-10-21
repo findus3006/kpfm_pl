@@ -792,7 +792,7 @@ class PTU:
             right_t = markers[-1] * self.rep_time
             left_idx = nearest_index(ref_t, left_t)
             right_idx = nearest_index(ref_t, right_t)
-            triggers = trigger_dict(left_idx, left_t, right_t, right_idx)
+            triggers = trigger_dict(left_idx, left_t, right_idx, right_t)
             all_idx = np.unique(np.array([nearest_index(ref_t, t) for t in all_times], dtype=int))
             points: list[TriggerPoint] = [
                         {"index": int(index), "time": float(trigger_time)}
@@ -801,6 +801,7 @@ class PTU:
         elif self._tt_cache.get("triggers"): # this is the legacy bit. Only works for 2 triggers
             triggers = self._tt_cache["triggers"]
             if reference is not None:
+                ref_t = np.asarray(reference["x"], dtype=float)
                 left_t = triggers["left"]["time"]
                 right_t = triggers["right"]["time"]
                 left_idx = nearest_index(ref_t, left_t)
