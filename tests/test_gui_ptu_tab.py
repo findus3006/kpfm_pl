@@ -169,6 +169,37 @@ def test_advanced_fit_settings_dialog_round_trip(window, qtbot, tab):
     assert tab.fit.fit["weighting"] == "poisson"
 
 
+def test_lifetime_shift_is_applied_per_file(window, qtbot, tab):
+    assert tab.shift_value() is None and tab.trace.lifetime_shift_ns == 0.0
+    assert not tab.shift_form.fields["shift_ns"].isVisibleTo(tab)
+    tab.shift_form.set_value("kind", "auto")
+    tab.update_trace()
+    _wait(window, qtbot, lambda: tab.trace.lifetime_shift_ns > 0)
+    shift = tab.trace.lifetime_shift_ns
+    assert f"{shift:.3f} ns" in tab.shift_label.text()
+    hist = window.ctx.state.ptu.reader.lifetime_histogram()
+    assert hist.x[np.argmax(hist.y)] * 1e9 == pytest.approx(5.0, abs=0.5)
+
+    tab.fit_form.set_value("n_exp", 1)
+    tab.run_fit()
+    _wait(window, qtbot, lambda: tab.fit is not None)
+    rows = [tab.fit_table.item(r, 0).text() for r in range(tab.fit_table.rowCount())]
+    assert "Lifetime shift (ns)" in rows
+    assert "shifted by" in tab.hist_plot.figure.axes[0].get_title()
+
+    tab.shift_form.set_values({"kind": "manual", "shift_ns": 10.0})
+    assert tab.shift_form.fields["shift_ns"].isVisibleTo(tab)
+    tab.update_trace()
+    _wait(window, qtbot, lambda: tab.trace.lifetime_shift_ns != shift)
+    assert tab.trace.lifetime_shift_ns == pytest.approx(10.0, abs=0.1)
+
+    # A newly loaded file starts unshifted, and so does the control.
+    window.ctx.load_file("ptu", PULSE)
+    _wait(window, qtbot, lambda: tab.trace is not None)
+    assert tab.shift_value() is None and tab.trace.lifetime_shift_ns == 0.0
+    assert tab.shift_label.text() == ""
+
+
 def test_groups_fold(tab):
     group = tab.groups["FLID"]
     assert not group.is_expanded() and not group.body.isVisibleTo(tab)

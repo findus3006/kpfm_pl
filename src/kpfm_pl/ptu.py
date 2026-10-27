@@ -24,6 +24,8 @@ from .utils import TriggerPoint, fit_window_mask, trigger_points
 __all__ = ["PTU"]
 
 _WRAPAROUND = 65536
+#: Where ``set_lifetime_shift("auto")`` puts the histogram peak (ns after zero).
+AUTO_SHIFT_MARGIN_NS = 5.0
 
 # Tag type identifiers from the PTU specification.
 _TAG_TYPES = {
@@ -84,15 +86,26 @@ class PTU:
         fitting.
     smooth_rep_rate :
         When ``True`` use the rounded laser repetition time for record decoding.
+    lifetime_shift :
+        Optional circular shift of the lifetime axis, see
+        :meth:`set_lifetime_shift` (``None``, the default, keeps the raw data).
     """
 
+    #: Requested and applied lifetime shift, see :meth:`set_lifetime_shift`.
+    lifetime_shift: float | str | None = None
+    lifetime_shift_ns: float = 0.0
+    #: Lifetime bin holding the partial last bin of the period after a shift.
+    lifetime_seam_bin: int | None = None
+
     def __init__(self, filepath: str | Path, dark_counts: float = 0.0,
-                 smooth_rep_rate: bool = False) -> None:
+                 smooth_rep_rate: bool = False,
+                 lifetime_shift: float | str | None = None) -> None:
         self.filepath = Path(filepath)
         self.dark_counts = float(dark_counts)
         self._tags: dict[str, Any] = {}
         self.marker: dict[int, list[int]] = {}
         self.events = np.empty((0, 3))
+        self._raw_dtime = np.empty(0)
         self._tt_cache: dict[str, Any] = {}
 
         with open(self.filepath, "rb") as fh:
@@ -108,6 +121,8 @@ class PTU:
                 print(f"{self.filepath.stem}: continuous-wave data, no trigger present.")
                 return
             self._read_records(fh, smooth_rep_rate)
+        if lifetime_shift is not None:
+            self.set_lifetime_shift(lifetime_shift)
 
     # ------------------------------------------------------------------ header
     def _read_header(self, fh) -> None:
@@ -243,6 +258,7 @@ class PTU:
         for ch, sync in markers:
             self.marker.setdefault(int(ch), []).append(int(sync))
         self.events = np.array(events, dtype=float) if events else np.empty((0, 3))
+        self._raw_dtime = self.events[:, 1].copy()
         print(f"{self.filepath.stem}: {len(self.events)} photons, "
               f"{sum(len(v) for v in self.marker.values())} markers.")
 
@@ -255,6 +271,89 @@ class PTU:
     def get_events(self) -> np.ndarray:
         """Raw photon events, shape ``(N, 3)`` = ``[truesync, dtime, time_s]``."""
         return self.events
+
+    def set_lifetime_shift(self, shift: float | str | None) -> float:
+        """Circularly shift every photon's lifetime (micro) time to earlier times.
+
+        A salvage tool for recordings whose sync offset put the decay late in
+        the lifetime window (e.g. the peak at 80 ns of a 100 ns period): the
+        tail then continues at the start of the window, after the next sync.
+        Because the window spans one laser period, rotating it by ``shift``
+        restores the full decay. Prefer fixing the sync offset of the
+        acquisition.
+
+        Parameters
+        ----------
+        shift :
+            ``None`` (or 0) restores the raw data, a number shifts by that many
+            ns (rounded to whole lifetime bins), ``"auto"`` puts the peak of the
+            whole-file histogram :data:`AUTO_SHIFT_MARGIN_NS` after zero.
+
+        Returns
+        -------
+        float
+            The applied shift in ns (also :attr:`lifetime_shift_ns`).
+
+        Notes
+        -----
+        Time traces are unaffected; photons moved across the window edge
+        belong to the previous laser pulse, i.e. their arrival time is off by
+        one period, which is negligible for time bins of milliseconds.
+        If the period is not a whole number of bins, the last bin of the window
+        is only partly covered. After a shift it lies inside the decay
+        (:attr:`lifetime_seam_bin`), so the lifetime fits leave it out.
+        All cached traces are discarded.
+        """
+        self._require_pulsed()
+        period_bins = self.rep_time / self.resolution
+        wrap = int(np.ceil(period_bins - 1e-6))
+        if wrap > self.n_lt_bins:
+            raise ValueError(
+                f"{self.filepath.stem}: the lifetime window ({self.n_lt_bins} bins) is "
+                f"shorter than one laser period ({period_bins:.0f} bins), so the data is "
+                "not periodic and cannot be shifted circularly."
+            )
+        raw = self._raw_dtime
+        if isinstance(shift, str):
+            if shift != "auto":
+                raise ValueError(f"shift must be a number, None or 'auto', not {shift!r}.")
+            hist = np.bincount(raw.astype(int) % wrap, minlength=wrap).astype(float)
+            # A short circular box filter keeps single noisy bins from winning.
+            padded = np.concatenate((hist[-2:], hist, hist[:2]))
+            peak = int(np.argmax(np.convolve(padded, np.ones(5) / 5, mode="valid")))
+            margin = int(round(AUTO_SHIFT_MARGIN_NS * 1e-9 / self.resolution))
+            bins = (peak - margin) % wrap
+        elif shift is None:
+            bins = 0
+        else:
+            if not np.isfinite(float(shift)):
+                raise ValueError("shift must be finite.")
+            bins = int(round(float(shift) * 1e-9 / self.resolution)) % wrap
+
+        self.events[:, 1] = (raw - bins) % wrap if bins else raw
+        self.lifetime_shift = shift if bins else None
+        self.lifetime_shift_ns = float(bins * self.resolution * 1e9)
+        partial = period_bins - (wrap - 1) < 0.99
+        self.lifetime_seam_bin = (wrap - 1 - bins) % wrap if bins and partial else None
+        # Matrices and traces were built from the old lifetime times.
+        self._bintime = None
+        self._tt_cache = {}
+        if bins:
+            print(f"{self.filepath.stem}: lifetime axis shifted by "
+                  f"{self.lifetime_shift_ns:.3f} ns.")
+        return self.lifetime_shift_ns
+
+    def _drop_seam(self, mask: np.ndarray, bins: int = 1) -> np.ndarray:
+        """Remove the partial seam bin (see :meth:`set_lifetime_shift`) from ``mask``.
+
+        ``mask`` is over lifetime bins grouped by ``bins``.
+        """
+        seam = self.lifetime_seam_bin
+        if seam is None or seam // bins >= mask.size:
+            return mask
+        mask = mask.copy()
+        mask[seam // bins] = False
+        return mask
 
     def _require_pulsed(self) -> None:
         """Reject time-binned/lifetime analysis on continuous-wave files."""
@@ -400,6 +499,8 @@ class PTU:
             raise ValueError("bintime must be a positive finite number.")
         hist = matrix.sum(axis=0)
         meta: dict[str, Any] = {"time_bin_count": int(matrix.shape[0])}
+        if self.lifetime_shift_ns:
+            meta["lifetime_shift_ns"] = self.lifetime_shift_ns
         if bintime is not None:
             meta.update({
                 "bintime": float(bintime),
@@ -527,7 +628,7 @@ class PTU:
             raise ValueError("bins must leave at least two lifetime groups for fitting.")
         group_sizes = np.minimum(bins, matrix.shape[1] - group_starts)
         binned_lt = np.add.reduceat(lt_ns, group_starts) / group_sizes
-        mask = np.add.reduceat(mask, group_starts) > 0
+        mask = self._drop_seam(np.add.reduceat(mask, group_starts) > 0, bins)
         t_fit = (binned_lt - t0_ns)[mask]
         if t_fit.size < 2:
             raise ValueError("The selected lifetime fit window contains fewer than two bins.")
@@ -615,7 +716,8 @@ class PTU:
             meta={"bintime": bintime, "n_exp": n_exp, "lt_bins": bins,
                   "roi": bounds, "taus": taus, "amplitudes": amps,
                   "counts": counts,
-                  "laser_pulse": bool(self._tt_cache["laser_pulse"])},
+                  "laser_pulse": bool(self._tt_cache["laser_pulse"]),
+                  "lifetime_shift_ns": self.lifetime_shift_ns},
         )
 
     def flid(self, roi: dict[str, float] | None = None, *,
@@ -724,7 +826,7 @@ class PTU:
             "lifetime_bins": int(lifetime_bins),
             "intensity_bins": int(intensity_bins),
             "roi": bounds, "time": time, "taus": taus, "amplitudes": amps,
-            "counts": counts,
+            "counts": counts, "lifetime_shift_ns": self.lifetime_shift_ns,
         }
 
         def _hist_range(values: np.ndarray, given, n_bins: int) -> tuple[float, float]:
@@ -840,6 +942,8 @@ class PTU:
 
         mask = fit_window_mask(t_ns, y, mode, fraction=fraction,
                                smoothing=smoothing, start=start, end=end)
+        if y.size == self.n_lt_bins:
+            mask = self._drop_seam(mask)
 
         t_fit, y_fit = t_ns[mask], y[mask]
         norm = 1.0
@@ -860,8 +964,11 @@ class PTU:
         if "curve" in out:
             out.setdefault("quality", {}).update(
                 poisson_chi_squared(y[mask], np.asarray(out["curve"]) * norm, 2 * n_exp))
+        seam = self.lifetime_seam_bin if y.size == self.n_lt_bins else None
         out.update({"shifted_histogram_x": t_ns, "t_fit": t_fit, "y_fit": y_fit,
-                    "left_bound_ns": float(t_fit[0]), "weighting": weighting})
+                    "left_bound_ns": float(t_fit[0]), "weighting": weighting,
+                    "lifetime_shift_ns": self.lifetime_shift_ns,
+                    "seam_ns": None if seam is None else float(t_ns[seam])})
         return out
 
     # -------------------------------------------------------------- triggers

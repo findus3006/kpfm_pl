@@ -24,6 +24,7 @@ ptu = PTU("scan.ptu", dark_counts=2.25)
 | `filepath` | – | path to the `.ptu` file |
 | `dark_counts` | `0.0` | dark counts per second, subtracted as a constant offset `C` during lifetime fitting |
 | `smooth_rep_rate` | `False` | use the rounded laser repetition time for record decoding |
+| `lifetime_shift` | `None` | circular shift of the lifetime axis, see [Lifetime shift](#lifetime-shift-salvaging-a-wrong-sync-offset) |
 
 On load the header tags and all photon records are parsed. Continuous-wave
 files (no laser trigger / infinite global resolution) are detected and the
@@ -109,6 +110,39 @@ states = ptu.threshold(off=0.1, on=0.6)   # {"on": Signal, "off": Signal}
 matrix into `"on"`. Each histogram records the number and duration of the
 selected bins, so lifetime fitting applies dark-count correction only for the
 state that contributed to that histogram.
+
+## Lifetime shift (salvaging a wrong sync offset)
+
+If the sync offset of the acquisition was wrong, the decay starts late in the
+lifetime window (e.g. the peak at 80 ns of a 100 ns period) and its tail
+continues at the start of the window, after the next laser pulse. The fits
+then only see the last 20 ns. Because the window spans exactly one laser
+period, the data can be rotated back:
+
+```python
+ptu = PTU("scan.ptu", lifetime_shift="auto")   # peak moved to 5 ns
+ptu.set_lifetime_shift(75.0)                   # or: shift to earlier times by 75 ns
+ptu.set_lifetime_shift(None)                   # back to the raw data
+```
+
+`"auto"` puts the peak of the whole-file histogram 5 ns after zero
+(`AUTO_SHIFT_MARGIN_NS`), leaving a baseline before the rise. Every photon's
+lifetime bin becomes `(dtime - shift) mod period`, so all histograms, states,
+fits, lifetime traces and FLIDs use the shifted data; cached traces are
+rebuilt. The raw data is kept, and the applied shift is stored in
+`ptu.lifetime_shift_ns` and in the metadata of the results.
+
+Notes:
+
+- This is a salvage tool; fix the sync offset of the acquisition instead.
+- It requires the window to cover a full period (`rep_time / resolution`
+  bins, at most 4096); otherwise it raises `ValueError`.
+- If the period is not a whole number of bins (e.g. 1562.5), the partly
+  covered last bin ends up inside the decay. It is left out of all lifetime
+  fits (`ptu.lifetime_seam_bin`, `fit["seam_ns"]`).
+- Time traces are unchanged. Photons moved across the window edge strictly
+  belong to the previous pulse (one period, ~100 ns, earlier), which is
+  negligible for time bins of milliseconds.
 
 ## Lifetime fitting
 

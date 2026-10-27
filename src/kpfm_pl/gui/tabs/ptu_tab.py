@@ -36,6 +36,7 @@ from .rois import RoiEditor, roi_colour
 __all__ = ["PTUTab"]
 
 _START_KINDS = (("time", "Time"), ("trigger", "Trigger"))
+_SHIFT_KINDS = (("off", "Off"), ("auto", "Auto (peak at 5 ns)"), ("manual", "Manual"))
 _END_KINDS = (("end", "End of file"), ("time", "Time"), ("trigger", "Trigger"))
 
 #: Row labels of the fit-results table (keys of ``models.ptu.fit_summary``).
@@ -47,6 +48,7 @@ _SUMMARY_LABELS = {
     "fit_start_ns": "Fit start (ns)",
     "fit_end_ns": "Fit end (ns)",
     "fit_points": "Fit points",
+    "lifetime_shift_ns": "Lifetime shift (ns)",
 }
 _CHI_TOOLTIP = ("Reduced chi-squared with Poisson weights (counts - fit)² / counts.\n"
                 "≈ 1: the fit describes the data within photon noise.\n"
@@ -144,6 +146,22 @@ class PTUTab(BaseTab):
         self.file_label.setWordWrap(True)
         layout.addWidget(self.file_label)
         self.add_button(layout, "Open PTU file…", lambda: self.ctx.open_and_load("ptu"))
+        f = self.shift_form = ParamForm()
+        tip = ("Salvage for recordings with a wrong sync offset, where the decay starts "
+               "late in the lifetime window and its tail continues at the window start. "
+               "The lifetime axis is rotated by one shift (circularly, within one laser "
+               "period) so the whole decay can be fitted.\nAuto: the histogram peak is "
+               "moved to 5 ns. Manual: shift to earlier times by the given ns.\n"
+               "Applied with 'Update time trace'; resets to Off for every new file.")
+        f.add_choice("kind", "Lifetime shift", _SHIFT_KINDS, "off", tooltip=tip)
+        f.add_float("shift_ns", "  Shift by", 0.0, maximum=1e4, step=0.5, decimals=3,
+                    suffix=" ns", tooltip=tip)
+        f.changed.connect(self._update_shift_fields)
+        layout.addWidget(f)
+        self.shift_label = self._small("")
+        layout.addWidget(self.shift_label)
+        self._applied_shift = None
+        self._update_shift_fields()
 
     def _build_trace_group(self) -> None:
         layout = self.add_group("Time trace", collapsible=True)
@@ -338,6 +356,19 @@ class PTUTab(BaseTab):
         return label
 
     # ----------------------------------------------------------- field state
+    def _update_shift_fields(self) -> None:
+        self.shift_form.set_row_visible("shift_ns",
+                                        self.shift_form.value("kind") == "manual")
+
+    def shift_value(self) -> float | str | None:
+        """The requested lifetime shift: ``None`` (off), ``"auto"`` or ns."""
+        kind = self.shift_form.value("kind")
+        if kind == "auto":
+            return "auto"
+        if kind == "manual" and self.shift_form.value("shift_ns"):
+            return self.shift_form.value("shift_ns")
+        return None
+
     def _update_trace_fields(self) -> None:
         f = self.trace_form
         start, end = f.value("start_kind"), f.value("end_kind")
@@ -463,10 +494,10 @@ class PTUTab(BaseTab):
             entered = self.trace_params()
         except ValueError:
             entered = None
-        if entered != params:
-            self.ctx.log.warning("The time-trace settings differ from the displayed trace; "
-                                 "the displayed trace is analysed. Press 'Update time "
-                                 "trace' to apply them.")
+        if entered != params or self.shift_value() != self._applied_shift:
+            self.ctx.log.warning("The time-trace or lifetime-shift settings differ from the "
+                                 "displayed trace; the displayed trace is analysed. Press "
+                                 "'Update time trace' to apply them.")
         return params
 
     def state_params(self) -> model.StateParams:
@@ -503,6 +534,10 @@ class PTUTab(BaseTab):
         self.trace = self.lifetime = self.preview_hist = self.flid_result = None
         self.fits = []
         self.fit_table.setRowCount(0)
+        # The lifetime shift is a per-file salvage: every file starts without it.
+        self.shift_form.set_value("kind", "off")
+        self._applied_shift = None
+        self.shift_label.setText("")
         self.roi_editor.detach()
         self.roi_editor.set_rois([])
         self._fill_triggers()
@@ -538,21 +573,26 @@ class PTUTab(BaseTab):
         except ValueError as exc:
             self.ctx.log.warning(str(exc))
             return
-        states, fit = self.state_params(), self.fit_params()
+        states, fit, shift = self.state_params(), self.fit_params(), self.shift_value()
         # Counts per bin grow with the bin time, so ROI count ranges are rescaled.
         factor = (params.bintime / self.trace.params.bintime
                   if self.trace is not None and self.rois else 1.0)
         rois = flid_model.scale_rois(self.rois, factor)
 
         def job(progress):
+            model.apply_lifetime_shift(handle, shift)
             result = model.compute_trace(handle, params)
-            return result, model.preview_histogram(handle, params, fit, states, rois), factor
+            preview = model.preview_histogram(handle, params, fit, states, rois)
+            return result, preview, factor, shift
 
         self.run_job(f"Time trace of {handle.name}", job, self._trace_done,
                      disable=[self.trace_button])
 
     def _trace_done(self, value) -> None:
-        self.trace, hist, factor = value
+        self.trace, hist, factor, self._applied_shift = value
+        shift_ns = self.trace.lifetime_shift_ns
+        self.shift_label.setText(f"Lifetime axis shifted by {shift_ns:.3f} ns (circular)."
+                                 if shift_ns else "")
         if factor != 1.0 and self.rois:
             self.roi_editor.set_rois(flid_model.scale_rois(self.rois, factor))
             self.ctx.log.info(f"Bin time changed: ROI count ranges scaled by {factor:g}.")
@@ -774,7 +814,7 @@ class PTUTab(BaseTab):
             x, y, label = self.preview_hist
             ax.semilogy(x, np.where(y > 0, y, np.nan), ".", color="0.3", markersize=3,
                         label="Histogram")
-            ax.set_title(label)
+            ax.set_title(label + self._shift_note())
             ax.set_xlabel("Time after histogram maximum (ns)")
         else:
             ax, ax_res = panel.figure.subplots(2, 1, sharex=True, height_ratios=[3, 1])
@@ -799,12 +839,16 @@ class PTUTab(BaseTab):
                 taus = ", ".join(f"τ{i} = {t:.3g} ns"
                                  for i, t in enumerate(np.atleast_1d(fit["tau"]), 1))
                 ax.set_title(f"{self.fit.histogram.label}: {taus}\n"
-                             f"{model.quality_text(fit)}")
+                             f"{model.quality_text(fit)}{self._shift_note()}")
         ax.set_ylabel("Counts")
         ax.grid(True, alpha=0.3)
         ax.legend(loc="upper right", fontsize="small")
         panel.draw()
         self._install_span()
+
+    def _shift_note(self) -> str:
+        shift = self.trace.lifetime_shift_ns if self.trace is not None else 0.0
+        return f" | lifetime axis shifted by {shift:.2f} ns" if shift else ""
 
     @staticmethod
     def _plot_fit(ax, ax_res, result: model.FitResult, multi: bool) -> None:
@@ -827,6 +871,10 @@ class PTUTab(BaseTab):
         if not multi:
             ax.axvspan(fit["t_fit"][0], fit["t_fit"][-1], color=colour, alpha=0.08,
                        label="Fit window")
+            if fit.get("seam_ns") is not None:
+                # Partial bin at the old window edge, left out of the fit.
+                ax.axvline(fit["seam_ns"], color="0.5", linestyle=":", linewidth=1,
+                           label="Shift seam (not fitted)")
         residuals = fit.get("quality", {}).get("weighted_residuals")
         if residuals is not None:
             ax_res.plot(fit["t_fit"], residuals, "-", color=colour, linewidth=0.7)

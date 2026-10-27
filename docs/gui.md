@@ -63,6 +63,14 @@ Everything about one `.ptu` file in one tab: time trace, regions of interest
 `examples/example_ptu.py` and `examples/example_flid.py`). Click a group
 title on the left to fold it away.
 
+0. **Lifetime shift** (File group, default *Off*): a salvage for recordings
+   with a wrong sync offset, where the decay starts late in the lifetime
+   window and its tail continues at the window start. *Auto* rotates the
+   lifetime axis so the histogram peak sits at 5 ns, *Manual* shifts by the
+   given ns. It is applied with *Update time trace*, shown under the control,
+   in the fit table and plot titles, and recorded in the exports. It applies
+   to one file only: opening a file resets it to *Off*. See
+   [ptu.md](ptu.md#lifetime-shift-salvaging-a-wrong-sync-offset).
 1. **Time trace**: photons per bin. Set the *bin time* and the window:
    *Start at* / *End at* is either a *Time* or a *Trigger*, chosen from a
    drop-down of all laser triggers of the file (`#2 – 482.048 s`, numbered as

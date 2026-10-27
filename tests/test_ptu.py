@@ -610,3 +610,74 @@ def test_lifetime_trace_passes_poisson_weights_per_bin(monkeypatch):
     assert len(seen) == 2 and all(w is not None for w in seen)
     # sigma units on normalised data: weight = peak / sqrt(counts), sqrt(peak) at the peak
     assert seen[0][0] == pytest.approx(16 / 4) and seen[1][0] == pytest.approx(64 / 8)
+
+
+# ------------------------------------------------------------ lifetime shift
+WRAPPED = DATA_DIR / "test3_DR1_360s_10Hz_4.67W_Scan1_001.ptu"
+
+
+def _wrapped_ptu(peak_ns: float = 80.0) -> PTU:
+    """A real file whose raw lifetimes are rotated so the peak sits at ``peak_ns``."""
+    p = PTU(WRAPPED)
+    wrap = int(np.ceil(p.rep_time / p.resolution - 1e-6))
+    peak = int(np.argmax(np.bincount(p._raw_dtime.astype(int), minlength=wrap)))
+    k = int(round(peak_ns * 1e-9 / p.resolution)) - peak
+    p._raw_dtime = (p._raw_dtime + k) % wrap
+    p.set_lifetime_shift(None)
+    return p
+
+
+@pytest.mark.skipif(not WRAPPED.exists(), reason="PTU test file missing")
+def test_auto_lifetime_shift_repairs_a_wrapped_decay():
+    reference = PTU(WRAPPED)
+    expected = reference.fit_lifetime(reference.lifetime_histogram(), n_exp=2)
+
+    p = _wrapped_ptu(80.0)
+    hist = p.lifetime_histogram()
+    assert hist.x[np.argmax(hist.y)] * 1e9 == pytest.approx(80.0, abs=0.2)
+    shift = p.set_lifetime_shift("auto")
+    assert p.lifetime_shift == "auto" and shift == pytest.approx(75.0, abs=0.5)
+    hist = p.lifetime_histogram()
+    assert hist.x[np.argmax(hist.y)] * 1e9 == pytest.approx(5.0, abs=0.3)
+    assert hist.meta["lifetime_shift_ns"] == shift
+    # photons are only moved, never lost or added
+    assert hist.y.sum() == reference.lifetime_histogram().y.sum()
+
+    fit = p.fit_lifetime(hist, n_exp=2)
+    assert fit["lifetime_shift_ns"] == shift
+    np.testing.assert_allclose(np.sort(fit["tau"]), np.sort(expected["tau"]), rtol=0.05)
+    # The partial last bin of the period (1562.5 bins) lies inside the decay
+    # now and is left out of the fit.
+    assert p.lifetime_seam_bin is not None and fit["seam_ns"] is not None
+    assert fit["seam_ns"] not in fit["t_fit"]
+    assert fit["t_fit"][-1] > fit["seam_ns"]
+
+
+@pytest.mark.skipif(not WRAPPED.exists(), reason="PTU test file missing")
+def test_manual_lifetime_shift_is_reversible_and_resets_caches():
+    p = PTU(WRAPPED)
+    raw = p.events[:, 1].copy()
+    before = p.time_trace(bintime=1.0)
+    shift = p.set_lifetime_shift(10.0)
+    assert shift == pytest.approx(round(10e-9 / p.resolution) * p.resolution * 1e9)
+    assert not np.array_equal(p.events[:, 1], raw)
+    # the cached matrix was rebuilt: same trace, rotated lifetimes
+    after = p.time_trace(bintime=1.0)
+    np.testing.assert_array_equal(before.y, after.y)
+    assert not np.array_equal(before.meta["matrix"], after.meta["matrix"])
+    assert p.lifetime_trace(bintime=50.0).meta["lifetime_shift_ns"] == shift
+    assert p.set_lifetime_shift(None) == 0.0 and p.lifetime_seam_bin is None
+    np.testing.assert_array_equal(p.events[:, 1], raw)
+    assert "lifetime_shift_ns" not in p.lifetime_histogram().meta
+
+
+@pytest.mark.skipif(not WRAPPED.exists(), reason="PTU test file missing")
+def test_lifetime_shift_validation():
+    p = PTU(WRAPPED)
+    with pytest.raises(ValueError, match="number, None or 'auto'"):
+        p.set_lifetime_shift("left")
+    p.n_lt_bins = 1000      # a window shorter than the period is not periodic
+    with pytest.raises(ValueError, match="shorter than one laser period"):
+        p.set_lifetime_shift(5.0)
+    q = PTU(WRAPPED, lifetime_shift="auto")
+    assert q.lifetime_shift_ns > 0

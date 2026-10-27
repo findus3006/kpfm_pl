@@ -35,6 +35,7 @@ __all__ = [
     "LifetimeTraceParams",
     "TraceResult",
     "FitResult",
+    "apply_lifetime_shift",
     "trigger_times",
     "trigger_options",
     "resolve_window",
@@ -227,6 +228,7 @@ class TraceResult:
     source: str = ""
     trigger_times: np.ndarray | None = None
     window: tuple[float, float | None] = (0.0, None)
+    lifetime_shift_ns: float = 0.0
 
 
 @dataclass
@@ -241,6 +243,21 @@ class FitResult:
     roi_index: int | None = None
     rois: list[dict[str, float]] = field(default_factory=list)
     options: FitOptions = field(default_factory=FitOptions)
+
+
+# ------------------------------------------------------------- lifetime shift
+def apply_lifetime_shift(handle: LoadedFile, shift: float | str | None) -> float:
+    """Set the circular lifetime shift of the file (``PTU.set_lifetime_shift``).
+
+    ``None`` restores the raw data, a number shifts by that many ns,
+    ``"auto"`` puts the histogram peak 5 ns after zero. Nothing is recomputed
+    when the shift is unchanged. Returns the applied shift in ns.
+    """
+    with handle.lock:
+        ptu = handle.reader
+        if shift != ptu.lifetime_shift:
+            ptu.set_lifetime_shift(shift)
+        return ptu.lifetime_shift_ns
 
 
 # ------------------------------------------------------------------ time window
@@ -345,7 +362,8 @@ def compute_trace(handle: LoadedFile, params: TraceParams) -> TraceResult:
             triggers = ptu.laser_triggers(params.marker_channel, reference=signal)
             marker_times = (np.array([p["time"] for p in triggers], dtype=float)
                             if triggers else None)
-    return TraceResult(signal, triggers, marker_times, params, str(handle.path), times, window)
+    return TraceResult(signal, triggers, marker_times, params, str(handle.path), times, window,
+                       ptu.lifetime_shift_ns)
 
 
 # ----------------------------------------------------------------------- ROIs
@@ -545,6 +563,8 @@ def fit_summary(fit: dict[str, Any]) -> dict[str, Any]:
     summary["fit_start_ns"] = float(fit.get("left_bound_ns", np.nan))
     summary["fit_end_ns"] = float(np.max(fit["t_fit"])) if len(fit.get("t_fit", [])) else np.nan
     summary["fit_points"] = int(len(fit.get("t_fit", [])))
+    if fit.get("lifetime_shift_ns"):
+        summary["lifetime_shift_ns"] = float(fit["lifetime_shift_ns"])
     return summary
 
 
@@ -571,6 +591,7 @@ def trace_payload(result: TraceResult) -> ExportPayload:
         "PTU time trace", sources=[result.source],
         parameters=_params(("time_trace", result.params)),
         results={"time_window_s": list(result.window),
+                 "lifetime_shift_ns": result.lifetime_shift_ns,
                  "laser_trigger_times_s": triggers,
                  "marker_times_s": result.marker_times,
                  **describe_meta(s.meta)},
