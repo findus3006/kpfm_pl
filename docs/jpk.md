@@ -21,7 +21,8 @@ print(jpk.channel_names())   # e.g. ['Height (measured)', 'Precision 5', ...]
 
 The reader iterates over the TIFF pages, reads JPK's private tags, applies the
 per-channel calibration (`value = raw * scale + offset`) and flips the image
-vertically so row 0 is at the bottom. Channels are keyed by
+vertically, so it shows the right way up with matplotlib's default
+`imshow(..., origin="upper")`. Channels are keyed by
 `"<name> <trace>"` (a `retrace` suffix distinguishes retrace scans).
 The unnamed 64x64 page is retained as `jpk.thumbnail` for reference but is not
 listed as a measurement channel. Its scan dimensions and calibration metadata
@@ -84,7 +85,7 @@ all_imgs = jpk.images(["Height (measured)", "Precision 5"])  # {name: Image}
 
 ```python
 import matplotlib.pyplot as plt
-plt.imshow(afm["data"], extent=afm.extent_um, origin="lower")
+plt.imshow(afm["data"], extent=afm.extent_um)   # default origin="upper"
 ```
 
 Or use the optional [`plotting`](../src/kpfm_pl/plotting.py) helpers, as in the
