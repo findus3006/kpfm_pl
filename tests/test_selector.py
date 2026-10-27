@@ -52,6 +52,27 @@ def test_box_selector_draws_box_and_ignores_middle_drag(cls):
     assert selector.get_boxes() == [box]
 
 
+def test_set_boxes_restores_editable_boxes_and_clears():
+    ax = _image_axes()
+    selector = InteractiveBoxSelector(ax)
+    _drag(ax, (5, 5), (10, 10), button=1)
+    # Reversed bounds are normalised; previous boxes and their patches are replaced.
+    selector.set_boxes([{"x_min": 60, "x_max": 20, "y_min": 20, "y_max": 60},
+                        {"x_min": 70, "x_max": 90, "y_min": 70, "y_max": 90}])
+    assert selector.get_boxes() == [
+        {"x_min": 20.0, "x_max": 60.0, "y_min": 20.0, "y_max": 60.0},
+        {"x_min": 70.0, "x_max": 90.0, "y_min": 70.0, "y_max": 90.0},
+    ]
+    assert len(ax.patches) == 2 * (1 + len(InteractiveBoxSelector.HANDLE_POSITIONS))
+
+    # A restored box can be moved by dragging its interior.
+    _drag(ax, (40, 40), (45, 40), button=1)
+    assert selector.get_boxes()[0]["x_min"] == pytest.approx(25)
+
+    selector.set_boxes([])
+    assert selector.get_boxes() == [] and not ax.patches
+
+
 def test_box_handles_rescale_with_zoom():
     ax = _image_axes()
     selector = InteractiveBoxSelector(ax)

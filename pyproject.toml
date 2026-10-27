@@ -19,8 +19,11 @@ dependencies = [
 
 [project.optional-dependencies]
 plot = ["matplotlib>=3.6"]
-gui = ["matplotlib>=3.6"]
-dev = ["pytest>=7", "matplotlib>=3.6"]
+gui = ["matplotlib>=3.6", "PySide6>=6.5"]
+dev = ["pytest>=7", "matplotlib>=3.6", "PySide6>=6.5", "pytest-qt>=4.2"]
+
+[project.gui-scripts]
+kpfm-pl-gui = "kpfm_pl.gui:main"
 
 [project.urls]
 Homepage = "https://github.com/findus3006/kpfm_pl"

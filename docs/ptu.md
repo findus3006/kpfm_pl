@@ -175,6 +175,10 @@ the same centred, zero-padded bins. Pass `laser_pulse=True` or `False`
 explicitly when creating a lifetime trace without first creating its matching
 PL time trace.
 
+Like `flid`, `lifetime_trace` takes an optional `progress(done, total)`
+callback that reports progress and can cancel the fit (see
+[Progress and cancelling](#flid-map)).
+
 ## FLID map
 
 ```python
@@ -211,6 +215,21 @@ Key parameters:
 | `mode`/`fraction`/`smoothing`/`start`/`end` | – | fit-window selection, as in `fit_lifetime` |
 | `sigma` | `1.5` | Gaussian smoothing of the 2-D histogram (`0` disables) |
 | `isolated` | `False` | when `True`, return one `Image` per exponential; otherwise a single map of the intensity-weighted mean lifetime |
+| `progress` | `None` | callback `progress(done, total)`, see below |
+
+**Progress and cancelling.** Fitting every time bin can take a while (seconds
+to minutes, depending on `bintime`). `flid` and `lifetime_trace` accept an
+optional `progress(done, total)` callback. It is called before each per-bin fit
+and once with `done == total` at the end. An exception raised inside the
+callback propagates out of the call, which cancels the computation:
+
+```python
+def report(done, total):
+    if done % 500 == 0:
+        print(f"{done}/{total} bins fitted")
+
+flid = ptu.flid(bintime=0.05, progress=report)
+```
 
 Per-bin `taus`, `amplitudes` (fitted `A_i`, both shape `(time bins, n_exp)`)
 and `counts` are stored in `Image.meta`. `counts` contains the raw

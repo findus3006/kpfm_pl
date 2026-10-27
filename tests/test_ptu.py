@@ -327,6 +327,29 @@ def test_flid_explicit_ranges_set_histogram_bins(monkeypatch):
     assert image.data.sum() == 3
 
 
+def test_flid_reports_progress_per_fitted_bin(monkeypatch):
+    p = _flid_ptu(monkeypatch, [2.0, 4.0, 6.0])
+    calls = []
+    p.flid(bintime=1.0, mode="manual", start=-1, end=10, sigma=0,
+           progress=lambda done, total: calls.append((done, total)))
+    assert calls == [(0, 3), (1, 3), (2, 3), (3, 3)]
+
+
+def test_lifetime_trace_progress_callback_can_abort(monkeypatch):
+    p = _flid_ptu(monkeypatch, [2.0, 4.0, 6.0])
+
+    class Cancelled(Exception):
+        pass
+
+    def cancel_after_first(done, total):
+        if done == 1:
+            raise Cancelled
+
+    with pytest.raises(Cancelled):
+        p.lifetime_trace(bintime=1.0, mode="manual", start=-1, end=10,
+                         progress=cancel_after_first)
+
+
 def test_flid_explicit_ranges_drop_values_outside(monkeypatch):
     p = _flid_ptu(monkeypatch, [2.0, 4.0, 6.0])
     image = p.flid(bintime=1.0, lifetime_range=(0, 5), intensity_range=(0, 25),

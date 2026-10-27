@@ -6,7 +6,7 @@ InteractiveBoxSelector
     Draw boxes by click-drag, move them by dragging the interior, resize via the
     handles, delete the active box with ``Delete`` and press ``Enter`` to emit the
     saved coordinates. Use :meth:`InteractiveBoxSelector.get_boxes` to retrieve the
-    selections as dicts.
+    selections as dicts and :meth:`InteractiveBoxSelector.set_boxes` to restore them.
 
 DraggableCircle
     Draw a circle by click-drag, then reposition it by dragging. Right-click deletes
@@ -16,6 +16,7 @@ DraggableCircle
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from typing import Callable
 
 __all__ = ["InteractiveBoxSelector", "SingleBoxSelector", "DraggableCircle"]
@@ -80,6 +81,29 @@ class InteractiveBoxSelector:
     def get_boxes(self) -> list[dict]:
         """Return the current boxes as ``{x_min, x_max, y_min, y_max}`` dicts."""
         return [self._box_to_coords(b) for b in self.boxes]
+
+    def set_boxes(self, boxes: Iterable[Mapping[str, float]]) -> None:
+        """Replace all boxes, e.g. to restore ROIs after the axes were redrawn.
+
+        Parameters
+        ----------
+        boxes :
+            ``{x_min, x_max, y_min, y_max}`` dicts in data coordinates, the
+            format returned by :meth:`get_boxes`. An empty iterable removes all
+            boxes. The restored boxes can be moved, resized and deleted like
+            drawn ones.
+        """
+        new_boxes = []
+        for box in boxes:
+            x_min, x_max = sorted((float(box["x_min"]), float(box["x_max"])))
+            y_min, y_max = sorted((float(box["y_min"]), float(box["y_max"])))
+            new_boxes.append({"x0": x_min, "y0": y_min, "width": x_max - x_min,
+                              "height": y_max - y_min, "patch": None, "handles": []})
+        for b in self.boxes:
+            self._remove_box_patches(b)
+        self.boxes = new_boxes
+        self.active_idx = None
+        self._redraw_all()
 
     # ------------------------------------------------------------------ geometry
     def _handle_size_data(self) -> float:

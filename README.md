@@ -33,11 +33,28 @@ git clone https://github.com/findus3006/kpfm_pl.git
 cd kpfm_pl
 pip install -e .            # core: numpy, scipy, tifffile
 pip install -e .[plot]      # + matplotlib, for the plotting and interactive helpers
-pip install -e .[dev]       # + pytest and matplotlib, for running the tests
+pip install -e .[gui]       # + matplotlib and PySide6, for the graphical interface
+pip install -e .[dev]       # + pytest, pytest-qt, matplotlib and PySide6, for running the tests
 ```
 
 The core never imports matplotlib. The plotting helpers and ROI selectors are
 loaded only when you use them, so the readers also work on headless machines.
+
+## Graphical interface
+
+For working without code, start the desktop GUI:
+
+```bash
+kpfm-pl-gui                 # or: python -m kpfm_pl.gui
+```
+
+Each tab is one workflow: **PL lifetime (PTU)**, **FLID**, **Correlate**
+(KPFM ↔ PL), **AFM (JPK)** and **Database**. Parameters sit on the left, with
+an explanation on hover, and plots on the right. Every plot can be saved as
+PNG/SVG/PDF and its data exported as CSV; both carry the source files and
+analysis parameters as metadata. Long fits run in the background with a
+progress bar and a Cancel button.
+→ [`docs/gui.md`](docs/gui.md)
 
 ## Data containers
 
@@ -72,6 +89,7 @@ print(fit["tau"], fit["quality"]["r_squared"])
 
 lt = ptu.lifetime_trace(bintime=0.5, n_exp=1)  # Signal: fitted lifetime (ns) per time bin
 flid = ptu.flid(bintime=0.05, n_exp=1)         # Image: occurrence over lifetime (ns) x counts
+# both accept progress=lambda done, total: ... to report (or cancel) the per-bin fits
 # For n_exp > 1 both use the intensity-weighted mean lifetime sum(A τ²) / sum(A τ).
 ```
 
@@ -191,6 +209,7 @@ jpks = pick_folder(r"D:\Measurements")               # all .jpk files below a ch
 | [`io`](src/kpfm_pl/io.py) | `pick_files`, `pick_folder` (tkinter dialogs), `sort_measurement_files` | docstrings |
 | [`utils`](src/kpfm_pl/utils.py) | smoothing, resampling, fit-window selection, AFM levelling, trigger points | docstrings |
 | [`core`](src/kpfm_pl/core.py) | `Signal`, `Image` | – |
+| [`gui`](src/kpfm_pl/gui) | optional PySide6 desktop GUI (`kpfm-pl-gui`); not imported by the core | [gui.md](docs/gui.md) |
 
 Everything public is importable directly from `kpfm_pl`, e.g.
 `from kpfm_pl import PTU, plot_image, InteractiveBoxSelector`.
@@ -217,7 +236,8 @@ pytest
 
 The suite in [`tests/`](tests) covers all modules, using the files in
 `examples/Test data/` and synthetic data. The interactive helpers are tested
-headless with simulated mouse events.
+headless with simulated mouse events, and the GUI runs offscreen under
+`pytest-qt`.
 
 ## License
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import struct
 import time as _time
 import warnings
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -432,6 +433,7 @@ class PTU:
         mode: str = "fraction", fraction: float = 0.95,
         smoothing: float = 2.0, start: float = 0.0,
         end: float | None = None, laser_pulse: bool | None = None,
+        progress: Callable[[int, int], Any] | None = None,
         **fit_kwargs,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, float | None]]:
         """Fit lifetimes per time bin while preserving time-bin positions."""
@@ -512,7 +514,11 @@ class PTU:
         taus = np.full((len(time), n_exp), np.nan, dtype=float)
         amps = np.full((len(time), n_exp), np.nan, dtype=float)
         n_binned = len(mask)
-        for index in np.flatnonzero(selected):
+        rows = np.flatnonzero(selected)
+        for done, index in enumerate(rows):
+            # Report before each fit so a raising callback aborts promptly.
+            if progress is not None:
+                progress(done, rows.size)
             lt_bin = np.asarray(binned_matrix[index], dtype=float)
             norm = np.max(lt_bin)
             if not np.isfinite(norm) or norm == 0:
@@ -533,6 +539,8 @@ class PTU:
                         and np.all(np.isfinite(fitted_amps))):
                     taus[index] = fitted_taus
                     amps[index] = fitted_amps
+        if progress is not None:
+            progress(rows.size, rows.size)
 
         bounds = {"x_min": x_min, "x_max": x_max,
                   "y_min": y_min, "y_max": y_max}
@@ -545,7 +553,9 @@ class PTU:
                        mode: str = "fraction", fraction: float = 0.95,
                        smoothing: float = 2.0, start: float = 0.0,
                        end: float | None = None,
-                       laser_pulse: bool | None = None, **fit_kwargs) -> Signal:
+                       laser_pulse: bool | None = None,
+                       progress: Callable[[int, int], Any] | None = None,
+                       **fit_kwargs) -> Signal:
         """Return mean fitted lifetime versus acquisition time.
 
         The returned ``Signal.x`` contains the time-bin positions and
@@ -560,12 +570,16 @@ class PTU:
         By default, the trace inherits the ``laser_pulse`` mode of the most
         recent :meth:`time_trace` call.  Pass the option explicitly when no
         time trace has been generated first.
+
+        ``progress`` is an optional callback ``progress(done, total)`` called
+        before each per-bin fit and once at the end; raise an exception from
+        it to abort the computation (see :meth:`flid`).
         """
         time, taus, amps, counts, bounds = self._fit_time_bin_lifetimes(
             roi, x_min=x_min, x_max=x_max, y_min=y_min, y_max=y_max,
             bintime=bintime, n_exp=n_exp, bins=bins, mode=mode,
             fraction=fraction, smoothing=smoothing, start=start, end=end,
-            laser_pulse=laser_pulse, **fit_kwargs,
+            laser_pulse=laser_pulse, progress=progress, **fit_kwargs,
         )
         return Signal(
             time, _weighted_mean_lifetime(taus, amps),
@@ -586,7 +600,9 @@ class PTU:
              intensity_range: tuple[float, float] | None = None,
              mode: str = "fraction", fraction: float = 0.95, smoothing: float = 2.0,
              start: float = 0.0, end: float | None = None, sigma: float = 1.5,
-             isolated: bool = False, **fit_kwargs) -> Image | list[Image]:
+             isolated: bool = False,
+             progress: Callable[[int, int], Any] | None = None,
+             **fit_kwargs) -> Image | list[Image]:
         """Compute a FLID (Fluorescence-Lifetime-Intensity-Distribution) map.
 
         Each time bin of the (optionally) ROI-restricted matrix is fitted with
@@ -631,6 +647,11 @@ class PTU:
             When ``True`` return one :class:`Image` per exponential component;
             otherwise return a single map of the per-bin intensity-weighted
             mean lifetime.
+        progress :
+            Optional callback ``progress(done, total)``, called before each
+            per-bin fit and once with ``done == total`` at the end (e.g. to
+            drive a progress bar). An exception raised by the callback
+            propagates and aborts the computation, which allows cancelling.
         **fit_kwargs :
             Forwarded to :class:`~kpfm_pl.fitting.MultiExpFit`.
 
@@ -662,7 +683,7 @@ class PTU:
             roi, x_min=x_min, x_max=x_max, y_min=y_min, y_max=y_max,
             bintime=bintime, n_exp=n_exp, bins=bins, mode=mode,
             fraction=fraction, smoothing=smoothing, start=start, end=end,
-            **fit_kwargs,
+            progress=progress, **fit_kwargs,
         )
         n_fitted = int(np.count_nonzero(np.all(np.isfinite(taus), axis=1)))
         print(f"{self.filepath.stem}: FLID fitted {n_fitted} of {len(time)} time bins.")

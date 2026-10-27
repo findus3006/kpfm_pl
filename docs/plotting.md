@@ -151,7 +151,11 @@ rois = selector.get_boxes()   # [{"x_min", "x_max", "y_min", "y_max"}, ...]
 | `handle_size` | `None` | handle half-width in data units; `None` = 0.5 % of the visible x-range (updated when you zoom) |
 
 `get_boxes()` returns plain dicts ordered by drawing order, with `x_min <
-x_max` and `y_min < y_max`. `disconnect()` detaches all event handlers.
+x_max` and `y_min < y_max`. `set_boxes(boxes)` replaces all boxes with dicts in
+the same format, e.g. to restore ROIs on a redrawn plot
+(`selector.set_boxes(saved)`) or to clear them (`selector.set_boxes([])`); the
+restored boxes can be edited like drawn ones. `disconnect()` detaches all event
+handlers.
 
 ### `SingleBoxSelector`: exactly one ROI
 

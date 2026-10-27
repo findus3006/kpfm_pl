@@ -37,9 +37,19 @@ src/kpfm_pl/
     io.py           file dialogs + measurement-pair sorting (lazy tkinter)
     selector.py     optional interactive matplotlib ROI selectors
     plotting.py     optional plotting helpers (cmaps, colorbars, wheel zoom/pan, ROIs)
+    gui/            optional PySide6 desktop GUI (`kpfm-pl-gui`), see below
+        app.py          MainWindow (tabs, log dock, status bar) + run()
+        context.py      AppState (loaded files) + AppContext (dialogs, loading)
+        workers.py      JobRunner: background jobs, progress, cancel
+        canvas.py       PlotPanel: embedded matplotlib + figure/CSV export
+        forms.py        ParamForm: labelled parameter fields
+        export.py       CSV / figure export with metadata (Qt-free)
+        logcapture.py   print()/warnings -> log panel
+        models/         Qt-free workflow logic, one module per tab
+        tabs/           one widget per workflow (ptu, flid, correlate, jpk, database)
 src/examples/       runnable scripts + a `Test data/` folder of sample files
 tests/              pytest suite
-docs/               per-module manuals (ptu, zurich, jpk, match, database, plotting)
+docs/               per-module manuals (ptu, zurich, jpk, match, database, plotting, gui)
 ```
 
 ## Environment & commands
@@ -47,9 +57,11 @@ docs/               per-module manuals (ptu, zurich, jpk, match, database, plott
 - OS: Windows; shell: PowerShell. Do **not** use `cd` in commands – set the
   working directory instead.
 - Python `>=3.10`.
-- Install: `pip install -e .[dev]` (adds `pytest` and `matplotlib`).
+- Install: `pip install -e .[dev]` (adds `pytest`, `pytest-qt`, `matplotlib`
+  and `PySide6`).
 - Runtime deps: `numpy`, `scipy`, `tifffile`. Matplotlib is optional (`plot` /
-  `gui` / `dev` extras).
+  `gui` / `dev` extras); PySide6 only for the GUI (`gui` / `dev` extras).
+- Start the GUI: `kpfm-pl-gui` or `python -m kpfm_pl.gui`.
 - Run tests: `pytest` (config in `pyproject.toml`, `testpaths = ["tests"]`).
 
 ## Conventions to follow
@@ -76,12 +88,42 @@ docs/               per-module manuals (ptu, zurich, jpk, match, database, plott
   docstrings and a few inline comments. Do not strip them. Match the existing
   NumPy-style docstring format when adding new public functions.
 
+## GUI rules (`kpfm_pl.gui`)
+
+- **The backend never depends on the GUI.** Nothing outside `gui/` imports
+  it, and `kpfm_pl/__init__.py` does not re-export it. The GUI uses only the
+  public backend API. Backend changes made for the GUI must be generic and
+  backward compatible (e.g. the optional `progress` callback of
+  `PTU.flid`/`PTU.lifetime_trace`).
+- **Qt-free models, thin widgets.** Workflow logic (parameter dataclasses,
+  ordered backend calls, export payloads) goes in `gui/models/*.py` without Qt
+  imports; `gui/tabs/*.py` only build widgets and plot. `gui/export.py` is
+  Qt-free too.
+- **PTU caches its last time trace.** `threshold`, `lifetime_histogram()` and
+  `laser_triggers` read it, and ROI/FLID/lifetime-trace calls replace it. GUI
+  models therefore rebuild the trace with the current parameters before any
+  cache-dependent call, holding `LoadedFile.lock` for the whole sequence.
+- **Never block the GUI thread.** Slow calls go through `BaseTab.run_job` /
+  `JobRunner.submit`; pass the job's `progress` to backend `progress=`
+  arguments so the Cancel button works.
+- **No pyplot figures and no blocking helpers in the GUI.** Use `PlotPanel`
+  (a plain `matplotlib.figure.Figure`), not `plt.figure`, `plt.show`,
+  `make_circle`, `crop_roi`, `set_scaled_rcparams` or the tkinter dialogs in
+  `io.py`.
+- Name clash: import Qt's signal as `from PySide6.QtCore import Signal as QtSignal`.
+- Exports carry metadata built with `export.build_metadata` (sources,
+  parameters, results, version).
+
 ## Testing discipline
 
 - Add or update tests under `tests/` for any behavioural change. The suite
   covers `utils`, `fitting`, `core`, `plotting`, `selector`, the loaders
   (`ptu`, `zurich`, `jpk`), `match` and `database`. Interactive helpers are
   tested on the Agg backend by dispatching synthetic `MouseEvent`s.
+- GUI tests (`tests/test_gui_*.py`) run headless: `tests/conftest.py` sets
+  `QT_QPA_PLATFORM=offscreen`. Test models with plain pytest and widgets with
+  `pytest-qt` (`qtbot`); wait for background jobs with
+  `qtbot.waitUntil(lambda: not runner.busy)`. Monkeypatch file dialogs.
 - Prefer synthetic/in-memory fixtures over large binary files where possible.
 - Do not weaken or delete existing tests without an explicit reason.
 
