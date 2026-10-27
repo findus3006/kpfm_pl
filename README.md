@@ -70,8 +70,9 @@ states = ptu.threshold(off=0.1, on=0.6)        # {"on": Signal, "off": Signal} l
 fit = ptu.fit_lifetime(states["on"], n_exp=2)  # dict: A, tau (ns), curve, quality, ...
 print(fit["tau"], fit["quality"]["r_squared"])
 
-lt = ptu.lifetime_trace(bintime=0.5, n_exp=1)  # Signal: mean fitted lifetime (ns) per time bin
+lt = ptu.lifetime_trace(bintime=0.5, n_exp=1)  # Signal: fitted lifetime (ns) per time bin
 flid = ptu.flid(bintime=0.05, n_exp=1)         # Image: occurrence over lifetime (ns) x counts
+# For n_exp > 1 both use the intensity-weighted mean lifetime sum(A τ²) / sum(A τ).
 ```
 
 `laser_triggers` reads the laser on/off markers that current recordings store

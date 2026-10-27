@@ -41,6 +41,17 @@ _TAG_TYPES = {
 _TAG_TYPES = {k: struct.unpack(">i", v.to_bytes(4, "big"))[0] for k, v in _TAG_TYPES.items()}
 
 
+def _weighted_mean_lifetime(taus: np.ndarray, amps: np.ndarray) -> np.ndarray:
+    """Intensity-weighted mean lifetime ``sum(A tau^2) / sum(A tau)`` per row.
+
+    Rows with a failed fit (NaN) or zero total weight (all ``A = 0``) give NaN.
+    """
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean = np.sum(amps * taus**2, axis=1) / np.sum(amps * taus, axis=1)
+    mean[~np.isfinite(mean)] = np.nan
+    return mean
+
+
 class PTU:
     """Load a PicoQuant ``.ptu`` TTTR-T3 file.
 
@@ -499,6 +510,7 @@ class PTU:
         binned_matrix = np.add.reduceat(matrix, group_starts, axis=1)
 
         taus = np.full((len(time), n_exp), np.nan, dtype=float)
+        amps = np.full((len(time), n_exp), np.nan, dtype=float)
         n_binned = len(mask)
         for index in np.flatnonzero(selected):
             lt_bin = np.asarray(binned_matrix[index], dtype=float)
@@ -513,13 +525,18 @@ class PTU:
             offset = self.dark_counts * bintime / n_binned / norm
             fit = MultiExpFit(t_fit, y_fit, n_exp, offset, **fit_kwargs)
             if fit.success:
-                fitted_taus = np.asarray(fit.parameters()["tau"], dtype=float)
-                if fitted_taus.shape == (n_exp,) and np.all(np.isfinite(fitted_taus)):
+                params = fit.parameters()
+                fitted_taus = np.asarray(params["tau"], dtype=float)
+                fitted_amps = np.asarray(params["A"], dtype=float)
+                if (fitted_taus.shape == fitted_amps.shape == (n_exp,)
+                        and np.all(np.isfinite(fitted_taus))
+                        and np.all(np.isfinite(fitted_amps))):
                     taus[index] = fitted_taus
+                    amps[index] = fitted_amps
 
         bounds = {"x_min": x_min, "x_max": x_max,
                   "y_min": y_min, "y_max": y_max}
-        return time, taus, counts, bounds
+        return time, taus, amps, counts, bounds
 
     def lifetime_trace(self, roi: dict[str, float] | None = None, *,
                        x_min: float | None = None, x_max: float | None = None,
@@ -532,30 +549,31 @@ class PTU:
         """Return mean fitted lifetime versus acquisition time.
 
         The returned ``Signal.x`` contains the time-bin positions and
-        ``Signal.y`` contains the arithmetic mean of the fitted exponential
-        lifetimes in ns. There is exactly one value per time bin. A value is
-        ``NaN`` when the bin is outside the requested intensity ROI, contains
-        no usable photons, or its fit fails. Individual fitted components are
-        available as ``signal.meta["taus"]`` with shape ``(time bins, n_exp)``.
+        ``Signal.y`` contains the intensity-weighted mean
+        ``sum(A_i * tau_i**2) / sum(A_i * tau_i)`` of the fitted exponential
+        lifetimes in ns (equal to ``tau`` for ``n_exp=1``). There is exactly
+        one value per time bin. A value is ``NaN`` when the bin is outside the
+        requested intensity ROI, contains no usable photons, its fit fails, or
+        all its amplitudes are zero. Individual fitted components are
+        available as ``signal.meta["taus"]`` and ``signal.meta["amplitudes"]``
+        with shape ``(time bins, n_exp)``.
         By default, the trace inherits the ``laser_pulse`` mode of the most
         recent :meth:`time_trace` call.  Pass the option explicitly when no
         time trace has been generated first.
         """
-        time, taus, counts, bounds = self._fit_time_bin_lifetimes(
+        time, taus, amps, counts, bounds = self._fit_time_bin_lifetimes(
             roi, x_min=x_min, x_max=x_max, y_min=y_min, y_max=y_max,
             bintime=bintime, n_exp=n_exp, bins=bins, mode=mode,
             fraction=fraction, smoothing=smoothing, start=start, end=end,
             laser_pulse=laser_pulse, **fit_kwargs,
         )
-        mean_taus = np.full(len(time), np.nan, dtype=float)
-        valid = np.all(np.isfinite(taus), axis=1)
-        mean_taus[valid] = np.mean(taus[valid], axis=1)
         return Signal(
-            time, mean_taus,
+            time, _weighted_mean_lifetime(taus, amps),
             label=f"{self.filepath.stem} mean lifetime",
             units={"x": "s", "y": "ns"},
             meta={"bintime": bintime, "n_exp": n_exp, "lt_bins": bins,
-                  "roi": bounds, "taus": taus, "counts": counts,
+                  "roi": bounds, "taus": taus, "amplitudes": amps,
+                  "counts": counts,
                   "laser_pulse": bool(self._tt_cache["laser_pulse"])},
         )
 
@@ -573,7 +591,10 @@ class PTU:
 
         Each time bin of the (optionally) ROI-restricted matrix is fitted with
         ``n_exp`` exponentials; the resulting ``(lifetime, counts)`` pairs are
-        binned into a 2-D histogram (lifetime on x, counts on y).
+        binned into a 2-D histogram (lifetime on x, counts on y). Unless
+        ``isolated``, the lifetime of a bin is the intensity-weighted mean
+        ``sum(A_i * tau_i**2) / sum(A_i * tau_i)`` of its fitted components
+        (equal to ``tau`` for ``n_exp=1``).
 
         Parameters
         ----------
@@ -608,7 +629,8 @@ class PTU:
             Gaussian smoothing applied to the 2-D histogram (``0`` disables).
         isolated :
             When ``True`` return one :class:`Image` per exponential component;
-            otherwise return a single map of the per-bin mean lifetime.
+            otherwise return a single map of the per-bin intensity-weighted
+            mean lifetime.
         **fit_kwargs :
             Forwarded to :class:`~kpfm_pl.fitting.MultiExpFit`.
 
@@ -616,8 +638,8 @@ class PTU:
         -------
         Image or list[Image]
             FLID map(s) with the lifetime axis as ``x`` (ns), counts as ``y``,
-            and occurrence as ``data``. Per-bin ``taus``/``counts`` and the
-            histogram ``lifetime_range``/``intensity_range`` actually used are
+            and occurrence as ``data``. Per-bin ``taus``/``amplitudes``/``counts``
+            and the histogram ``lifetime_range``/``intensity_range`` actually used are
             stored in ``meta``; ``(*lifetime_range, *intensity_range)`` is the
             exact ``imshow`` extent of the map.
         """
@@ -636,7 +658,7 @@ class PTU:
                 if lo_hi.shape != (2,) or not np.all(np.isfinite(lo_hi)) or lo_hi[0] >= lo_hi[1]:
                     raise ValueError(f"{name} must be a finite (min, max) pair with min < max.")
 
-        time, taus, counts, bounds = self._fit_time_bin_lifetimes(
+        time, taus, amps, counts, bounds = self._fit_time_bin_lifetimes(
             roi, x_min=x_min, x_max=x_max, y_min=y_min, y_max=y_max,
             bintime=bintime, n_exp=n_exp, bins=bins, mode=mode,
             fraction=fraction, smoothing=smoothing, start=start, end=end,
@@ -650,7 +672,8 @@ class PTU:
             "bintime": bintime, "n_exp": n_exp, "lt_bins": bins, "sigma": sigma,
             "lifetime_bins": int(lifetime_bins),
             "intensity_bins": int(intensity_bins),
-            "roi": bounds, "time": time, "taus": taus, "counts": counts,
+            "roi": bounds, "time": time, "taus": taus, "amplitudes": amps,
+            "counts": counts,
         }
 
         def _hist_range(values: np.ndarray, given, n_bins: int) -> tuple[float, float]:
@@ -696,8 +719,7 @@ class PTU:
                 _make_image(taus[:, i], f"{self.filepath.stem} FLID (tau {i + 1})")
                 for i in range(n_exp)
             ]
-        taus_mean = taus.mean(axis=1) if taus.size else np.array([])
-        return _make_image(taus_mean, f"{self.filepath.stem} FLID")
+        return _make_image(_weighted_mean_lifetime(taus, amps), f"{self.filepath.stem} FLID")
 
     def threshold(self, off: float = 0.0, on: float = 1.0) -> dict[str, Signal]:
         """Split the lifetime histogram into ``on``/``off`` states by count level.

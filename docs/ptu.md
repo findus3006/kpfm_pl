@@ -162,10 +162,12 @@ lt = ptu.lifetime_trace(bintime=0.5, n_exp=2, bins=10)
 ```
 
 `lifetime_trace` fits every photon time bin and returns a `Signal` containing
-the mean fitted lifetime in ns. Its `x` and `y` arrays have exactly one entry
-per selected time bin. Bins outside an intensity ROI, empty bins and failed
-fits remain `NaN` at their original positions; the individual fitted
-components are available in `Signal.meta["taus"]`.
+the fitted lifetime in ns: for `n_exp > 1`, the intensity-weighted mean
+`sum(A_i tau_i^2) / sum(A_i tau_i)`, as in the [FLID map](#flid-map). Its `x`
+and `y` arrays have exactly one entry per selected time bin. Bins outside an
+intensity ROI, empty bins, failed fits and bins whose amplitudes are all zero
+remain `NaN` at their original positions; the individual fitted components
+are available in `Signal.meta["taus"]` and `Signal.meta["amplitudes"]`.
 
 When `laser_pulse` is omitted, `lifetime_trace` inherits the mode used by the
 most recent `time_trace` call. This keeps legacy `laser_pulse=False` traces on
@@ -185,6 +187,15 @@ the (optionally ROI-restricted) matrix and bins the resulting
 `(lifetime, counts)` pairs into a 2-D histogram (lifetime on `x` [ns], counts
 on `y`, occurrence as `data`).
 
+For `n_exp > 1` the lifetime of a time bin is the **intensity-weighted mean**
+of its fitted components,
+
+$$\tau_\text{mean} = \frac{\sum_i A_i \tau_i^2}{\sum_i A_i \tau_i},$$
+
+which reduces to `tau` for `n_exp=1`. Bins whose amplitudes are all zero are
+left out. `isolated=True` skips the averaging and returns one map per
+component instead.
+
 Key parameters:
 
 | Parameter | Default | Meaning |
@@ -199,9 +210,10 @@ Key parameters:
 | `lifetime_range`/`intensity_range` | `None` | `(min, max)` of the histogram axes (ns / counts); values outside are dropped. `None` = data range padded by `ceil(3·sigma)` bins per side (never below 0) |
 | `mode`/`fraction`/`smoothing`/`start`/`end` | – | fit-window selection, as in `fit_lifetime` |
 | `sigma` | `1.5` | Gaussian smoothing of the 2-D histogram (`0` disables) |
-| `isolated` | `False` | when `True`, return one `Image` per exponential; otherwise a single mean-lifetime map |
+| `isolated` | `False` | when `True`, return one `Image` per exponential; otherwise a single map of the intensity-weighted mean lifetime |
 
-Per-bin `taus`/`counts` are stored in `Image.meta`. `counts` contains the raw
+Per-bin `taus`, `amplitudes` (fitted `A_i`, both shape `(time bins, n_exp)`)
+and `counts` are stored in `Image.meta`. `counts` contains the raw
 photon total in each time bin; lifetime curves are normalised only for fitting.
 The two explicit histogram sizes keep FLID memory bounded independently of the
 measurement duration.

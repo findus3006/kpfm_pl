@@ -149,7 +149,7 @@ def test_flid_preserves_raw_counts_and_odd_lifetime_groups(monkeypatch):
             pass
 
         def parameters(self):
-            return {"tau": np.array([2.0])}
+            return {"A": np.ones(1), "tau": np.array([2.0])}
 
     monkeypatch.setattr("kpfm_pl.ptu.MultiExpFit", DummyFit)
     matrix = np.array([[4, 2, 1, 0, 0], [8, 4, 2, 0, 0]], dtype=np.uint32)
@@ -170,7 +170,7 @@ def test_lifetime_trace_preserves_time_bins_and_marks_failed_fits(monkeypatch):
             self.success = self.call == 0
 
         def parameters(self):
-            return {"tau": np.array([2.0, 4.0])}
+            return {"A": np.ones(2), "tau": np.array([2.0, 4.0])}
 
     monkeypatch.setattr("kpfm_pl.ptu.MultiExpFit", DummyFit)
     matrix = np.array([
@@ -187,11 +187,34 @@ def test_lifetime_trace_preserves_time_bins_and_marks_failed_fits(monkeypatch):
 
     np.testing.assert_allclose(trace.x, [0.0, 1.0, 2.0])
     assert len(trace.x) == len(trace.y) == matrix.shape[0]
-    assert trace.y[0] == pytest.approx(3.0)
+    # intensity-weighted mean: (1*2**2 + 1*4**2) / (1*2 + 1*4)
+    assert trace.y[0] == pytest.approx(20.0 / 6.0)
     assert np.isnan(trace.y[1])  # empty photon bin
     assert np.isnan(trace.y[2])  # unsuccessful fit
-    assert trace.meta["taus"].shape == (3, 2)
+    assert trace.meta["taus"].shape == trace.meta["amplitudes"].shape == (3, 2)
     assert trace.units == {"x": "s", "y": "ns"}
+
+
+@pytest.mark.parametrize("amps,expected", [
+    ([3.0, 1.0], (3 * 1 + 1 * 16) / (3 * 1 + 1 * 4)),   # weighted towards tau=1
+    ([1.0, 0.0], 1.0),                                  # only the first component
+    ([0.0, 0.0], np.nan),                               # no weight at all
+])
+def test_lifetime_trace_uses_intensity_weighted_mean(monkeypatch, amps, expected):
+    class DummyFit:
+        success = True
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def parameters(self):
+            return {"A": np.array(amps), "tau": np.array([1.0, 4.0])}
+
+    monkeypatch.setattr("kpfm_pl.ptu.MultiExpFit", DummyFit)
+    p = _synthetic_ptu(np.array([[4, 2, 1, 0]], dtype=np.uint32), bintime=1.0,
+                       acquisition_time=1.0)
+    trace = p.lifetime_trace(bintime=1.0, n_exp=2, mode="manual", start=-1, end=10)
+    np.testing.assert_allclose(trace.y, [expected])
 
 
 def test_lifetime_trace_keeps_intensity_roi_bins_as_nan(monkeypatch):
@@ -202,7 +225,7 @@ def test_lifetime_trace_keeps_intensity_roi_bins_as_nan(monkeypatch):
             pass
 
         def parameters(self):
-            return {"tau": np.array([5.0])}
+            return {"A": np.ones(1), "tau": np.array([5.0])}
 
     monkeypatch.setattr("kpfm_pl.ptu.MultiExpFit", DummyFit)
     matrix = np.array([[4, 2, 1, 0], [8, 4, 2, 0]], dtype=np.uint32)
@@ -224,7 +247,7 @@ def test_lifetime_trace_inherits_legacy_time_bin_transform(monkeypatch):
             pass
 
         def parameters(self):
-            return {"tau": np.array([3.0])}
+            return {"A": np.ones(1), "tau": np.array([3.0])}
 
     monkeypatch.setattr("kpfm_pl.ptu.MultiExpFit", DummyFit)
     matrix = np.zeros((8, 4), dtype=np.uint32)
@@ -253,7 +276,7 @@ def test_lifetime_trace_can_override_inherited_legacy_mode(monkeypatch):
             pass
 
         def parameters(self):
-            return {"tau": np.array([3.0])}
+            return {"A": np.ones(1), "tau": np.array([3.0])}
 
     monkeypatch.setattr("kpfm_pl.ptu.MultiExpFit", DummyFit)
     matrix = np.zeros((8, 4), dtype=np.uint32)
@@ -283,7 +306,7 @@ def _flid_ptu(monkeypatch, taus):
             self.tau = next(fitted)
 
         def parameters(self):
-            return {"tau": np.array([self.tau])}
+            return {"A": np.ones(1), "tau": np.array([self.tau])}
 
     monkeypatch.setattr("kpfm_pl.ptu.MultiExpFit", DummyFit)
     matrix = np.array([[4, 2, 1, 0], [8, 4, 2, 0], [12, 6, 3, 0]], dtype=np.uint32)
@@ -341,6 +364,42 @@ def test_flid_without_smoothing_spans_data_exactly(monkeypatch):
     image = p.flid(bintime=1.0, mode="manual", start=-1, end=10, sigma=0)
     assert image.meta["lifetime_range"] == (2.0, 6.0)
     assert image.meta["intensity_range"] == (7.0, 21.0)
+
+
+def _two_component_flid(monkeypatch, amps, taus, **kwargs):
+    class DummyFit:
+        success = True
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def parameters(self):
+            return {"A": np.array(amps, dtype=float), "tau": np.array(taus, dtype=float)}
+
+    monkeypatch.setattr("kpfm_pl.ptu.MultiExpFit", DummyFit)
+    p = _synthetic_ptu(np.array([[4, 2, 1, 0]], dtype=np.uint32), bintime=1.0,
+                       acquisition_time=1.0)
+    return p.flid(bintime=1.0, n_exp=2, lifetime_bins=10, lifetime_range=(0, 10),
+                  intensity_range=(0, 10), mode="manual", start=-1, end=10,
+                  sigma=0, **kwargs)
+
+
+def test_flid_uses_intensity_weighted_mean_lifetime(monkeypatch):
+    image = _two_component_flid(monkeypatch, [1.0, 1.0], [1.0, 4.0])
+    # (1*1 + 1*16) / (1*1 + 1*4) = 3.4 ns, not the arithmetic mean 2.5 ns
+    assert np.flatnonzero(image.data.sum(axis=0)).tolist() == [3]
+    np.testing.assert_allclose(image.meta["amplitudes"], [[1.0, 1.0]])
+    np.testing.assert_allclose(image.meta["taus"], [[1.0, 4.0]])
+
+
+def test_flid_isolated_maps_are_not_weighted(monkeypatch):
+    images = _two_component_flid(monkeypatch, [1.0, 1.0], [1.0, 4.0], isolated=True)
+    assert [np.flatnonzero(im.data.sum(axis=0)).tolist() for im in images] == [[1], [4]]
+
+
+def test_flid_drops_bins_with_zero_weights(monkeypatch):
+    image = _two_component_flid(monkeypatch, [0.0, 0.0], [1.0, 4.0])
+    assert image.data.sum() == 0
 
 
 @pytest.mark.parametrize("name,value", [
