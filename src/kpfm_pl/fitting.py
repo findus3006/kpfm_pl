@@ -18,7 +18,8 @@ from typing import Any
 import numpy as np
 from scipy.optimize import curve_fit, least_squares
 
-__all__ = ["MultiExpFit", "gaussian2d", "fit_gaussian2d", "peak_power_density"]
+__all__ = ["MultiExpFit", "poisson_chi_squared", "gaussian2d", "fit_gaussian2d",
+           "peak_power_density"]
 
 
 class MultiExpFit:
@@ -34,7 +35,8 @@ class MultiExpFit:
         Constant offset ``C`` added to the model (e.g. dark counts).
     p0 :
         Optional initial guess ``[A_1..A_n, tau_1..tau_n]``. Auto-generated when
-        ``None``.
+        ``None``; individual ``NaN`` entries are auto-generated too. Automatic
+        guesses are clipped into ``bounds``, explicit ones are used as given.
     bounds :
         Optional ``(lower, upper)`` arrays. Auto-generated when ``None``.
     loss, f_scale :
@@ -105,11 +107,10 @@ class MultiExpFit:
         return jac
 
     def _fit(self, p0, bounds):
-        if p0 is None:
-            p0 = self._default_p0()
         if bounds is None:
             bounds = self._default_bounds()
         try:
+            p0 = self._initial_guess(p0, bounds)
             return least_squares(
                 self._residuals, p0, jac=self._jacobian, args=(self.t, self.y),
                 bounds=bounds, loss=self.loss, f_scale=self.f_scale, max_nfev=20000,
@@ -136,6 +137,23 @@ class MultiExpFit:
                 raise RuntimeError(msg) from self._error
             raise RuntimeError(msg)
         return self.result
+
+    def _initial_guess(self, p0, bounds) -> np.ndarray:
+        """Fill ``None``/``NaN`` guesses automatically and clip those into ``bounds``.
+
+        Explicit guesses are left untouched, so an infeasible one still makes
+        the fit fail instead of being silently moved.
+        """
+        auto = self._default_p0()
+        if p0 is None:
+            p0 = np.full(auto.shape, np.nan)
+        p0 = np.array(p0, dtype=float)
+        missing = np.isnan(p0)
+        if not missing.any():
+            return p0
+        lower, upper = (np.broadcast_to(np.asarray(b, dtype=float), p0.shape) for b in bounds)
+        p0[missing] = np.clip(auto, lower, upper)[missing]
+        return p0
 
     def _default_p0(self) -> np.ndarray:
         A_guess = np.full(self.n_exp, np.max(self.y) / self.n_exp)
@@ -212,6 +230,47 @@ class MultiExpFit:
             "label": self.legend_label(),
             "success": self.success,
         }
+
+
+def poisson_chi_squared(counts: np.ndarray, model: np.ndarray,
+                        n_params: int) -> dict[str, Any]:
+    """Goodness of fit of a model to photon counts (Poisson statistics).
+
+    Uses the usual TCSPC weighting ``sigma_i = sqrt(max(counts_i, 1))``, so
+    each weighted residual ``(counts_i - model_i) / sigma_i`` has unit
+    variance for a correct model. A reduced chi-squared close to 1 indicates a
+    good fit; clearly larger values mean systematic deviations (e.g. too few
+    exponentials or a badly placed fit window).
+
+    Parameters
+    ----------
+    counts :
+        Measured photon counts per bin (not normalised).
+    model :
+        Fitted model on the same bins, in counts.
+    n_params :
+        Number of free fit parameters (``2 * n_exp`` for :class:`MultiExpFit`).
+
+    Returns
+    -------
+    dict
+        ``weighted_residuals`` (array), ``chi_squared``, ``dof`` (degrees of
+        freedom ``len(counts) - n_params``) and ``reduced_chi_squared``
+        (``NaN`` without degrees of freedom).
+    """
+    counts = np.asarray(counts, dtype=float)
+    model = np.asarray(model, dtype=float)
+    if counts.shape != model.shape:
+        raise ValueError("counts and model must have the same shape.")
+    residuals = (counts - model) / np.sqrt(np.maximum(counts, 1.0))
+    chi2 = float(np.sum(residuals ** 2))
+    dof = int(counts.size - n_params)
+    return {
+        "weighted_residuals": residuals,
+        "chi_squared": chi2,
+        "dof": dof,
+        "reduced_chi_squared": chi2 / dof if dof > 0 else float("nan"),
+    }
 
 
 def gaussian2d(xy: tuple[np.ndarray, np.ndarray], amplitude: float, x0: float, y0: float,

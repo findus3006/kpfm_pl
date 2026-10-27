@@ -78,6 +78,24 @@ def test_match_rejects_missing_or_out_of_range_triggers(triggers):
         model.compute_match(empty, model.MatchParams(), model.WindowParams())
 
 
+def test_trigger_options_number_from_one(triggers):
+    options = model.align_options(triggers)
+    assert [n for n, _ in options] == [1, 2]
+    k, t = triggers.kpfm_triggers[1]["time"], triggers.timetrace_triggers[1]["time"]
+    assert options[1][1] == f"#2 – Zurich {k:.3f} s / PTU {t:.3f} s"
+    assert model.align_options(None) == []
+    # Only triggers present in both files can be aligned on.
+    short = model.TriggerResult(**{**triggers.__dict__,
+                                   "timetrace_triggers": triggers.timetrace_triggers[:1]})
+    assert [n for n, _ in model.align_options(short)] == [1]
+
+    result = model.compute_match(triggers, model.MatchParams(), model.WindowParams())
+    window = model.window_trigger_options(result.match.triggers)
+    assert [n for n, _ in window] == [1, 2]
+    assert window[0][1] == f"#1 – {result.match.triggers[0]['time']:.3f} s"
+    assert model.window_trigger_options(None) == []
+
+
 def test_trigger_payload_keeps_own_axes(triggers, tmp_path):
     payload = model.trigger_payload(triggers)
     assert len(payload.metadata["results"]["kpfm_trigger_times_s"]) == 2
@@ -132,6 +150,10 @@ def test_tab_finds_triggers_aligns_and_exports(window, qtbot, handles, tmp_path,
     qtbot.waitUntil(lambda: tab.triggers is not None and not window.runner.busy, timeout=60000)
     assert "Ready to align" in tab.trigger_label.text()
     assert tab.trigger_plot.figure.axes
+    align = tab.match_form.fields["align"]
+    assert [align.itemData(i) for i in range(align.count())] == [1, 2]
+    assert align.itemText(1).startswith("#2 – Zurich")
+    assert tab.window_form.fields["stop_trigger"].count() == 2
 
     tab.run_align()
     qtbot.waitUntil(lambda: tab.result is not None and not window.runner.busy, timeout=60000)
@@ -140,13 +162,35 @@ def test_tab_finds_triggers_aligns_and_exports(window, qtbot, handles, tmp_path,
     # Changing the window re-cuts the alignment without a new job
     tab.window_form.set_values({"start": "time", "start_time": 100.0})
     assert tab.result.start == pytest.approx(100.0, abs=tab.result.match.dt)
-    tab.window_form.set_values({"stop": "trigger", "stop_trigger": 9})
-    assert "does not exist" in tab.window_label.text()
+    tab.window_form.set_values({"stop": "trigger", "stop_trigger": 2})
+    assert tab.window_label.text() == ""
+    assert tab.result.stop == pytest.approx(tab.result.match.triggers[1]["time"])
+    # Numbers outside the list cannot be selected.
+    tab.window_form.set_value("stop_trigger", 9)
+    assert tab.window_form.value("stop_trigger") == 2
 
     target = tmp_path / "aligned.csv"
     monkeypatch.setattr(window.ctx, "save_file_dialog", lambda *a, **k: str(target))
     tab.aligned_plot.export_csv_dialog()
     assert target.read_text(encoding="utf-8").startswith("# analysis: KPFM/PL correlation")
+
+
+def test_align_on_second_trigger_from_dropdown(window, qtbot, handles):
+    tab = _correlate_tab(window)
+    window.state.set("ptu", handles[0])
+    window.state.set("zurich", handles[1])
+    qtbot.waitUntil(lambda: tab.triggers is not None and not window.runner.busy, timeout=60000)
+    tab.match_form.set_value("align", 2)
+    tab.run_align()
+    qtbot.waitUntil(lambda: tab.result is not None and not window.runner.busy, timeout=60000)
+    assert tab.result.match_params.align == 1
+    t = tab.triggers
+    assert tab.result.match.offset == pytest.approx(
+        t.timetrace_triggers[1]["time"] - t.kpfm_triggers[1]["time"])
+    # Loading a new file empties the trigger lists until triggers are found again.
+    window.state.set("zurich", None)
+    assert tab.match_form.fields["align"].count() == 0
+    assert tab.window_form.fields["start_trigger"].count() == 0
 
 
 def test_legacy_preset_sets_markers_and_flank(window):

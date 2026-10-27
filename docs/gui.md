@@ -12,6 +12,14 @@ kpfm-pl-gui                 # start the program
 python -m kpfm_pl.gui       # same, if the command above is not found
 ```
 
+On Windows you can also double-click `KPFM-PL-GUI.bat` in the repository
+folder; it runs the code in `src/` directly (dependencies still need
+`pip install -e .[gui]`).
+
+`kpfm-pl-gui` is created by `pip install`. If the command is not found
+although the package imports, the installation predates the GUI: run
+`pip install -e .[gui]` again (or use `python -m kpfm_pl.gui`).
+
 ## The window
 
 - **Tabs** (top): one per workflow, described below.
@@ -31,7 +39,7 @@ python -m kpfm_pl.gui       # same, if the command above is not found
 Files are opened from the **File** menu (Ctrl+O PTU, Ctrl+K Zurich, Ctrl+J
 JPK) or the *Open…* buttons in the tabs. One file of each kind is open at a
 time, and all tabs share it: a PTU file opened in the *PL lifetime* tab is
-also used by *FLID* and *Correlate*.
+also used by *Correlate*.
 
 ## Exported files and their metadata
 
@@ -50,47 +58,71 @@ main results (fitted lifetimes, time shift, ROI bounds, statistics, …).
 
 ## PL lifetime (PTU)
 
-Explore one `.ptu` file.
+Everything about one `.ptu` file in one tab: time trace, regions of interest
+(ROIs), lifetime fits, lifetime trace and FLID maps (like
+`examples/example_ptu.py` and `examples/example_flid.py`). Click a group
+title on the left to fold it away.
 
-1. **Time trace**: photons per bin. Set the *bin time* and optionally a
-   *start*/*end* time, then *Update time trace*. Red dashed lines are the laser
+1. **Time trace**: photons per bin. Set the *bin time* and the window:
+   *Start at* / *End at* is either a *Time* or a *Trigger*, chosen from a
+   drop-down of all laser triggers of the file (`#2 – 482.048 s`, numbered as
+   in the plot). The chosen trigger numbers are kept when you open the next
+   file. Then *Update time trace*. Red dashed, numbered lines are the laser
    triggers. For old recordings without laser markers, untick *Laser markers*
    (the trace is then centred and its two edges serve as triggers).
-2. **On/off states**: bins above *On state* (% of the maximum) form the on
+2. **Regions of interest**: on the trace, **left-drag** draws a box, dragging
+   inside moves it, the handles resize it, **Delete** removes the selected
+   box. The list shows every ROI in its colour; *Add ROI from numbers* adds
+   an exact box. An ROI is a time window *and* a range of counts per bin, so
+   it belongs to the bin time it was drawn at: when you change the bin time,
+   the count ranges are rescaled, and everything that uses ROIs runs with the
+   trace's bin time.
+3. **On/off states**: bins above *On state* (% of the maximum) form the on
    state, bins below *Off state* the off state. The thresholds are drawn on
    the trace.
-3. **Lifetime fit**: choose the histogram (whole trace, on or off state), the
-   number of exponentials and how the fit window starts. In *Manual* mode you
-   can drag across the histogram plot to set start and end. The results
-   (amplitudes, lifetimes in ns, R²) appear in the table; the fitted curve and
-   window are shown on the histogram. *Dark counts* are subtracted as an
-   offset.
-4. **Lifetime trace**: fits every time bin separately and plots the mean
-   lifetime against time (grey: counts). This can take a while. Watch the
-   progress bar; *Cancel* stops it.
+4. **Lifetime fit**: *Histogram of* chooses the photons: whole trace, on or
+   off state, one ROI, *All ROIs combined*, or *Each ROI separately* (one fit
+   per ROI, overlaid in the ROI colours, one table column per ROI). Choose
+   the number of exponentials and how the fit window starts; in *Manual*
+   mode you can drag across the histogram plot to set start and end.
+   *Dark counts* are subtracted as an offset.
+   - **Fit quality**: the table lists the lifetimes, amplitudes and
+     **χ²ᵣ** (reduced chi-squared with Poisson weights), also shown in the
+     plot title. χ²ᵣ ≈ 1 (green) means the fit describes the histogram within
+     photon noise; clearly larger values (orange) mean systematic deviations,
+     e.g. one exponential too few. R² is listed too, but is close to 1 for
+     almost any decay. The panel below the histogram shows the **weighted
+     residuals** (counts − fit) / √counts, which should scatter around 0
+     without structure.
+   - **Advanced fit settings…**: initial guesses and lower/upper bounds of
+     every lifetime τ (ns) and amplitude A (fraction of the histogram peak),
+     **Poisson weighting** (recommended for TCSPC data: the low-count tail
+     is no longer ignored) and robust losses against outliers. Ticked fields
+     are used, unticked ones are automatic. The settings apply to the
+     lifetime fit, the lifetime trace and the FLIDs; the line under the
+     button summarises them.
+5. **Lifetime trace**: fits every time bin separately and plots the mean
+   lifetime against time (grey: counts). *Region* restricts it to one ROI
+   (then with the trace's bin time). This can take a while; watch the
+   progress bar, *Cancel* stops it.
+6. **FLID**: *Compute FLIDs* builds fluorescence-lifetime-intensity maps with
+   the trace's bin time (FLIDs usually need ≥ 0.1 s bins). The FLID's own
+   *Region* (independent of the lifetime trace's) chooses what is mapped:
+   *Each ROI* gives one map per ROI, side by side and coloured like the ROI
+   (without ROIs: the window between the first and last laser trigger);
+   *Whole time window* gives one map of the displayed trace; *ROI n* maps
+   only that ROI. All maps share the same lifetime range (default 0–20 ns)
+   and count range, so their values are directly comparable. ROIs without
+   photons are skipped (see the log). For the
+   **CSV export** pick the ROI and whether to export its map or the per-bin
+   fits.
+
+Exports: the time trace (with ROIs and trigger times), the fitted
+histogram(s) with fit curve and weighted residuals, the lifetime trace and
+the FLID maps, each with all parameters including the advanced fit settings.
 
 Continuous-wave files have no lifetime information; the tab says so and
 disables the analysis.
-
-## FLID
-
-Compare fluorescence-lifetime-intensity distributions of selected regions,
-like `examples/example_flid.py`.
-
-1. Open a `.ptu` file and check the *bin time* (default 0.5 s). The count
-   ranges of the regions depend on it.
-2. Draw regions (ROIs) on the time trace: **left-drag** draws a box, dragging
-   inside moves it, the handles resize it, **Delete** removes the selected
-   box. The list on the left shows every ROI. *Add ROI from numbers* adds an
-   exact box. Without ROIs the window between the first and last laser
-   trigger is used.
-3. *Compute FLIDs*: one map per ROI, side by side, coloured like the ROI. All
-   maps share the same lifetime range (default 0–20 ns) and count range, so
-   their values are directly comparable. ROIs without photons are skipped
-   (see the log).
-
-**CSV export**: pick the ROI and whether to export its FLID map or the
-per-bin fits (time, counts, lifetimes and amplitudes per bin).
 
 ## Correlate (KPFM ↔ PL)
 
@@ -106,10 +138,15 @@ PL time trace (`.ptu`) on their laser triggers, like
    reports both counts and warns if they differ or none were found. Adjust
    streams, trigger method or flank if needed.
 3. **Align and extract** shifts the PL trace so the chosen trigger
-   coincides in both files and resamples both signals onto one time grid. The
-   *Aligned* plot shows the window between the first and last trigger by
-   default; change *Window start/end* or drag across the plot to choose
-   another window. The table lists the time shift, grid step and window.
+   coincides in both files and resamples both signals onto one time grid.
+   *Align on trigger* is a drop-down of every trigger found in both files with
+   its time in each (`#2 – Zurich 12.300 s / PTU 45.600 s`); it is filled by
+   *Find triggers*. The *Aligned* plot shows the window between the first and
+   last trigger by default; change *Window start/end* or drag across the plot
+   to choose another window. A window bound set to *Trigger* offers a
+   drop-down of the triggers on the aligned time axis (`#2 – 34.500 s`), so
+   only existing triggers can be chosen. The table lists the time shift, grid
+   step and window.
 
 **CSV export** of the aligned plot contains the KPFM signal and the
 (unscaled) PL trace on one shared time column. The 0–1 scaling is for
@@ -161,9 +198,11 @@ gui/workers.py     JobRunner: background jobs with progress and cancel
 gui/canvas.py      PlotPanel: matplotlib canvas + Save figure / Export CSV
 gui/forms.py       ParamForm: labelled parameter fields
 gui/export.py      CSV and figure export with metadata (Qt-free)
+gui/fit_options.py Advanced fit settings dialog (FitOptions)
 gui/logcapture.py  print(), warnings and uncaught errors -> log panel
 gui/models/        Qt-free workflow logic, one module per tab (unit-testable)
-gui/tabs/          one widget per tab, built on tabs/base.py
+gui/tabs/          one widget per tab, built on tabs/base.py (collapsible groups);
+                   tabs/rois.py: RoiEditor (box selector + ROI list)
 ```
 
 Adding a workflow: write a Qt-free model (parameter dataclasses, the backend

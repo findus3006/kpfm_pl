@@ -127,9 +127,20 @@ window's left bound is chosen by `mode`:
 | `"manual"` | keep `start <= t <= end` (ns), `end=None` = last sample |
 
 Additional keywords: `smoothing` (Gaussian sigma for edge finding),
-`normalize` (scale the fitted curve peak to 1), plus any
-[`MultiExpFit`](../src/kpfm_pl/fitting.py) keyword (`loss`, `f_scale`,
-`weights`, `constrain_sum_A`, ...).
+`normalize` (scale the fitted curve peak to 1), `weighting` (`"none"`, the
+default unweighted least squares, or `"poisson"`, which weights every bin by
+its photon-counting noise `1/sqrt(max(counts, 1))`), plus any
+[`MultiExpFit`](../src/kpfm_pl/fitting.py) keyword (`p0`, `bounds`, `loss`,
+`f_scale`, `weights`, `constrain_sum_A`, ...). `NaN` entries of `p0` are
+filled with the automatic guess, which is also clipped into `bounds`. With
+`weighting="poisson"` a robust loss's `f_scale` is in Poisson standard
+deviations.
+
+```python
+# tau_1 between 0.5 and 3 ns, everything else automatic, Poisson weights
+fit = ptu.fit_lifetime(hist, n_exp=2, weighting="poisson",
+                       bounds=([0, 0, 0.5, 1e-10], [np.inf, np.inf, 3.0, np.inf]))
+```
 
 The returned dict contains:
 
@@ -138,12 +149,22 @@ The returned dict contains:
 | `A`, `tau` | fitted amplitudes and lifetimes (ns) |
 | `offset` | constant offset used |
 | `curve` | model evaluated on the fitted grid |
-| `quality` | `{residuals, cost, success, message, r_squared}` |
+| `quality` | `{residuals, cost, success, message, r_squared}` plus the Poisson goodness of fit `{reduced_chi_squared, chi_squared, dof, weighted_residuals}` |
+| `weighting` | the `weighting` used |
 | `label` | LaTeX legend string of the fitted model |
 | `success` | whether the optimiser converged |
 | `shifted_histogram_x` | full lifetime axis shifted so the peak is at 0 ns |
 | `t_fit`, `y_fit` | the time/intensity arrays actually fitted |
 | `left_bound_ns` | left bound of the fit window (ns) |
+
+**Fit quality.** `R²` is close to 1 for almost any decay, so it is a poor
+measure for photon-counting data. `quality["reduced_chi_squared"]`
+([`poisson_chi_squared`](../src/kpfm_pl/fitting.py), computed on the raw counts
+with `sigma_i = sqrt(max(counts_i, 1))`) is about 1 when the model describes
+the histogram within photon noise; clearly larger values mean systematic
+deviations (too few exponentials, a badly placed window, ...).
+`quality["weighted_residuals"]` (on `t_fit`) shows where they are; plotted
+below the decay they should scatter around 0 without structure.
 
 Plotting the fit (from `example_ptu.py`):
 
@@ -215,6 +236,7 @@ Key parameters:
 | `mode`/`fraction`/`smoothing`/`start`/`end` | – | fit-window selection, as in `fit_lifetime` |
 | `sigma` | `1.5` | Gaussian smoothing of the 2-D histogram (`0` disables) |
 | `isolated` | `False` | when `True`, return one `Image` per exponential; otherwise a single map of the intensity-weighted mean lifetime |
+| `weighting` | `"none"` | `"poisson"` weights every per-bin fit by photon noise, as in `fit_lifetime` (also for `lifetime_trace`) |
 | `progress` | `None` | callback `progress(done, total)`, see below |
 
 **Progress and cancelling.** Fitting every time bin can take a while (seconds

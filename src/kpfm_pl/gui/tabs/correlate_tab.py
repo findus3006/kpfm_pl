@@ -144,10 +144,10 @@ class CorrelateTab(BaseTab):
     def _build_match_group(self) -> None:
         layout = self.add_group("Alignment")
         f = self.match_form = ParamForm()
-        f.add_int("align", "Align on trigger no.", 1, minimum=1, maximum=10_000,
-                  tooltip="The time trace is shifted so that this trigger coincides in "
-                          "both files (counted from 1, see the numbers in the Triggers "
-                          "plot).")
+        f.add_choice("align", "Align on trigger", [],
+                     tooltip="The time trace is shifted so that this trigger coincides in "
+                             "both files (numbers as in the Triggers plot). Lists the "
+                             "triggers found in both files after 'Find triggers'.")
         f.add_optional_float("dt", "Grid step", None, minimum=1e-5, maximum=60, step=0.01,
                              default=0.05, decimals=5, suffix=" s", auto_text="auto",
                              tooltip="Spacing of the shared time grid. Unchecked: the "
@@ -168,8 +168,9 @@ class CorrelateTab(BaseTab):
                          tooltip="Where the extracted window begins/ends: a trigger, a "
                                  "time on the aligned axis, or the edge of the region "
                                  "where both signals have data.")
-            f.add_int(f"{key}_trigger", "  Trigger no.", 1, minimum=1, maximum=10_000,
-                      tooltip="Trigger number (counted from 1).")
+            f.add_choice(f"{key}_trigger", "  Trigger", [],
+                         tooltip="Trigger on the aligned (KPFM) time axis, numbered as "
+                                 "in the plots.")
             f.add_float(f"{key}_time", "  Time", 0.0, minimum=-1e6, maximum=1e6, step=1,
                         decimals=3, suffix=" s", tooltip="Time on the aligned (KPFM) axis.")
         f.changed.connect(self._update_window_fields)
@@ -228,11 +229,35 @@ class CorrelateTab(BaseTab):
 
     def match_params(self) -> model.MatchParams:
         v = self.match_form.values()
-        v["align"] -= 1
+        # The drop-down is empty until triggers were found; align on the first then.
+        v["align"] = (v["align"] or 1) - 1
         return model.MatchParams(**v)
 
     def window_params(self) -> model.WindowParams:
-        return model.WindowParams(**self.window_form.values())
+        v = self.window_form.values()
+        for key in ("start_trigger", "stop_trigger"):
+            v[key] = v[key] or 1
+        return model.WindowParams(**v)
+
+    def _fill_trigger_choices(self) -> None:
+        """List the current triggers in the align and window drop-downs.
+
+        The window bounds refer to the aligned axis (``Match.triggers``);
+        before an alignment the Zurich triggers stand in, since the aligned
+        axis is the KPFM axis.
+        """
+        self.match_form.set_choices("align", model.align_options(self.triggers))
+        if self.result is not None:
+            points = self.result.match.triggers
+        else:
+            points = self.triggers.kpfm_triggers if self.triggers is not None else None
+        options = model.window_trigger_options(points)
+        self._updating_window = True
+        try:
+            for key in ("start_trigger", "stop_trigger"):
+                self.window_form.set_choices(key, options)
+        finally:
+            self._updating_window = False
 
     # -------------------------------------------------------------- actions
     def on_file_changed(self, kind: str, handle) -> None:
@@ -247,6 +272,7 @@ class CorrelateTab(BaseTab):
         self._generation += 1
         self.triggers, self.result = None, None
         self.triggers_stale = True
+        self._fill_trigger_choices()
         self.trigger_label.setText("")
         self.window_label.setText("")
         self.result_table.setRowCount(0)
@@ -291,6 +317,7 @@ class CorrelateTab(BaseTab):
         self.triggers = result
         self.triggers_stale = False
         self.result = None
+        self._fill_trigger_choices()
         self._show_trigger_status(result)
         self._draw_triggers()
         self.aligned_plot.show_message("Press 'Align and extract' to align both signals.")
@@ -313,6 +340,10 @@ class CorrelateTab(BaseTab):
     def run_align(self) -> None:
         ptu, zurich = self._handles()
         if ptu is None or zurich is None:
+            return
+        if self.triggers is not None and self.match_form.value("align") is None:
+            self.ctx.log.warning("Cannot align: no trigger is present in both files. "
+                                 "Check the trigger settings and press 'Find triggers'.")
             return
         trace_p, zurich_p = self.trace_params(), self.zurich_params()
         match_p, window_p = self.match_params(), self.window_params()
@@ -338,9 +369,14 @@ class CorrelateTab(BaseTab):
             self._show_trigger_status(triggers)
             self._draw_triggers()
         self.result = result
+        self._fill_trigger_choices()
         self.window_label.setText("")
-        self._show_summary()
-        self._draw_aligned()
+        if self.window_params() != result.window_params:
+            # A selected trigger vanished from the refilled list: re-cut.
+            self._window_changed()
+        else:
+            self._show_summary()
+            self._draw_aligned()
         self.plots.setCurrentWidget(self.aligned_plot)
 
     def _window_changed(self) -> None:

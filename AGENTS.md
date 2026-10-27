@@ -43,10 +43,12 @@ src/kpfm_pl/
         workers.py      JobRunner: background jobs, progress, cancel
         canvas.py       PlotPanel: embedded matplotlib + figure/CSV export
         forms.py        ParamForm: labelled parameter fields
+        fit_options.py  Advanced fit settings dialog (guesses, bounds, weighting)
         export.py       CSV / figure export with metadata (Qt-free)
         logcapture.py   print()/warnings -> log panel
         models/         Qt-free workflow logic, one module per tab
-        tabs/           one widget per workflow (ptu, flid, correlate, jpk, database)
+        tabs/           one widget per workflow (ptu = PL lifetime incl. ROIs/FLID,
+                        correlate, jpk, database); rois.py = RoiEditor
 src/examples/       runnable scripts + a `Test data/` folder of sample files
 tests/              pytest suite
 docs/               per-module manuals (ptu, zurich, jpk, match, database, plotting, gui)

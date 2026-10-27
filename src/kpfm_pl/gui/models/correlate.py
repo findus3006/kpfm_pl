@@ -36,6 +36,8 @@ __all__ = [
     "compute_match",
     "extract_window",
     "match_summary",
+    "align_options",
+    "window_trigger_options",
     "trigger_payload",
     "aligned_payload",
 ]
@@ -44,7 +46,7 @@ TRIGGER_METHODS = (("slope", "Slope (steepest step)"), ("threshold", "Threshold 
 FLANKS = (("rising", "Rising"), ("falling", "Falling"), ("both", "Both"))
 #: Kinds of window bounds; "trigger" uses a 1-based trigger number, "time" seconds.
 BOUND_KINDS = (("first", "First trigger"), ("last", "Last trigger"),
-               ("trigger", "Trigger number"), ("time", "Time"),
+               ("trigger", "Trigger"), ("time", "Time"),
                ("overlap", "Edge of overlap"))
 
 
@@ -255,6 +257,30 @@ def compute_match(triggers: TriggerResult, params: MatchParams,
     return MatchResult(triggers, match, extracted, start, stop, params, window)
 
 
+# ------------------------------------------------------------- drop-downs
+def align_options(result: TriggerResult | None) -> list[tuple[int, str]]:
+    """``(1-based number, text)`` of every trigger present in both files.
+
+    Alignment pairs the n-th Zurich trigger with the n-th PTU trigger, so
+    only the first ``min(n_zurich, n_ptu)`` numbers are usable.
+    """
+    if result is None:
+        return []
+    kpfm, trace = result.kpfm_triggers or [], result.timetrace_triggers or []
+    return [(i, f"#{i} – Zurich {k['time']:.3f} s / PTU {t['time']:.3f} s")
+            for i, (k, t) in enumerate(zip(kpfm, trace), 1)]
+
+
+def window_trigger_options(points: list[TriggerPoint] | None) -> list[tuple[int, str]]:
+    """``(1-based number, text)`` of the triggers a window bound can refer to.
+
+    Pass ``Match.triggers`` after an alignment (times on the aligned axis) or
+    the Zurich triggers before one: the aligned axis is the KPFM axis, so
+    both lists hold the same times.
+    """
+    return [(i, f"#{i} – {p['time']:.3f} s") for i, p in enumerate(points or [], 1)]
+
+
 # ------------------------------------------------------------------ summaries
 def match_summary(result: MatchResult) -> dict[str, Any]:
     """Scalar alignment results for the results table and the export header."""
@@ -277,9 +303,8 @@ def _parameters(triggers: TriggerResult, match: MatchParams | None = None,
                 window: WindowParams | None = None) -> dict[str, Any]:
     params = {"time_trace": asdict(triggers.trace_params),
               "zurich": asdict(triggers.zurich_params)}
-    params["time_trace"].pop("dark_counts", None)
-    params["time_trace"].pop("tstart", None)
-    params["time_trace"].pop("tend", None)
+    for key in ("dark_counts", "tstart", "tend", "start_trigger", "end_trigger"):
+        params["time_trace"].pop(key, None)
     if match is not None:
         params["match"] = asdict(match)
         params["match"]["align_trigger_number"] = params["match"].pop("align") + 1

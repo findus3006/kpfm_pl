@@ -562,3 +562,51 @@ def _synthetic_ptu(matrix: np.ndarray, *, bintime: float,
     p._tt_cache = {}
     p.marker = {}
     return p
+
+
+def test_fit_lifetime_reports_poisson_quality_and_weighting(ptu):
+    hist = ptu.lifetime_histogram()
+    plain = ptu.fit_lifetime(hist, n_exp=1)
+    q = plain["quality"]
+    assert {"reduced_chi_squared", "chi_squared", "dof", "weighted_residuals"} <= set(q)
+    assert len(q["weighted_residuals"]) == len(plain["t_fit"])
+    assert q["dof"] == len(plain["t_fit"]) - 2
+    assert plain["weighting"] == "none"
+    # chi-squared is computed on raw counts, so normalising does not change it much
+    norm = ptu.fit_lifetime(hist, n_exp=1, normalize=True)
+    assert norm["quality"]["reduced_chi_squared"] == pytest.approx(q["reduced_chi_squared"],
+                                                                   rel=0.05)
+    weighted = ptu.fit_lifetime(hist, n_exp=1, weighting="poisson")
+    assert weighted["success"] and weighted["weighting"] == "poisson"
+    # Poisson weighting minimises exactly this chi-squared, so it cannot be worse.
+    assert weighted["quality"]["chi_squared"] <= q["chi_squared"] * (1 + 1e-6)
+
+
+def test_weighting_is_validated(ptu):
+    hist = ptu.lifetime_histogram()
+    with pytest.raises(ValueError, match="weighting"):
+        ptu.fit_lifetime(hist, n_exp=1, weighting="sqrt")
+    with pytest.raises(ValueError, match="either"):
+        ptu.fit_lifetime(hist, n_exp=1, weighting="poisson", weights=np.ones(3))
+    with pytest.raises(ValueError, match="weighting"):
+        ptu.lifetime_trace(bintime=50.0, weighting="sqrt")
+
+
+def test_lifetime_trace_passes_poisson_weights_per_bin(monkeypatch):
+    seen = []
+
+    class DummyFit:
+        def __init__(self, t, y, n_exp, offset, **kwargs):
+            seen.append(kwargs.get("weights"))
+            self.success = True
+
+        def parameters(self):
+            return {"A": np.ones(1), "tau": np.array([2.0])}
+
+    monkeypatch.setattr("kpfm_pl.ptu.MultiExpFit", DummyFit)
+    matrix = np.array([[16, 4, 1, 0, 0], [64, 16, 4, 1, 0]], dtype=np.uint32)
+    p = _synthetic_ptu(matrix, bintime=1.0, acquisition_time=2.0)
+    p.lifetime_trace(bintime=1.0, mode="manual", start=-1, end=10, weighting="poisson")
+    assert len(seen) == 2 and all(w is not None for w in seen)
+    # sigma units on normalised data: weight = peak / sqrt(counts), sqrt(peak) at the peak
+    assert seen[0][0] == pytest.approx(16 / 4) and seen[1][0] == pytest.approx(64 / 8)

@@ -72,6 +72,29 @@ def test_compute_flids_shares_ranges_skips_empty_and_reports_progress(handle, tm
     assert header.startswith("x (s),counts y") and "tau1 y (ns)" in header
 
 
+def test_flid_region_selects_window_or_single_roi(handle, tmp_path):
+    small = dict(lifetime_bins=10, intensity_bins=10)
+    trace_params = TraceParams(bintime=5.0)
+    window = model.compute_flids(handle, trace_params,
+                                 model.FlidParams(region="window", **small), [ROI_A, ROI_B])
+    assert len(window.entries) == 1 and not window.fallback
+    entry = window.entries[0]
+    assert window.entry_name(entry) == "Whole time window"
+    trace = compute_trace(handle, trace_params)
+    assert entry.roi == model.window_roi(trace)
+    assert entry.roi["x_min"] == trace.signal.x[0]
+    meta = model.flid_payload(window, entry).metadata["results"]
+    assert meta["region"] == "Whole time window" and meta["roi_number"] is None
+
+    single = model.compute_flids(handle, trace_params,
+                                 model.FlidParams(region="roi", roi=1, **small), [ROI_A, ROI_B])
+    assert [e.index for e in single.entries] == [1]
+    assert single.entry_name(single.entries[0]) == "ROI 2"
+    with pytest.raises(ValueError, match="ROI 3"):
+        model.compute_flids(handle, trace_params, model.FlidParams(region="roi", roi=2),
+                            [ROI_A, ROI_B])
+
+
 def test_compute_flids_without_rois_uses_fallback(handle):
     result = model.compute_flids(handle, TraceParams(bintime=5.0),
                                  model.FlidParams(lifetime_bins=10, intensity_bins=10), [])
@@ -108,9 +131,10 @@ def window(qtbot, tmp_path):
 
 
 def _flid_tab(window):
-    from kpfm_pl.gui.tabs.flid_tab import FlidTab
+    """The FLID workflow lives in the merged PL lifetime tab."""
+    from kpfm_pl.gui.tabs.ptu_tab import PTUTab
 
-    return next(t for t in window.tab_widgets if isinstance(t, FlidTab))
+    return next(t for t in window.tab_widgets if isinstance(t, PTUTab))
 
 
 def _load(window, qtbot, tab):
@@ -142,12 +166,13 @@ def test_drawn_box_appears_in_roi_list_and_survives_redraw(window, qtbot):
     tab.update_trace()
     qtbot.waitUntil(lambda: tab.trace.params.bintime == 2.0 and not window.runner.busy,
                     timeout=60000)
-    assert len(tab.selector.boxes) == 1
+    selector = tab.roi_editor.selector
+    assert len(selector.boxes) == 1
     assert tab.rois[0]["y_max"] == pytest.approx(3000.0)
 
     tab.roi_list.setCurrentRow(0)
-    tab.remove_selected_roi()
-    assert tab.rois == [] and tab.selector.boxes == []
+    tab.roi_editor.remove_selected()
+    assert tab.rois == [] and tab.roi_editor.selector.boxes == []
 
 
 def test_flids_computed_plotted_and_exported(window, qtbot, tmp_path, monkeypatch):
@@ -157,8 +182,10 @@ def test_flids_computed_plotted_and_exported(window, qtbot, tmp_path, monkeypatc
     tab.flid_form.set_value("lifetime_bins", 20)
     tab.flid_form.set_value("intensity_bins", 20)
     tab.run_flids()
-    qtbot.waitUntil(lambda: tab.result is not None and not window.runner.busy, timeout=120000)
-    assert len(tab.result.entries) == 2
+    qtbot.waitUntil(lambda: tab.flid_result is not None and not window.runner.busy,
+                    timeout=120000)
+    assert len(tab.flid_result.entries) == 2
+    assert tab.flid_result.trace.params.bintime == 1.0   # the trace's bin time
     assert len(tab.flid_plot.figure.subfigs) == 2
     assert tab.export_roi.count() == 2
 
@@ -172,4 +199,4 @@ def test_flids_computed_plotted_and_exported(window, qtbot, tmp_path, monkeypatc
     monkeypatch.setattr(window.ctx, "save_file_dialog", lambda *a, **k: str(png))
     tab.flid_plot.save_figure_dialog()
     assert png.stat().st_size > 0
-    assert np.isfinite(tab.result.intensity_range).all()
+    assert np.isfinite(tab.flid_result.intensity_range).all()

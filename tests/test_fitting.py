@@ -102,3 +102,42 @@ def test_failed_fit_warns_and_raises_clear_error():
         fit.quality()
     with pytest.raises(RuntimeError):
         fit.to_dict()
+
+
+def test_nan_guesses_are_filled_and_clipped_into_bounds():
+    t = np.linspace(0.0, 50.0, 400)
+    y = _single_exp(t, A=2.0, tau=8.0)
+    # tau guess given, amplitude automatic; bounds exclude the automatic tau guess
+    fit = MultiExpFit(t, y, n_exp=1, p0=np.array([np.nan, 6.0]),
+                      bounds=(np.array([0.0, 5.0]), np.array([np.inf, 20.0])))
+    assert fit.success
+    assert fit.parameters()["tau"][0] == pytest.approx(8.0, rel=1e-3)
+    # Fully automatic guesses are clipped into user bounds instead of failing.
+    fit = MultiExpFit(t, y, n_exp=1, bounds=(np.array([0.0, 7.5]), np.array([np.inf, 9.0])))
+    assert fit.success
+    assert fit.parameters()["tau"][0] == pytest.approx(8.0, rel=1e-3)
+
+
+def test_poisson_chi_squared():
+    from kpfm_pl import poisson_chi_squared
+
+    counts = np.array([100.0, 49.0, 0.0])
+    model = np.array([110.0, 42.0, 1.0])
+    q = poisson_chi_squared(counts, model, n_params=1)
+    np.testing.assert_allclose(q["weighted_residuals"], [-1.0, 1.0, -1.0])
+    assert q["chi_squared"] == pytest.approx(3.0)
+    assert q["dof"] == 2 and q["reduced_chi_squared"] == pytest.approx(1.5)
+    assert np.isnan(poisson_chi_squared(counts, model, n_params=3)["reduced_chi_squared"])
+    with pytest.raises(ValueError):
+        poisson_chi_squared(counts, model[:2], n_params=1)
+
+
+def test_poisson_noise_gives_reduced_chi_squared_near_one():
+    from kpfm_pl import poisson_chi_squared
+
+    rng = np.random.default_rng(0)
+    t = np.linspace(0.0, 40.0, 2000)
+    model = _single_exp(t, A=500.0, tau=6.0, C=20.0)
+    counts = rng.poisson(model).astype(float)
+    assert poisson_chi_squared(counts, model, n_params=2)["reduced_chi_squared"] \
+        == pytest.approx(1.0, abs=0.1)

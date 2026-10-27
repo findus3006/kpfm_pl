@@ -32,7 +32,13 @@ from .database import (
     save_csv,
     save_json,
 )
-from .fitting import MultiExpFit, fit_gaussian2d, gaussian2d, peak_power_density
+from .fitting import (
+    MultiExpFit,
+    fit_gaussian2d,
+    gaussian2d,
+    peak_power_density,
+    poisson_chi_squared,
+)
 from .io import pick_files, pick_folder, sort_measurement_files
 from .jpk import JPK
 from .match import Match
@@ -64,6 +70,7 @@ __all__ = [
     "JPK",
     "Match",
     "MultiExpFit",
+    "poisson_chi_squared",
     "gaussian2d",
     "fit_gaussian2d",
     "peak_power_density",

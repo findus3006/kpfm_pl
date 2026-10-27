@@ -18,7 +18,7 @@ from typing import Any
 import numpy as np
 
 from .core import Image, Signal
-from .fitting import MultiExpFit
+from .fitting import MultiExpFit, poisson_chi_squared
 from .utils import TriggerPoint, fit_window_mask, trigger_points
 
 __all__ = ["PTU"]
@@ -40,6 +40,25 @@ _TAG_TYPES = {
     "BinaryBlob": 0xFFFFFFFF,
 }
 _TAG_TYPES = {k: struct.unpack(">i", v.to_bytes(4, "big"))[0] for k, v in _TAG_TYPES.items()}
+
+
+def _poisson_weights(weighting: str, counts: np.ndarray, scale: float,
+                     fit_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Add Poisson ``weights`` for :class:`MultiExpFit` when ``weighting="poisson"``.
+
+    ``counts`` are the raw photon counts of the fitted bins and ``scale`` the
+    factor the fitted data was divided by (1 without normalisation). The
+    weighted residuals are then in units of the Poisson standard deviation,
+    which also gives a robust ``loss``'s ``f_scale`` a fixed meaning.
+    """
+    if weighting == "none":
+        return fit_kwargs
+    if weighting != "poisson":
+        raise ValueError(f"weighting must be 'none' or 'poisson', not {weighting!r}.")
+    if "weights" in fit_kwargs:
+        raise ValueError("Pass either weighting='poisson' or explicit weights, not both.")
+    weights = scale / np.sqrt(np.maximum(np.asarray(counts, dtype=float), 1.0))
+    return {**fit_kwargs, "weights": weights}
 
 
 def _weighted_mean_lifetime(taus: np.ndarray, amps: np.ndarray) -> np.ndarray:
@@ -433,11 +452,14 @@ class PTU:
         mode: str = "fraction", fraction: float = 0.95,
         smoothing: float = 2.0, start: float = 0.0,
         end: float | None = None, laser_pulse: bool | None = None,
+        weighting: str = "none",
         progress: Callable[[int, int], Any] | None = None,
         **fit_kwargs,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, float | None]]:
         """Fit lifetimes per time bin while preserving time-bin positions."""
         self._require_pulsed()
+        # Validate before the (slow) loop rather than at the first fit.
+        _poisson_weights(weighting, np.ones(1), 1.0, fit_kwargs)
         if (isinstance(n_exp, (bool, np.bool_))
                 or not isinstance(n_exp, (int, np.integer)) or n_exp < 1):
             raise ValueError("n_exp must be a positive integer.")
@@ -529,7 +551,8 @@ class PTU:
                 continue
             y_fit = y_fit / ymax
             offset = self.dark_counts * bintime / n_binned / norm
-            fit = MultiExpFit(t_fit, y_fit, n_exp, offset, **fit_kwargs)
+            bin_kwargs = _poisson_weights(weighting, lt_bin[mask], norm * ymax, fit_kwargs)
+            fit = MultiExpFit(t_fit, y_fit, n_exp, offset, **bin_kwargs)
             if fit.success:
                 params = fit.parameters()
                 fitted_taus = np.asarray(params["tau"], dtype=float)
@@ -554,6 +577,7 @@ class PTU:
                        smoothing: float = 2.0, start: float = 0.0,
                        end: float | None = None,
                        laser_pulse: bool | None = None,
+                       weighting: str = "none",
                        progress: Callable[[int, int], Any] | None = None,
                        **fit_kwargs) -> Signal:
         """Return mean fitted lifetime versus acquisition time.
@@ -571,15 +595,18 @@ class PTU:
         recent :meth:`time_trace` call.  Pass the option explicitly when no
         time trace has been generated first.
 
-        ``progress`` is an optional callback ``progress(done, total)`` called
-        before each per-bin fit and once at the end; raise an exception from
-        it to abort the computation (see :meth:`flid`).
+        ``weighting`` (``"none"`` or ``"poisson"``) is applied to every
+        per-bin fit as in :meth:`fit_lifetime`. ``progress`` is an optional
+        callback ``progress(done, total)`` called before each per-bin fit and
+        once at the end; raise an exception from it to abort the computation
+        (see :meth:`flid`).
         """
         time, taus, amps, counts, bounds = self._fit_time_bin_lifetimes(
             roi, x_min=x_min, x_max=x_max, y_min=y_min, y_max=y_max,
             bintime=bintime, n_exp=n_exp, bins=bins, mode=mode,
             fraction=fraction, smoothing=smoothing, start=start, end=end,
-            laser_pulse=laser_pulse, progress=progress, **fit_kwargs,
+            laser_pulse=laser_pulse, weighting=weighting, progress=progress,
+            **fit_kwargs,
         )
         return Signal(
             time, _weighted_mean_lifetime(taus, amps),
@@ -600,7 +627,7 @@ class PTU:
              intensity_range: tuple[float, float] | None = None,
              mode: str = "fraction", fraction: float = 0.95, smoothing: float = 2.0,
              start: float = 0.0, end: float | None = None, sigma: float = 1.5,
-             isolated: bool = False,
+             isolated: bool = False, weighting: str = "none",
              progress: Callable[[int, int], Any] | None = None,
              **fit_kwargs) -> Image | list[Image]:
         """Compute a FLID (Fluorescence-Lifetime-Intensity-Distribution) map.
@@ -647,6 +674,9 @@ class PTU:
             When ``True`` return one :class:`Image` per exponential component;
             otherwise return a single map of the per-bin intensity-weighted
             mean lifetime.
+        weighting :
+            ``"none"`` (default) or ``"poisson"`` weighting of the per-bin
+            fits, as in :meth:`fit_lifetime`.
         progress :
             Optional callback ``progress(done, total)``, called before each
             per-bin fit and once with ``done == total`` at the end (e.g. to
@@ -683,7 +713,7 @@ class PTU:
             roi, x_min=x_min, x_max=x_max, y_min=y_min, y_max=y_max,
             bintime=bintime, n_exp=n_exp, bins=bins, mode=mode,
             fraction=fraction, smoothing=smoothing, start=start, end=end,
-            progress=progress, **fit_kwargs,
+            weighting=weighting, progress=progress, **fit_kwargs,
         )
         n_fitted = int(np.count_nonzero(np.all(np.isfinite(taus), axis=1)))
         print(f"{self.filepath.stem}: FLID fitted {n_fitted} of {len(time)} time bins.")
@@ -785,13 +815,23 @@ class PTU:
     def fit_lifetime(self, histogram: Signal, n_exp: int = 2, *, mode: str = "fraction",
                      fraction: float = 0.95, smoothing: float = 2.0,
                      start: float = 0.0, end: float | None = None,
-                     normalize: bool = False, **fit_kwargs) -> dict[str, Any]:
+                     normalize: bool = False, weighting: str = "none",
+                     **fit_kwargs) -> dict[str, Any]:
         """Fit a lifetime ``histogram`` with ``n_exp`` exponentials.
 
         The fit window left bound is chosen by ``mode``: ``"fraction"`` (rising
         edge), ``"inflection"`` or ``"manual"`` (``start``/``end`` in ns). Returns
         the :meth:`~kpfm_pl.fitting.MultiExpFit.to_dict` payload augmented with the
         time/intensity arrays actually fitted.
+
+        ``weighting="poisson"`` weights every histogram bin by its photon
+        counting noise ``1 / sqrt(max(counts, 1))`` instead of the default
+        unweighted least squares (``"none"``); a robust ``loss``'s
+        ``f_scale`` is then in units of that standard deviation. Either way,
+        ``out["quality"]`` additionally holds the Poisson goodness of fit from
+        :func:`~kpfm_pl.fitting.poisson_chi_squared` (``reduced_chi_squared``,
+        ``chi_squared``, ``dof``, ``weighted_residuals`` on ``t_fit``), computed
+        on the raw counts even when ``normalize`` is set.
         """
         self._require_pulsed()
         y = np.asarray(histogram["y"], dtype=float)
@@ -814,9 +854,14 @@ class PTU:
             )
         offset = self.dark_counts * float(duration or 0.0) / self.n_lt_bins / norm
 
+        fit_kwargs = _poisson_weights(weighting, y[mask], norm, fit_kwargs)
         fit = MultiExpFit(t_fit, y_fit, n_exp, offset, **fit_kwargs)
         out = fit.to_dict()
-        out.update({"shifted_histogram_x": t_ns, "t_fit": t_fit, "y_fit": y_fit, "left_bound_ns": float(t_fit[0])})
+        if "curve" in out:
+            out.setdefault("quality", {}).update(
+                poisson_chi_squared(y[mask], np.asarray(out["curve"]) * norm, 2 * n_exp))
+        out.update({"shifted_histogram_x": t_ns, "t_fit": t_fit, "y_fit": y_fit,
+                    "left_bound_ns": float(t_fit[0]), "weighting": weighting})
         return out
 
     # -------------------------------------------------------------- triggers

@@ -26,7 +26,6 @@ from .context import AppContext, AppState
 from .logcapture import LogBus, install
 from .tabs.correlate_tab import CorrelateTab
 from .tabs.database_tab import DatabaseTab
-from .tabs.flid_tab import FlidTab
 from .tabs.jpk_tab import JPKTab
 from .tabs.ptu_tab import PTUTab
 from .workers import JobRunner
@@ -34,7 +33,7 @@ from .workers import JobRunner
 __all__ = ["MainWindow", "run"]
 
 #: Tabs in display order.
-TAB_CLASSES = (PTUTab, FlidTab, CorrelateTab, JPKTab, DatabaseTab)
+TAB_CLASSES = (PTUTab, CorrelateTab, JPKTab, DatabaseTab)
 
 _LEVEL_COLOURS = {"info": None, "warning": "#b36b00", "error": "#c00000"}
 
@@ -42,10 +41,9 @@ _GUIDE = """<h3>kpfm_pl quick guide</h3>
 <p>Each tab is one workflow. Controls are on the left, plots on the right.
 Hover over any field for an explanation.</p>
 <ul>
-<li><b>PL lifetime (PTU)</b>: time trace, on/off states, lifetime fit and
-lifetime trace of one .ptu file.</li>
-<li><b>FLID</b>: draw regions on the time trace and compare their
-fluorescence-lifetime-intensity distributions.</li>
+<li><b>PL lifetime (PTU)</b>: time trace of one .ptu file (window by time
+or laser trigger), regions of interest drawn on it, lifetime fits with fit
+quality, lifetime trace and FLID maps of the regions.</li>
 <li><b>Correlate</b>: align a KPFM signal (.txt) with a PL time trace (.ptu)
 on their laser triggers.</li>
 <li><b>AFM (JPK)</b>: view calibrated AFM channels.</li>

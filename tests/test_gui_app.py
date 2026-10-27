@@ -89,8 +89,7 @@ def test_log_capture_routes_print_warnings_and_restores(monkeypatch):
 
 def test_main_window_has_all_tabs(window):
     titles = [window.tabs.tabText(i) for i in range(window.tabs.count())]
-    assert titles[0] == "PL lifetime (PTU)"
-    assert len(titles) == 5
+    assert titles == ["PL lifetime (PTU)", "Correlate", "AFM (JPK)", "Database"]
 
 
 @pytest.mark.skipif(not PULSE.exists(), reason="PTU test file missing")

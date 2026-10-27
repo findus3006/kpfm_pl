@@ -48,8 +48,17 @@ For working without code, start the desktop GUI:
 kpfm-pl-gui                 # or: python -m kpfm_pl.gui
 ```
 
-Each tab is one workflow: **PL lifetime (PTU)**, **FLID**, **Correlate**
-(KPFM ↔ PL), **AFM (JPK)** and **Database**. Parameters sit on the left, with
+On Windows you can also double-click `KPFM-PL-GUI.bat` in the repository
+folder; it runs the code in `src/` directly (dependencies still need
+`pip install -e .[gui]`).
+
+If `kpfm-pl-gui` is not found, re-run `pip install -e .[gui]`: the launcher
+is created at install time, so an install from before the GUI existed lacks
+it.
+
+Each tab is one workflow: **PL lifetime (PTU)** (time trace, ROIs, lifetime
+fits, lifetime trace and FLIDs), **Correlate** (KPFM ↔ PL), **AFM (JPK)** and
+**Database**. Parameters sit on the left, with
 an explanation on hover, and plots on the right. Every plot can be saved as
 PNG/SVG/PDF and its data exported as CSV; both carry the source files and
 analysis parameters as metadata. Long fits run in the background with a
@@ -85,7 +94,7 @@ triggers = ptu.laser_triggers()                # [{"index", "time"}, ...] from t
 
 states = ptu.threshold(off=0.1, on=0.6)        # {"on": Signal, "off": Signal} lifetime histograms
 fit = ptu.fit_lifetime(states["on"], n_exp=2)  # dict: A, tau (ns), curve, quality, ...
-print(fit["tau"], fit["quality"]["r_squared"])
+print(fit["tau"], fit["quality"]["reduced_chi_squared"])  # ≈ 1 for a good fit
 
 lt = ptu.lifetime_trace(bintime=0.5, n_exp=1)  # Signal: fitted lifetime (ns) per time bin
 flid = ptu.flid(bintime=0.05, n_exp=1)         # Image: occurrence over lifetime (ns) x counts
@@ -205,7 +214,7 @@ jpks = pick_folder(r"D:\Measurements")               # all .jpk files below a ch
 | [`database`](src/kpfm_pl/database.py) | `build_database`, `filter_entries`, `add_entry`/`remove_entry`, JSON/CSV export | [database.md](docs/database.md) |
 | [`plotting`](src/kpfm_pl/plotting.py) | colormaps, `set_scaled_rcparams`, `plot_image`, `enable_zoom_pan`, `make_circle`, `crop_roi` | [plotting.md](docs/plotting.md) |
 | [`selector`](src/kpfm_pl/selector.py) | `InteractiveBoxSelector`, `SingleBoxSelector`, `DraggableCircle` | [plotting.md](docs/plotting.md) |
-| [`fitting`](src/kpfm_pl/fitting.py) | `MultiExpFit` (used by `PTU`); `gaussian2d`, `fit_gaussian2d`, `peak_power_density` for laser spot profiles | docstrings |
+| [`fitting`](src/kpfm_pl/fitting.py) | `MultiExpFit` (used by `PTU`), `poisson_chi_squared` (fit quality of photon counts); `gaussian2d`, `fit_gaussian2d`, `peak_power_density` for laser spot profiles | docstrings |
 | [`io`](src/kpfm_pl/io.py) | `pick_files`, `pick_folder` (tkinter dialogs), `sort_measurement_files` | docstrings |
 | [`utils`](src/kpfm_pl/utils.py) | smoothing, resampling, fit-window selection, AFM levelling, trigger points | docstrings |
 | [`core`](src/kpfm_pl/core.py) | `Signal`, `Image` | – |

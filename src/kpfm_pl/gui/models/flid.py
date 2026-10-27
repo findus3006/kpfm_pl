@@ -1,6 +1,6 @@
 """FLID workflow: one FLID map per region drawn on the time trace (no Qt).
 
-Mirrors ``examples/example_flid.py``. A region of interest (ROI) is a box
+Mirrors ``examples/example_flid.py``; used by the *PL lifetime* tab. A region of interest (ROI) is a box
 ``{"x_min", "x_max", "y_min", "y_max"}`` on the time trace (time in s, counts
 per time bin). Because the count range of a box depends on the bin time, the
 FLIDs are always computed with the bin time of the trace the boxes were drawn
@@ -19,13 +19,14 @@ import numpy as np
 from ...core import Image, Signal
 from ..export import ExportPayload, build_metadata, describe_meta
 from .files import LoadedFile
-from .ptu import TraceParams, TraceResult, compute_trace
+from .ptu import FitOptions, TraceParams, TraceResult, clip_roi, compute_trace
 
 __all__ = [
     "FlidParams",
     "FlidEntry",
     "FlidResult",
     "default_roi",
+    "window_roi",
     "scale_rois",
     "compute_flids",
     "flid_payload",
@@ -44,6 +45,11 @@ class FlidParams:
     ``lifetime_max=None`` lets every map span its own data (maps are then not
     directly comparable). ``intensity_max=None`` uses ``(0, trace max + 1)``,
     shared by all maps.
+
+    ``region`` chooses what is mapped: ``"each"`` (one map per ROI, or the
+    :func:`default_roi` fallback without ROIs), ``"window"`` (one map of the
+    whole time window of the trace, all count levels) or ``"roi"`` (only the
+    ROI with the 0-based index ``roi``).
     """
 
     n_exp: int = 1
@@ -59,6 +65,8 @@ class FlidParams:
     smoothing: float = 2.0
     start: float = 0.0
     end: float | None = None
+    region: str = "each"
+    roi: int = 0
 
     def lifetime_range(self) -> tuple[float, float] | None:
         if self.lifetime_max is None:
@@ -105,23 +113,38 @@ class FlidResult:
     source: str = ""
     fallback: bool = False
     extra: dict[str, Any] = field(default_factory=dict)
+    options: FitOptions = field(default_factory=FitOptions)
+
+    def entry_name(self, entry: FlidEntry) -> str:
+        """Display name of ``entry``: its ROI, or the window it stands for."""
+        if self.params.region == "window":
+            return "Whole time window"
+        if self.fallback:
+            return "Fallback window"
+        return f"ROI {entry.index + 1}"
+
+
+def window_roi(trace: TraceResult) -> dict[str, float]:
+    """The whole time window of ``trace`` with all count levels, as an ROI."""
+    s = trace.signal
+    top = float(np.max(s.y)) + 1.0 if len(s) else 1.0
+    x_min = float(s.x[0]) if len(s) else 0.0
+    x_max = float(s.x[-1] + trace.params.bintime) if len(s) else 0.0
+    return {"x_min": x_min, "x_max": x_max, "y_min": 0.0, "y_max": top}
 
 
 def default_roi(trace: TraceResult) -> dict[str, float]:
     """Fallback ROI when none was drawn.
 
-    The window between the first and last laser trigger (as in the example
-    script), or the whole trace without triggers; all count levels.
+    The window between the first and last laser trigger inside the trace (as
+    in the example script), or the whole trace without triggers; all count
+    levels.
     """
-    s = trace.signal
-    top = float(np.max(s.y)) + 1.0 if len(s) else 1.0
+    roi = window_roi(trace)
     markers = trace.marker_times
     if markers is not None and len(markers) >= 2 and markers[-1] > markers[0]:
-        x_min, x_max = float(markers[0]), float(markers[-1])
-    else:
-        x_min = float(s.x[0]) if len(s) else 0.0
-        x_max = float(s.x[-1] + trace.params.bintime) if len(s) else 0.0
-    return {"x_min": x_min, "x_max": x_max, "y_min": 0.0, "y_max": top}
+        roi.update(x_min=float(markers[0]), x_max=float(markers[-1]))
+    return clip_roi(roi, trace)
 
 
 def scale_rois(rois: Sequence[dict[str, float]], factor: float) -> list[dict[str, float]]:
@@ -136,32 +159,51 @@ def scale_rois(rois: Sequence[dict[str, float]], factor: float) -> list[dict[str
 
 def compute_flids(handle: LoadedFile, trace_params: TraceParams, params: FlidParams,
                   rois: Sequence[dict[str, float]],
-                  progress: Callable[[int, int], Any] | None = None) -> FlidResult:
-    """Compute one FLID per ROI with shared histogram ranges.
+                  progress: Callable[[int, int], Any] | None = None,
+                  options: FitOptions | None = None) -> FlidResult:
+    """Compute the FLIDs of ``params.region`` with shared histogram ranges.
 
-    Without ROIs, :func:`default_roi` is used (``result.fallback`` is then
-    ``True``). ROIs that contain no photons are reported in
-    ``result.skipped`` instead of raising. ``progress(done, total)`` reports
-    the overall progress across all ROIs; an exception raised by it (e.g. a
-    cancellation) aborts the computation.
+    ``"each"``: one FLID per ROI; without ROIs, :func:`default_roi` is used
+    (``result.fallback`` is then ``True``). ``"window"``: one FLID of the
+    whole trace window. ``"roi"``: one FLID of ``rois[params.roi]``; entry
+    indices are always positions in ``rois``. ROIs are limited to the time window of the trace. ROIs that
+    contain no photons are reported in ``result.skipped`` instead of raising.
+    ``progress(done, total)`` reports the overall progress across all ROIs;
+    an exception raised by it (e.g. a cancellation) aborts the computation.
+    ``options`` are the advanced fit settings of the per-bin fits.
     """
     lifetime_range = params.lifetime_range()
+    options = options or FitOptions()
+    options.validate()
+    fit_kwargs = options.fit_kwargs(params.n_exp)
     with handle.lock:
         trace = compute_trace(handle, trace_params)
         intensity_range = params.intensity_range(trace.signal)
-        fallback = not rois
-        rois = [default_roi(trace)] if fallback else [dict(r) for r in rois]
+        fallback = False
+        if params.region == "window":
+            selected = [(0, window_roi(trace))]
+        elif params.region == "roi":
+            if not 0 <= params.roi < len(rois):
+                raise ValueError(f"ROI {params.roi + 1} does not exist "
+                                 f"({len(rois)} ROI(s) drawn).")
+            selected = [(params.roi, clip_roi(dict(rois[params.roi]), trace))]
+        elif params.region == "each":
+            fallback = not rois
+            selected = ([(0, default_roi(trace))] if fallback
+                        else [(i, clip_roi(dict(r), trace)) for i, r in enumerate(rois)])
+        else:
+            raise ValueError(f"Unknown FLID region {params.region!r}.")
 
         # Per-ROI totals are only known once fitting starts, so each ROI gets
         # an equal share of a fixed overall scale.
         scale = 1000
-        total = scale * len(rois)
+        total = scale * len(selected)
 
         entries, skipped = [], []
-        for i, roi in enumerate(rois):
-            def _sub(done: int, n: int, _i: int = i) -> None:
+        for k, (i, roi) in enumerate(selected):
+            def _sub(done: int, n: int, _k: int = k) -> None:
                 if progress is not None:
-                    progress(_i * scale + int(scale * done / max(n, 1)), total)
+                    progress(_k * scale + int(scale * done / max(n, 1)), total)
 
             try:
                 image = handle.reader.flid(
@@ -169,7 +211,7 @@ def compute_flids(handle: LoadedFile, trace_params: TraceParams, params: FlidPar
                     bins=params.bins, lifetime_bins=params.lifetime_bins,
                     intensity_bins=params.intensity_bins, lifetime_range=lifetime_range,
                     intensity_range=intensity_range, sigma=params.sigma,
-                    progress=_sub, **params.window_kwargs(),
+                    progress=_sub, **params.window_kwargs(), **fit_kwargs,
                 )
             except ValueError as exc:  # e.g. a box containing no photons
                 skipped.append((i, roi, str(exc)))
@@ -178,7 +220,7 @@ def compute_flids(handle: LoadedFile, trace_params: TraceParams, params: FlidPar
         if progress is not None:
             progress(total, total)
     return FlidResult(entries, skipped, trace, params, lifetime_range, intensity_range,
-                      str(handle.path), fallback)
+                      str(handle.path), fallback, options=options)
 
 
 # ------------------------------------------------------------------ export
@@ -186,8 +228,12 @@ def _metadata(result: FlidResult, entry: FlidEntry, analysis: str) -> dict[str, 
     return build_metadata(
         analysis, sources=[result.source],
         parameters={"time_trace": asdict(result.trace.params),
-                    "flid": asdict(result.params)},
-        results={"roi_number": entry.index + 1, "roi": entry.roi,
+                    "flid": asdict(result.params),
+                    "fit_options": asdict(result.options)},
+        results={"region": result.entry_name(entry),
+                 "roi_number": (None if result.params.region == "window"
+                                else entry.index + 1),
+                 "roi": entry.roi,
                  "roi_is_fallback": result.fallback,
                  "time_bins_in_roi": entry.n_bins,
                  "time_bins_fitted": entry.n_fitted,
