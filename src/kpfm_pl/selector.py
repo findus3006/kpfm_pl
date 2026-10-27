@@ -67,12 +67,15 @@ class InteractiveBoxSelector:
             self.fig.canvas.mpl_connect("button_release_event", self._on_release),
             self.fig.canvas.mpl_connect("key_press_event", self._on_key),
         ]
+        # Handle size is relative to the x-range, so rescale handles on zoom/pan.
+        self._xlim_cid = ax.callbacks.connect("xlim_changed", lambda _ax: self._redraw_all())
 
     # ------------------------------------------------------------------ public
     def disconnect(self) -> None:
         """Detach all event listeners."""
         for cid in self._cids:
             self.fig.canvas.mpl_disconnect(cid)
+        self.ax.callbacks.disconnect(self._xlim_cid)
 
     def get_boxes(self) -> list[dict]:
         """Return the current boxes as ``{x_min, x_max, y_min, y_max}`` dicts."""
@@ -364,7 +367,8 @@ class DraggableCircle:
 
     # ------------------------------------------------------------------ events
     def on_press(self, event):
-        if event.inaxes != self.ax:
+        # Left button only; middle is free for panning, right is handled by on_right_click.
+        if event.inaxes != self.ax or event.button != 1:
             return
 
         # If circle was deleted (right-click), start drawing a new one.
@@ -407,6 +411,8 @@ class DraggableCircle:
         self.ax.figure.canvas.draw_idle()
 
     def on_release(self, event):
+        if event.button != 1:
+            return
         if self.is_new_circle:
             self.is_new_circle = False
         self.press = None

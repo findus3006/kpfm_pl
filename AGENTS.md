@@ -36,10 +36,10 @@ src/kpfm_pl/
     utils.py        pure signal-processing helpers (smooth, resample, ...)
     io.py           file dialogs + measurement-pair sorting (lazy tkinter)
     selector.py     optional interactive matplotlib ROI selectors
-    plotting.py     optional plotting helpers (cmaps, colorbars, ROIs)
+    plotting.py     optional plotting helpers (cmaps, colorbars, wheel zoom/pan, ROIs)
 src/examples/       runnable scripts + a `Test data/` folder of sample files
 tests/              pytest suite
-docs/               per-module manuals (ptu, zurich, jpk, match, database)
+docs/               per-module manuals (ptu, zurich, jpk, match, database, plotting)
 ```
 
 ## Environment & commands
@@ -79,8 +79,9 @@ docs/               per-module manuals (ptu, zurich, jpk, match, database)
 ## Testing discipline
 
 - Add or update tests under `tests/` for any behavioural change. The suite
-  covers `utils`, `fitting`, `core`, `plotting`, the loaders (`ptu`, `zurich`,
-  `jpk`), `match` and `database`.
+  covers `utils`, `fitting`, `core`, `plotting`, `selector`, the loaders
+  (`ptu`, `zurich`, `jpk`), `match` and `database`. Interactive helpers are
+  tested on the Agg backend by dispatching synthetic `MouseEvent`s.
 - Prefer synthetic/in-memory fixtures over large binary files where possible.
 - Do not weaken or delete existing tests without an explicit reason.
 

@@ -564,6 +564,8 @@ class PTU:
              y_min: float | None = None, y_max: float | None = None,
              bintime: float = 50e-3, n_exp: int = 1, bins: int = 1,
              lifetime_bins: int = 100, intensity_bins: int = 100,
+             lifetime_range: tuple[float, float] | None = None,
+             intensity_range: tuple[float, float] | None = None,
              mode: str = "fraction", fraction: float = 0.95, smoothing: float = 2.0,
              start: float = 0.0, end: float | None = None, sigma: float = 1.5,
              isolated: bool = False, **fit_kwargs) -> Image | list[Image]:
@@ -593,6 +595,13 @@ class PTU:
             Number of histogram bins on the fitted-lifetime and raw-count axes.
             Each must be between 1 and 1024, which keeps map allocation bounded.
             Relevant only for plotting the histogram.
+        lifetime_range, intensity_range :
+            ``(min, max)`` of the histogram on the fitted-lifetime (ns) and
+            raw-count axes; values outside are dropped. Pass the same ranges to
+            several FLIDs to get identical bins, so their maps can be compared
+            directly. ``None`` spans the data, padded by ``ceil(3 * sigma)``
+            bins on each side (not below 0) so the smoothed histogram is not
+            cut off at the outermost points.
         mode, fraction, smoothing, start, end :
             Fit-window left-bound selection, as in :meth:`fit_lifetime`.
         sigma :
@@ -607,8 +616,10 @@ class PTU:
         -------
         Image or list[Image]
             FLID map(s) with the lifetime axis as ``x`` (ns), counts as ``y``,
-            and occurrence as ``data``. Per-bin ``taus``/``counts`` are stored in
-            ``meta``.
+            and occurrence as ``data``. Per-bin ``taus``/``counts`` and the
+            histogram ``lifetime_range``/``intensity_range`` actually used are
+            stored in ``meta``; ``(*lifetime_range, *intensity_range)`` is the
+            exact ``imshow`` extent of the map.
         """
         from scipy import ndimage
 
@@ -618,6 +629,12 @@ class PTU:
                     or not isinstance(value, (int, np.integer))
                     or not 1 <= value <= 1024):
                 raise ValueError(f"{name} must be an integer between 1 and 1024.")
+        for name, value in (("lifetime_range", lifetime_range),
+                            ("intensity_range", intensity_range)):
+            if value is not None:
+                lo_hi = np.asarray(value, dtype=float)
+                if lo_hi.shape != (2,) or not np.all(np.isfinite(lo_hi)) or lo_hi[0] >= lo_hi[1]:
+                    raise ValueError(f"{name} must be a finite (min, max) pair with min < max.")
 
         time, taus, counts, bounds = self._fit_time_bin_lifetimes(
             roi, x_min=x_min, x_max=x_max, y_min=y_min, y_max=y_max,
@@ -636,11 +653,33 @@ class PTU:
             "roi": bounds, "time": time, "taus": taus, "counts": counts,
         }
 
+        def _hist_range(values: np.ndarray, given, n_bins: int) -> tuple[float, float]:
+            if given is not None:
+                return float(given[0]), float(given[1])
+            if values.size == 0:
+                return 0.0, 1.0
+            lo, hi = float(values.min()), float(values.max())
+            pad = int(np.ceil(3 * sigma)) if sigma > 0 else 0
+            if pad == 0:
+                return lo, hi
+            # Add pad empty bins on each side so the Gaussian smoothing tails
+            # stay inside the map. The maximum sits on the lower edge of its
+            # bin, so the data covers n_bins - 2 * pad bins with n_bins - 2 * pad - 1
+            # widths between lo and hi, and the range spans n_bins widths.
+            width = (hi - lo) / max(n_bins - 2 * pad - 1, 1)
+            new_lo = lo - pad * width
+            if lo >= 0:
+                new_lo = max(new_lo, 0.0)  # lifetimes and counts are never negative
+            return new_lo, hi + (pad + 1) * width
+
         def _make_image(tau_vals: np.ndarray, label: str) -> Image:
             valid = np.isfinite(tau_vals) & np.isfinite(counts)
+            tau_range = _hist_range(tau_vals[valid], lifetime_range, int(lifetime_bins))
+            cnt_range = _hist_range(counts[valid], intensity_range, int(intensity_bins))
             hist, tau_edges, cnt_edges = np.histogram2d(
                 tau_vals[valid], counts[valid],
-                bins=(int(lifetime_bins), int(intensity_bins)))
+                bins=(int(lifetime_bins), int(intensity_bins)),
+                range=(tau_range, cnt_range))
             if sigma > 0:
                 hist = ndimage.gaussian_filter(hist, sigma=sigma)
             tau_centers = 0.5 * (tau_edges[:-1] + tau_edges[1:])
@@ -648,7 +687,9 @@ class PTU:
             # hist is (n_tau, n_counts); Image data is (ny, nx) = (counts, tau).
             return Image(hist.T, x=tau_centers, y=cnt_centers, label=label,
                          units={"x": "ns", "y": cnt_unit, "z": "occurrence"},
-                         meta=base_meta)
+                         meta={**base_meta,
+                               "lifetime_range": (float(tau_edges[0]), float(tau_edges[-1])),
+                               "intensity_range": (float(cnt_edges[0]), float(cnt_edges[-1]))})
 
         if isolated:
             return [

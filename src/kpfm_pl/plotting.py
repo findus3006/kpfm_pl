@@ -16,6 +16,8 @@ cmap_spring, cmap_gold
     Gwyddion-style colormaps for KPFM and height/AFM channels.
 set_scaled_rcparams
     Scale matplotlib font/line rcParams to a target figure size.
+enable_zoom_pan
+    Mouse-wheel zoom and middle-drag pan for interactive figures.
 set_cbar_formatter
     Attach a unit-scaling tick formatter to a colorbar.
 plot_image
@@ -36,6 +38,7 @@ __all__ = [
     "cmap_spring",
     "cmap_gold",
     "set_scaled_rcparams",
+    "enable_zoom_pan",
     "set_cbar_formatter",
     "plot_image",
     "make_circle",
@@ -87,6 +90,114 @@ def set_scaled_rcparams(figsize, base=(9, 6)) -> None:
         "xtick.major.width": 0.8 * scale,
         "ytick.major.width": 0.8 * scale,
     })
+
+
+def enable_zoom_pan(target=None, *, base_scale=1.2, pan_button=2) -> list[int]:
+    """Add mouse-wheel zoom and mouse-drag pan to a figure or axis.
+
+    Requires an interactive matplotlib backend: ``%matplotlib qt`` (separate
+    window) or ``%matplotlib widget`` (inline, needs ``ipympl``). With
+    ``%matplotlib inline`` the figure is a static image and nothing happens.
+
+    Controls
+    --------
+    Scroll wheel
+        Zoom in/out around the cursor. Hold ``Shift`` to zoom only x, ``Ctrl``
+        to zoom only y.
+    Drag with *pan_button* (middle button by default)
+        Pan the axis under the cursor. Hold ``x`` or ``y`` to pan along one
+        axis only.
+
+    Log and other non-linear axis scales are handled. Colorbar axes are left
+    alone. The normal toolbar zoom/pan keeps working, and its Home button
+    returns to the view before the first wheel zoom or pan.
+
+    Parameters
+    ----------
+    target :
+        A ``Figure`` (all its axes, including ones added later), a single
+        ``Axes``, or ``None`` for the current figure (``plt.gcf()``).
+    base_scale :
+        Zoom factor per wheel step.
+    pan_button :
+        Mouse button used for panning (1 left, 2 middle, 3 right).
+
+    Returns
+    -------
+    list of int
+        Callback ids; pass them to ``fig.canvas.mpl_disconnect`` to undo.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.axes import Axes
+
+    if target is None:
+        target = plt.gcf()
+    if isinstance(target, Axes):
+        fig, only_ax = target.figure, target
+    else:
+        fig, only_ax = target, None
+
+    # ipympl: keep the wheel from also scrolling the notebook page.
+    if hasattr(fig.canvas, "capture_scroll"):
+        fig.canvas.capture_scroll = True
+
+    def _managed(ax):
+        if ax is None or getattr(ax, "_colorbar", None) is not None:
+            return False
+        return only_ax is None or ax is only_ax
+
+    def _remember_view():
+        # The toolbar only records views for its own zoom/pan; without this,
+        # Home would do nothing after a wheel zoom.
+        toolbar = getattr(fig.canvas, "toolbar", None)
+        nav_stack = getattr(toolbar, "_nav_stack", None)
+        if nav_stack is not None and nav_stack() is None:
+            toolbar.push_current()
+
+    def _zoom_lim(axis, lim, center, scale):
+        # Zoom in the axis' scale space (log10 for log axes, etc.).
+        trans = axis.get_transform()
+        lo, hi, c = trans.transform(np.array([lim[0], lim[1], center], dtype=float))
+        new = np.array([c - (c - lo) * scale, c + (hi - c) * scale])
+        return trans.inverted().transform(new)
+
+    def on_scroll(event):
+        ax = event.inaxes
+        if not _managed(ax):
+            return
+        _remember_view()
+        scale = 1 / base_scale if event.button == "up" else base_scale
+        if event.key != "control":
+            ax.set_xlim(_zoom_lim(ax.xaxis, ax.get_xlim(), event.xdata, scale))
+        if event.key != "shift":
+            ax.set_ylim(_zoom_lim(ax.yaxis, ax.get_ylim(), event.ydata, scale))
+        fig.canvas.draw_idle()
+
+    panning = {"ax": None}
+
+    def on_press(event):
+        if event.button == pan_button and _managed(event.inaxes):
+            _remember_view()
+            # Reuse matplotlib's own pan logic (button 1 = pan mode).
+            event.inaxes.start_pan(event.x, event.y, 1)
+            panning["ax"] = event.inaxes
+
+    def on_motion(event):
+        if panning["ax"] is not None:
+            panning["ax"].drag_pan(1, event.key, event.x, event.y)
+            fig.canvas.draw_idle()
+
+    def on_release(event):
+        if panning["ax"] is not None and event.button == pan_button:
+            panning["ax"].end_pan()
+            panning["ax"] = None
+
+    return [
+        fig.canvas.mpl_connect("scroll_event", on_scroll),
+        fig.canvas.mpl_connect("button_press_event", on_press),
+        fig.canvas.mpl_connect("motion_notify_event", on_motion),
+        fig.canvas.mpl_connect("button_release_event", on_release),
+    ]
 
 
 def set_cbar_formatter(cbar, data, scale, threshold=5.0,
@@ -164,21 +275,35 @@ def plot_image(image, *, cmap=None, cbar_scale=1.0, cbar_label=None,
     return fig, ax, im, cbar
 
 
-def make_circle(ax):
+def make_circle(ax, *, zoom_pan=True):
     """Interactively draw a circular ROI on ``ax`` and return ``[center, radius]``.
 
     Blocks until the figure window is closed. Returns ``None`` if no circle was
-    drawn.
+    drawn. Requires an interactive backend (``%matplotlib qt`` or
+    ``%matplotlib widget``).
+
+    Parameters
+    ----------
+    ax :
+        Axis showing the image to draw on.
+    zoom_pan :
+        Enable mouse-wheel zoom and middle-drag pan on ``ax`` (see
+        :func:`enable_zoom_pan`).
     """
     import matplotlib.pyplot as plt
 
     from .selector import DraggableCircle
 
     fig = ax.figure
-    fig.suptitle("Left-click drag: draw | Drag interior: move | Right-click: delete \n Close figure window when done", fontsize=16, y=0.98)
+    title = "Left-click drag: draw | Drag interior: move | Right-click: delete"
+    if zoom_pan:
+        title += "\nWheel: zoom | Middle-drag: pan"
+    fig.suptitle(title + "\nClose figure window when done", fontsize=16, y=0.98)
     # fig.text(0.5, 0.02, "Close figure window when done", ha="center", va="bottom", fontsize=16)
     fig.tight_layout(rect=[0, 0.02, 1, 0.98])
     draggable = DraggableCircle(ax)
+    if zoom_pan:
+        enable_zoom_pan(ax)
     plt.show(block=True)
 
     center, radius = draggable.get_params()
@@ -189,14 +314,15 @@ def make_circle(ax):
     return [center, radius]
 
 
-def crop_roi(image, *, cmap=None, title=None, figsize=(10, 7), ax=None):
+def crop_roi(image, *, cmap=None, title=None, figsize=(10, 7), ax=None, zoom_pan=True):
     """Interactively draw a rectangular ROI on ``image`` and return the crop.
 
     Left-click drag on an empty area draws the box, dragging its interior
     moves it, and dragging one of the edge/corner handles resizes it.
     Right-click deletes the current box so a new one can be drawn. Confirm
     the selection by pressing ``Enter`` or simply closing the figure window
-    (both behave identically). Blocks until the figure is closed.
+    (both behave identically). Blocks until the figure is closed. Requires an
+    interactive backend (``%matplotlib qt`` or ``%matplotlib widget``).
 
     Parameters
     ----------
@@ -211,6 +337,9 @@ def crop_roi(image, *, cmap=None, title=None, figsize=(10, 7), ax=None):
     ax :
         Existing axis to draw into; a new figure/axis is created when
         ``None``.
+    zoom_pan :
+        Enable mouse-wheel zoom and middle-drag pan on the image axis (see
+        :func:`enable_zoom_pan`).
 
     Returns
     -------
@@ -241,12 +370,16 @@ def crop_roi(image, *, cmap=None, title=None, figsize=(10, 7), ax=None):
         "  Right-click        delete ROI\n"
         "  Enter / close win  confirm crop"
     )
+    if zoom_pan:
+        instructions += "\n  Wheel              zoom\n  Middle-drag        pan"
     fig.text(0.99, 0.5, instructions, transform=fig.transFigure, fontsize=9,
               va="center", ha="right", fontfamily="monospace",
               bbox=dict(boxstyle="round,pad=0.5", facecolor="whitesmoke", edgecolor="gray"))
     fig.subplots_adjust(right=0.78)
 
     selector = SingleBoxSelector(ax)
+    if zoom_pan:
+        enable_zoom_pan(ax)
     plt.show(block=True)
 
     boxes = selector.get_boxes()

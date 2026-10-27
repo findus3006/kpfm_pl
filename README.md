@@ -37,8 +37,8 @@ src/kpfm_pl/
     database.py     build/query a searchable databank of measurement pairs
     utils.py        pure signal-processing helpers (smooth, resample, ...)
     io.py           file dialogs + measurement-pair sorting
-    selector.py     optional interactive matplotlib ROI selector
-    plotting.py     Plotting helper functions (cmaps, matplotlib parameter scaling, ...)
+    selector.py     optional interactive matplotlib ROI selectors (boxes, circle)
+    plotting.py     plotting helpers (cmaps, rcParam scaling, wheel zoom/pan, ROI tools)
 ```
 
 ## Quick start
@@ -115,6 +115,33 @@ See [`docs/jpk.md`](docs/jpk.md) for the full JPK manual (channels,
 calibration and processing) and [`docs/zurich.md`](docs/zurich.md) for the
 Zurich lock-in reader.
 
+### Interactive plots: zoom, pan and region selection
+
+Requires an interactive matplotlib backend: `%matplotlib qt` or
+`%matplotlib widget` (`ipympl`) in notebooks. Inline plots are static.
+
+```python
+from kpfm_pl.plotting import set_scaled_rcparams, enable_zoom_pan
+from kpfm_pl.selector import InteractiveBoxSelector
+
+set_scaled_rcparams((16, 9))                 # scale fonts/lines to the figure size
+fig, ax = plt.subplots(figsize=(16, 9))
+ax.plot(tt["x"], tt["y"])
+selector = InteractiveBoxSelector(ax)        # left-drag draws boxes
+enable_zoom_pan(fig)                         # wheel zoom, middle-drag pan
+plt.show(block=True)
+
+# Each box {"x_min", "x_max", "y_min", "y_max"} is a valid PTU ROI;
+# shared histogram ranges make the FLIDs directly comparable
+flids = [ptu.flid(roi=roi, bintime=0.05, lifetime_range=(0, 20),
+                  intensity_range=(0, tt["y"].max() + 1))
+         for roi in selector.get_boxes()]
+```
+
+`make_circle` and `crop_roi` give you the same zoom/pan by default
+(`zoom_pan=True`). See [`docs/plotting.md`](docs/plotting.md) for all
+plotting helpers, the selector controls and the FLID workflow.
+
 ## Example scripts
 
 Runnable end-to-end scripts live in [`examples/`](examples), together
@@ -125,6 +152,7 @@ with a `Test data/` folder holding sample `.ptu`, `.txt` and `.jpk` files:
 | `example_correlate.py` | Load a current marker-based `.ptu` + `.txt` pair and align them with `Match` |
 | `example_correlate_legacy.py` | Verify alignment of a legacy no-marker PTU via `laser_pulse=False` |
 | `example_ptu.py` | Read TCSPC data, threshold and fit a lifetime histogram |
+| `example_flid.py` | Select regions in a time trace interactively and compare their FLIDs |
 | `example_jpk.py` | Load AFM channels and plot with the `plotting` helpers |
 
 ### Build a searchable database of measurement pairs
@@ -163,6 +191,7 @@ Detailed per-module manuals live in [`docs/`](docs):
 | [`docs/jpk.md`](docs/jpk.md) | `JPK` – AFM channel loading, calibration and processing |
 | [`docs/match.md`](docs/match.md) | `Match` – alignment and extraction of a PL/KPFM pair |
 | [`docs/database.md`](docs/database.md) | `database` – searchable databank of measurement pairs |
+| [`docs/plotting.md`](docs/plotting.md) | `plotting` / `selector` – figure styling, wheel zoom/pan, ROI selectors |
 
 ## Tests
 
@@ -171,5 +200,6 @@ pytest
 ```
 
 The suite (`tests/`) covers the pure-numpy parts (`utils`, `fitting`,
-`core`, `plotting`) plus the loaders (`ptu`, `zurich`, `jpk`), `match` and
-`database`.
+`core`) plus the loaders (`ptu`, `zurich`, `jpk`), `match`, `database`, and
+the matplotlib helpers (`plotting`, `selector`, driven by synthetic mouse
+events on the Agg backend).

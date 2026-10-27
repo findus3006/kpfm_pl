@@ -196,6 +196,7 @@ Key parameters:
 | `bins` | `1` | lifetime-axis reduction factor used before each fit |
 | `lifetime_bins` | `100` | histogram bins on the fitted-lifetime axis (1–1024) |
 | `intensity_bins` | `100` | histogram bins on the raw-count axis (1–1024) |
+| `lifetime_range`/`intensity_range` | `None` | `(min, max)` of the histogram axes (ns / counts); values outside are dropped. `None` = data range padded by `ceil(3·sigma)` bins per side (never below 0) |
 | `mode`/`fraction`/`smoothing`/`start`/`end` | – | fit-window selection, as in `fit_lifetime` |
 | `sigma` | `1.5` | Gaussian smoothing of the 2-D histogram (`0` disables) |
 | `isolated` | `False` | when `True`, return one `Image` per exponential; otherwise a single mean-lifetime map |
@@ -204,6 +205,22 @@ Per-bin `taus`/`counts` are stored in `Image.meta`. `counts` contains the raw
 photon total in each time bin; lifetime curves are normalised only for fitting.
 The two explicit histogram sizes keep FLID memory bounded independently of the
 measurement duration.
+
+**Histogram ranges.** By default each map spans its own data, padded so the
+Gaussian smoothing (`sigma`) is not cut off at the outermost points. Two FLIDs
+computed this way have different bins, so their occurrence values are not
+directly comparable. To compare FLIDs (e.g. several ROIs of one trace), pass
+the same `lifetime_range` and `intensity_range` to each call. The ranges
+actually used are stored in `meta["lifetime_range"]` and
+`meta["intensity_range"]`. Together they are the exact image edges:
+
+```python
+extent = (*flid.meta["lifetime_range"], *flid.meta["intensity_range"])
+plt.imshow(flid.data, extent=extent, origin="lower", aspect="auto")
+```
+
+`flid.extent` spans only the first to last bin *centre*, which is half a bin
+short on every side.
 
 `get_roi_matrix(roi, bintime)` returns the raw photon count matrix filtered by
 an ROI's time window and count threshold (useful to build custom histograms).

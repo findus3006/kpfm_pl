@@ -272,6 +272,88 @@ def test_lifetime_trace_can_override_inherited_legacy_mode(monkeypatch):
     assert lifetime_trace.meta["laser_pulse"] is True
 
 
+def _flid_ptu(monkeypatch, taus):
+    """Synthetic PTU whose per-bin fits return ``taus`` in order."""
+    fitted = iter(taus)
+
+    class DummyFit:
+        success = True
+
+        def __init__(self, *args, **kwargs):
+            self.tau = next(fitted)
+
+        def parameters(self):
+            return {"tau": np.array([self.tau])}
+
+    monkeypatch.setattr("kpfm_pl.ptu.MultiExpFit", DummyFit)
+    matrix = np.array([[4, 2, 1, 0], [8, 4, 2, 0], [12, 6, 3, 0]], dtype=np.uint32)
+    return _synthetic_ptu(matrix, bintime=1.0, acquisition_time=3.0)
+
+
+def test_flid_explicit_ranges_set_histogram_bins(monkeypatch):
+    p = _flid_ptu(monkeypatch, [2.0, 4.0, 6.0])
+    image = p.flid(bintime=1.0, lifetime_bins=10, intensity_bins=5,
+                   lifetime_range=(0, 10), intensity_range=(0, 25),
+                   mode="manual", start=-1, end=10, sigma=0)
+    assert image.meta["lifetime_range"] == (0.0, 10.0)
+    assert image.meta["intensity_range"] == (0.0, 25.0)
+    np.testing.assert_allclose(image.x, np.arange(0.5, 10, 1.0))
+    np.testing.assert_allclose(image.y, [2.5, 7.5, 12.5, 17.5, 22.5])
+    # counts 7, 14, 21 with taus 2, 4, 6 land in their own (count, tau) cells
+    assert image.data[1, 2] == image.data[2, 4] == image.data[4, 6] == 1
+    assert image.data.sum() == 3
+
+
+def test_flid_explicit_ranges_drop_values_outside(monkeypatch):
+    p = _flid_ptu(monkeypatch, [2.0, 4.0, 6.0])
+    image = p.flid(bintime=1.0, lifetime_range=(0, 5), intensity_range=(0, 25),
+                   mode="manual", start=-1, end=10, sigma=0)
+    assert image.data.sum() == 2
+
+
+def test_flid_auto_range_pads_for_smoothing(monkeypatch):
+    p = _flid_ptu(monkeypatch, [2.0, 4.0, 6.0])
+    image = p.flid(bintime=1.0, lifetime_bins=20, intensity_bins=20,
+                   mode="manual", start=-1, end=10, sigma=1.0)
+    # data spans tau 2..6 on 20 - 2*3 bins, plus 3 empty bins each side
+    width = 4.0 / 13
+    assert image.meta["lifetime_range"] == pytest.approx((2 - 3 * width, 6 + 4 * width))
+    assert image.meta["intensity_range"][0] == pytest.approx(7 - 3 * 14 / 13)
+    tau_counts = np.histogram([2.0, 4.0, 6.0], bins=20, range=image.meta["lifetime_range"])[0]
+    assert np.flatnonzero(tau_counts).tolist() == [3, 9, 16]
+    # the smoothing tails fit on the map: edges are only ~1 % of the peak
+    assert image.data.sum() == pytest.approx(3.0, rel=1e-2)
+    peak = image.data.max()
+    assert image.data[:, 0].max() < 0.02 * peak and image.data[:, -1].max() < 0.02 * peak
+
+
+def test_flid_auto_range_does_not_pad_below_zero(monkeypatch):
+    p = _flid_ptu(monkeypatch, [0.1, 4.0, 6.0])
+    # 15 padding bins of width span/10 reach far below zero on both axes
+    image = p.flid(bintime=1.0, lifetime_bins=40, intensity_bins=40,
+                   mode="manual", start=-1, end=10, sigma=5.0)
+    assert image.meta["lifetime_range"][0] == 0.0
+    assert image.meta["intensity_range"][0] == 0.0
+
+
+def test_flid_without_smoothing_spans_data_exactly(monkeypatch):
+    p = _flid_ptu(monkeypatch, [2.0, 4.0, 6.0])
+    image = p.flid(bintime=1.0, mode="manual", start=-1, end=10, sigma=0)
+    assert image.meta["lifetime_range"] == (2.0, 6.0)
+    assert image.meta["intensity_range"] == (7.0, 21.0)
+
+
+@pytest.mark.parametrize("name,value", [
+    ("lifetime_range", (5, 1)), ("lifetime_range", (0, np.inf)),
+    ("intensity_range", (1,)), ("intensity_range", (3, 3)),
+])
+def test_flid_validates_ranges(name, value):
+    p = _synthetic_ptu(np.ones((2, 5), dtype=np.uint32), bintime=1.0,
+                       acquisition_time=2.0)
+    with pytest.raises(ValueError, match=name):
+        p.flid(**{name: value})
+
+
 @pytest.mark.parametrize("name,value", [
     ("n_exp", 0), ("bins", 0), ("lifetime_bins", 0), ("intensity_bins", 1025),
 ])
