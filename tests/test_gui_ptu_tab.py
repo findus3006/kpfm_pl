@@ -102,6 +102,16 @@ def test_rois_feed_the_fit_sources_and_each_roi_is_fitted(window, qtbot, tab, tm
     assert tab.fit_params().source == "all"
 
 
+def test_histogram_is_exported_before_a_fit(window, tab, tmp_path, monkeypatch):
+    assert not tab.fits
+    target = tmp_path / "hist.csv"
+    monkeypatch.setattr(window.ctx, "save_file_dialog", lambda *a, **k: str(target))
+    payload = tab._histogram_payload()
+    assert payload.default_name == f"{PULSE.stem}_lifetime"
+    tab.hist_plot.export_csv_dialog()
+    assert target.read_text(encoding="utf-8").startswith("# analysis: PTU lifetime histogram")
+
+
 def test_single_fit_shows_quality_in_title(window, qtbot, tab):
     tab.fit_form.set_value("n_exp", 1)
     tab.run_fit()

@@ -78,6 +78,7 @@ class PTUTab(BaseTab):
         super().__init__(ctx, parent)
         self.trace: model.TraceResult | None = None
         self.preview_hist = None          # (x_ns, y, label) shown before a fit
+        self.preview_payload = None       # CSV export of the histogram before a fit
         self.fits: list[model.FitResult] = []
         self.lifetime: tuple | None = None  # (signal, payload arguments...) of the last trace
         self.flid_result: flid_model.FlidResult | None = None
@@ -118,8 +119,7 @@ class PTUTab(BaseTab):
         self.plots.addTab(self.flid_plot, "FLID maps")
         self.content_layout.addWidget(self.plots)
         self.trace_plot.set_export_provider(self._trace_payload)
-        self.hist_plot.set_export_provider(
-            lambda: model.fits_payload(self.fits) if self.fits else None)
+        self.hist_plot.set_export_provider(self._histogram_payload)
         self.lt_plot.set_export_provider(self._lifetime_payload)
         self.flid_plot.set_export_provider(self._flid_payload)
         for panel in (self.trace_plot, self.hist_plot, self.lt_plot, self.flid_plot):
@@ -532,6 +532,7 @@ class PTUTab(BaseTab):
         if kind != "ptu":
             return
         self.trace = self.lifetime = self.preview_hist = self.flid_result = None
+        self.preview_payload = None
         self.fits = []
         self.fit_table.setRowCount(0)
         # The lifetime shift is a per-file salvage: every file starts without it.
@@ -583,13 +584,14 @@ class PTUTab(BaseTab):
             model.apply_lifetime_shift(handle, shift)
             result = model.compute_trace(handle, params)
             preview = model.preview_histogram(handle, params, fit, states, rois)
-            return result, preview, factor, shift
+            payload = model.histogram_payload(preview, str(handle.path), params, states, rois)
+            return result, preview, payload, factor, shift
 
         self.run_job(f"Time trace of {handle.name}", job, self._trace_done,
                      disable=[self.trace_button])
 
     def _trace_done(self, value) -> None:
-        self.trace, hist, factor, self._applied_shift = value
+        self.trace, hist, self.preview_payload, factor, self._applied_shift = value
         shift_ns = self.trace.lifetime_shift_ns
         self.shift_label.setText(f"Lifetime axis shifted by {shift_ns:.3f} ns (circular)."
                                  if shift_ns else "")
@@ -601,9 +603,8 @@ class PTUTab(BaseTab):
         # A new trace (other bin time or window) invalidates the previous fit.
         self.fits = []
         self.fit_table.setRowCount(0)
-        y = np.asarray(hist.y, dtype=float)
-        x_ns = (hist.x - hist.x[int(np.argmax(y))]) * 1e9 if y.size else hist.x
-        self.preview_hist = (x_ns, y, hist.label)
+        self.preview_hist = (model.shifted_histogram_x(hist), np.asarray(hist.y, dtype=float),
+                             hist.label)
         self._draw_histogram()
         self._update_lt_fields()
         self._update_flid_note()
@@ -745,6 +746,11 @@ class PTUTab(BaseTab):
         payload = model.trace_payload(self.trace)
         payload.metadata["rois"] = [dict(r) for r in self.rois]
         return payload
+
+    def _histogram_payload(self):
+        if self.fits:
+            return model.fits_payload(self.fits)
+        return self.preview_payload
 
     def _flid_payload(self):
         if self.flid_result is None or not self.flid_result.entries:

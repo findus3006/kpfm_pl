@@ -53,6 +53,8 @@ def test_match_between_first_and_last_trigger(triggers, tmp_path):
     payload = model.aligned_payload(result)
     assert payload.metadata["parameters"]["match"]["align_trigger_number"] == 1
     assert len(payload.metadata["sources"]) == 2
+    zurich_stem = Path(result.triggers.zurich_source).stem.replace(" ", "_")
+    assert payload.default_name == f"{zurich_stem}_correlation"
     text = write_payload_csv(tmp_path / "aligned.csv", payload).read_text(encoding="utf-8")
     header = next(line for line in text.splitlines() if not line.startswith("#"))
     columns = next(csv.reader([header]))

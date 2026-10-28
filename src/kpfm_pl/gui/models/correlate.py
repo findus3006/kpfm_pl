@@ -14,6 +14,7 @@ Two steps, mirroring ``examples/example_correlate.py``:
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -341,7 +342,8 @@ def aligned_payload(result: MatchResult) -> ExportPayload:
         note="Time axis of the KPFM signal; the time trace was shifted by time_shift_s. "
              "Empty cells lie outside a signal's own time span. Values are not scaled.",
     )
-    stem = kpfm.label.split(" ")[0] if kpfm.label else "correlation"
+    source = result.triggers.zurich_source
+    stem = Path(source).stem.replace(" ", "_") if source else "correlation"
     return ExportPayload(meta, [kpfm, trace], default_name=f"{stem}_correlation")
 
 

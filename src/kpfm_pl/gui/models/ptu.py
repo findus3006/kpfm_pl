@@ -18,6 +18,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -49,7 +50,9 @@ __all__ = [
     "compute_roi_fits",
     "compute_lifetime_trace",
     "fit_summary",
+    "shifted_histogram_x",
     "trace_payload",
+    "histogram_payload",
     "fit_payload",
     "fits_payload",
     "lifetime_trace_payload",
@@ -625,8 +628,46 @@ def _fit_parameters(result: FitResult) -> dict[str, Any]:
     return params
 
 
-_FIT_NOTE = ("Histogram time axis is shifted so the histogram maximum is at 0 ns. "
-             "Weighted residuals: (counts - fit) / sqrt(max(counts, 1)).")
+_SHIFT_NOTE = "Histogram time axis is shifted so the histogram maximum is at 0 ns."
+_FIT_NOTE = f"{_SHIFT_NOTE} Weighted residuals: (counts - fit) / sqrt(max(counts, 1))."
+
+
+def _file_stem(source: str, fallback: str = "lifetime") -> str:
+    """Full file name without suffix, spaces as ``_`` (``"Data1 500nW.ptu"`` -> ``"Data1_500nW"``)."""
+    return Path(source).stem.replace(" ", "_") if source else fallback
+
+
+def _histogram_name(histogram: Signal, source: str) -> str:
+    """File-name stem of a lifetime histogram, e.g. ``"Data1_500nW_ROI2"`` or ``"…_on"``."""
+    name = _file_stem(source)
+    label = histogram.label or ""
+    if "roi_numbers" in histogram.meta or label.startswith(("on (", "off (")):
+        name += "_" + label.split(" (")[0].replace(" ", "")
+    return name
+
+
+def shifted_histogram_x(histogram: Signal) -> np.ndarray:
+    """Histogram time axis in ns with the histogram maximum at 0 ns."""
+    y = np.asarray(histogram.y, dtype=float)
+    x = np.asarray(histogram.x, dtype=float)
+    return (x - x[int(np.argmax(y))]) * 1e9 if y.size else x
+
+
+def histogram_payload(histogram: Signal, source: str, params: TraceParams,
+                      states: StateParams,
+                      rois: Sequence[dict[str, float]] = ()) -> ExportPayload:
+    """The lifetime histogram as shown before a fit (no fit results)."""
+    data = Signal(shifted_histogram_x(histogram), histogram.y, label=histogram.label,
+                  units={"x": "ns", "y": histogram.units["y"]})
+    parameters = _params(("time_trace", params), ("states", states))
+    if rois:
+        parameters["rois"] = [dict(r) for r in rois]
+    meta = build_metadata(
+        "PTU lifetime histogram", sources=[source], parameters=parameters,
+        results={"histogram": describe_meta(histogram.meta)}, note=_SHIFT_NOTE,
+    )
+    return ExportPayload(meta, [data],
+                         default_name=f"{_histogram_name(histogram, source)}_lifetime")
 
 
 def fit_payload(result: FitResult) -> ExportPayload:
@@ -638,9 +679,7 @@ def fit_payload(result: FitResult) -> ExportPayload:
         results={**fit_summary(fit), "histogram": describe_meta(hist.meta)},
         note=_FIT_NOTE,
     )
-    stem = result.histogram.label.split(" ")[0] if result.histogram.label else "lifetime"
-    if result.roi_index is not None or result.params.source == "rois":
-        stem = result.histogram.label.split(" (")[0].replace(" ", "")
+    stem = _histogram_name(hist, result.source)
     return ExportPayload(meta, _fit_signals(result), default_name=f"{stem}_lifetime_fit")
 
 
@@ -659,7 +698,8 @@ def fits_payload(results: Sequence[FitResult]) -> ExportPayload:
     meta = build_metadata("PTU lifetime fits per ROI", sources=[first.source],
                           parameters=_fit_parameters(first), results=summaries,
                           note=_FIT_NOTE)
-    return ExportPayload(meta, signals, default_name="ROIs_lifetime_fits")
+    return ExportPayload(meta, signals,
+                         default_name=f"{_file_stem(first.source)}_ROIs_lifetime_fits")
 
 
 def lifetime_trace_payload(signal: Signal, source: str, params: TraceParams,

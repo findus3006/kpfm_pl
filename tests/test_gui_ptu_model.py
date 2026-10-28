@@ -1,5 +1,6 @@
 """Qt-free tests of the GUI's PTU workflow model."""
 
+import dataclasses
 from pathlib import Path
 
 import numpy as np
@@ -88,6 +89,36 @@ def test_trace_and_fit_payloads(handle, tmp_path):
     # histogram, fit curve and weighted residuals
     assert [sig.units["y"] for sig in payload.signals][1:] == ["counts", "sigma"]
     write_payload_csv(tmp_path / "fit.csv", payload)
+
+
+def test_histogram_can_be_exported_without_a_fit(handle, tmp_path):
+    params, states = model.TraceParams(bintime=0.5), model.StateParams()
+    hist = model.preview_histogram(handle, params, model.FitParams(), states)
+    payload = model.histogram_payload(hist, str(handle.path), params, states)
+    assert payload.metadata["analysis"] == "PTU lifetime histogram"
+    [data] = payload.signals
+    assert data.units["x"] == "ns" and data.x[int(np.argmax(data.y))] == 0.0
+    text = write_payload_csv(tmp_path / "hist.csv", payload).read_text(encoding="utf-8")
+    assert text.startswith("# analysis: PTU lifetime histogram")
+
+
+def test_export_names_keep_the_full_file_name(handle):
+    source = str(Path("C:/data") / "Data1 500nW.ptu")
+    params, states = model.TraceParams(bintime=1.0), model.StateParams()
+    hist = model.compute_histogram(handle, params, model.FitParams(), states)
+    assert model.histogram_payload(hist, source, params, states).default_name ==         "Data1_500nW_lifetime"
+    on = model.compute_histogram(handle, params, model.FitParams(source="on"), states)
+    assert model.histogram_payload(on, source, params, states).default_name ==         "Data1_500nW_on_lifetime"
+
+    fit = model.compute_fit(handle, params, model.FitParams(n_exp=1), states)
+    fit = dataclasses.replace(fit, source=source)
+    assert model.fit_payload(fit).default_name == "Data1_500nW_lifetime_fit"
+    results, _ = model.compute_roi_fits(handle, params,
+                                        model.FitParams(source="each", n_exp=1),
+                                        states, [ROI_A, ROI_B])
+    results = [dataclasses.replace(r, source=source) for r in results]
+    assert model.fit_payload(results[1]).default_name == "Data1_500nW_ROI2_lifetime_fit"
+    assert model.fits_payload(results).default_name == "Data1_500nW_ROIs_lifetime_fits"
 
 
 # ---------------------------------------------------------- trigger windows

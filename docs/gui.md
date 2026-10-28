@@ -125,9 +125,11 @@ title on the left to fold it away.
    **CSV export** pick the ROI and whether to export its map or the per-bin
    fits.
 
-Exports: the time trace (with ROIs and trigger times), the fitted
-histogram(s) with fit curve and weighted residuals, the lifetime trace and
+Exports: the time trace (with ROIs and trigger times), the lifetime
+histogram (before a fit just the histogram, after a fit the fitted
+histogram(s) with fit curve and weighted residuals), the lifetime trace and
 the FLID maps, each with all parameters including the advanced fit settings.
+The suggested file names start with the full name of the source file.
 
 Continuous-wave files have no lifetime information; the tab says so and
 disables the analysis.
