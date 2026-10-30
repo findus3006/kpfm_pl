@@ -169,7 +169,10 @@ docs/               per-module manuals (ptu, zurich, jpk, match, database, plott
 
 ## Workflow
 - You may invoke subagents to handoff tasks to speed up work or to minimize context window size.
-- Always ask the user to clarify ambiguity in features and prompts. Rather ask more than less.
+- Always ask the user to clarify ambiguity in features and prompts (the user might be dumb). Rather ask more than less.
+- Always ask the user for approval if a backend change is necessary. 
+- You have free reign over the frontend, as long as the requested features and changes are implemented.
+- Read Changes.md to see what needs doing and update it afterwards.
 
 ## Scope & safety
 - Do not create scratch files, notebooks or scripts in the repo root. Keep the
