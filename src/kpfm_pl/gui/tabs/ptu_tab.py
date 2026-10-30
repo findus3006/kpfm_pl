@@ -194,9 +194,14 @@ class PTUTab(BaseTab):
                     tooltip="Only use photons before this time.")
         f.add_choice("end_trigger", "  Trigger", [],
                      tooltip="End at this laser trigger (numbers as in the plot).")
-        f.add_float("dark_counts", "Dark counts", 0.0, maximum=1e9, step=0.25, decimals=3,
+        f.add_float("dark_counts", "Dark counts", 2.25, maximum=1e9, step=0.25, decimals=3,
                     suffix=" /s", tooltip="Detector dark counts per second. Subtracted "
-                                          "as a constant offset in the lifetime fits.")
+                                          "as a constant offset in the lifetime fits, the "
+                                          "lifetime trace and the FLID fits, and from every "
+                                          "lifetime channel before the mean arrival time "
+                                          "is taken (FLID 'Mean arrival time'), where a "
+                                          "wrong value biases the lifetime strongly.\n"
+                                          "Applies without 'Update time trace'.")
         f.add_bool("laser_pulse", "Laser markers", True,
                    text="recorded in marker channel",
                    tooltip="Checked (default, current recordings): laser on/off triggers "
