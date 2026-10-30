@@ -31,6 +31,7 @@ from ..forms import ParamForm
 from ..models import flid as flid_model
 from ..models import ptu as model
 from .base import BaseTab
+from .flid_window import FlidWindow
 from .rois import RoiEditor, roi_colour
 
 __all__ = ["PTUTab"]
@@ -50,6 +51,9 @@ _SUMMARY_LABELS = {
     "fit_points": "Fit points",
     "lifetime_shift_ns": "Lifetime shift (ns)",
 }
+_TAU_INT_TOOLTIP = ("Intensity-weighted mean lifetime Σ Aᵢτᵢ² / Σ Aᵢτᵢ (equal to τ1 for one "
+                    "exponential), as used by the lifetime trace and the FLID maps.\n"
+                    "± standard error propagated from the fit covariance.")
 _CHI_TOOLTIP = ("Reduced chi-squared with Poisson weights (counts - fit)² / counts.\n"
                 "≈ 1: the fit describes the data within photon noise.\n"
                 "Clearly > 1: systematic deviations (try more exponentials or another "
@@ -58,6 +62,8 @@ _CHI_TOOLTIP = ("Reduced chi-squared with Poisson weights (counts - fit)² / cou
 
 
 def _summary_label(key: str) -> str:
+    if key == "tau_int_ns":
+        return "τ_int (ns)"
     if key.startswith("tau") and key.endswith("_ns"):
         return f"τ{key[3:-3]} (ns)"
     return _SUMMARY_LABELS.get(key, key)
@@ -82,6 +88,8 @@ class PTUTab(BaseTab):
         self.fits: list[model.FitResult] = []
         self.lifetime: tuple | None = None  # (signal, payload arguments...) of the last trace
         self.flid_result: flid_model.FlidResult | None = None
+        self._popouts: list[FlidWindow] = []   # open pop-out map windows
+        self._flid_axes: dict = {}             # FLID map axes -> (entry, method)
         self.fit_options = model.FitOptions()
         self._span = None
         self._hist_ax = None
@@ -122,6 +130,7 @@ class PTUTab(BaseTab):
         self.hist_plot.set_export_provider(self._histogram_payload)
         self.lt_plot.set_export_provider(self._lifetime_payload)
         self.flid_plot.set_export_provider(self._flid_payload)
+        self.flid_plot.canvas.mpl_connect("button_press_event", self._flid_clicked)
         for panel in (self.trace_plot, self.hist_plot, self.lt_plot, self.flid_plot):
             panel.show_message("Open a .ptu file to start.")
         self._set_enabled(False)
@@ -235,7 +244,7 @@ class PTUTab(BaseTab):
                   tooltip="Number of exponential decay components.")
         f.add_choice("mode", "Fit start", model.FIT_MODES, "fraction",
                      tooltip="How the start of the fit window is chosen. Also used by "
-                             "the lifetime trace and the FLIDs.\n"
+                             "the lifetime trace (the FLID has its own fit window).\n"
                              "Manual: drag on the histogram plot or enter start/end.")
         f.add_float("fraction", "Edge fraction", 0.95, maximum=1.0, step=0.05, decimals=2,
                     tooltip="Fit starts where the rising edge reaches this fraction "
@@ -257,7 +266,7 @@ class PTUTab(BaseTab):
             layout, "Advanced fit settings…", self.edit_fit_options,
             tooltip="Initial guesses and bounds of lifetimes and amplitudes, Poisson "
                     "weighting and robust losses. Shared by the lifetime fit, the "
-                    "lifetime trace and the FLIDs.")
+                    "lifetime trace and the FLID fits.")
         self.options_label = self._small("")
         layout.addWidget(self.options_label)
         self._show_options()
@@ -300,17 +309,66 @@ class PTUTab(BaseTab):
         layout.addWidget(self.flid_note)
         f = self.flid_form = ParamForm()
         f.add_choice("region", "Region", self._flid_region_options(), "each",
-                     tooltip="What the FLID maps show (independent of the lifetime "
-                             "trace's region):\nEach ROI: one map per ROI; without ROIs "
-                             "the window between the first and last laser trigger.\n"
-                             "Whole time window: one map of the displayed trace, all "
-                             "count levels.\nROI n: only that ROI.")
+                     tooltip="Which time bins of the trace are mapped (time window and "
+                             "count range), independent of the lifetime trace's region:\n"
+                             "Each ROI: one map per ROI; without ROIs the window between "
+                             "the first and last laser trigger.\nWhole time window: one "
+                             "map of the displayed trace, all count levels.\nROI n: only "
+                             "that ROI.")
+        f.add_choice("method", "Lifetime from", flid_model.METHODS, "fit",
+                     tooltip="Fit: fit every time bin with exponentials (their intensity-"
+                             "weighted mean lifetime).\nMean arrival time: average delay "
+                             "of the photons in the fit window, no fitting (fast sanity "
+                             "check; comparable to the fit's intensity-weighted mean).\n"
+                             "Both: the two maps side by side on identical bins.")
         f.add_int("n_exp", "Exponentials", 1, minimum=1, maximum=model.MAX_COMPONENTS,
                   tooltip="Exponential components fitted per time bin. With more than "
                           "one, the map uses their intensity-weighted mean lifetime.")
         f.add_int("bins", "Lifetime binning", 1, minimum=1, maximum=64,
                   tooltip="Merge this many lifetime channels before fitting "
                           "(helps with few photons per bin).")
+        f.add_bool("truncation_correction", "Window correction", True,
+                   text="correct the finite window",
+                   tooltip="The fit window cuts off late photons, so their mean arrival "
+                           "time is shorter than the lifetime: τ − T/(exp(T/τ) − 1) for a "
+                           "window of length T. Checked: this is inverted (exact for one "
+                           "exponential). Negligible for τ below about T/7.")
+
+        f.add_heading("Fit window", tooltip="Which part of every decay (ns after the "
+                                            "histogram maximum) is fitted or averaged.")
+        f.add_choice("mode", "Fit start", model.FIT_MODES, "fraction",
+                     tooltip="How the start of the FLID's fit window is chosen, on the "
+                             "summed histogram of all mapped time bins.")
+        f.add_float("fraction", "Edge fraction", 0.95, maximum=1.0, step=0.05, decimals=2,
+                    tooltip="Window starts where the rising edge reaches this fraction "
+                            "of the maximum.")
+        f.add_float("smoothing", "Edge smoothing", 2.0, maximum=50, step=0.5, decimals=1,
+                    tooltip="Smoothing applied to the histogram before locating the "
+                            "start (not the map smoothing).")
+        f.add_float("start", "Start", 0.0, minimum=-1000, maximum=1000, step=0.5,
+                    decimals=2, suffix=" ns", tooltip="Window start, relative to the "
+                                                      "histogram maximum.")
+        f.add_optional_float("end", "End", None, maximum=1000, step=1, decimals=2,
+                             suffix=" ns", auto_text="end of histogram",
+                             tooltip="Window end, relative to the histogram maximum.")
+
+        f.add_heading("Photons per time bin")
+        f.add_float("min_counts", "At least", 100.0, maximum=1e7, step=10, decimals=0,
+                    suffix=" photons", tooltip="Photons a time bin should hold for a "
+                                               "reliable lifetime. 0 disables the check.")
+        f.add_float("coverage", "in", 90.0, minimum=1.0, maximum=100.0, step=5, decimals=0,
+                    suffix=" % of the bins",
+                    tooltip="Fraction of the mapped time bins that must reach the photon "
+                            "number (50 % = the median). Otherwise the log suggests a "
+                            "larger bin time for that ROI.")
+        f.add_bool("auto_bintime", "Bin time", False, text="automatic (per ROI)",
+                   tooltip="When an ROI fails the check, compute its FLID with the "
+                           "suggested larger bin time (the ROI's count range and the "
+                           "counts axis are scaled along). The displayed trace keeps its "
+                           "bin time.")
+
+        f.add_heading("Map", tooltip="These settings redraw the maps instantly, without "
+                                     "fitting again.")
         f.add_float("lifetime_min", "Lifetime from", 0.0, maximum=1000, step=1, decimals=2,
                     suffix=" ns", tooltip="Lower edge of the lifetime axis of all maps.")
         f.add_optional_float("lifetime_max", "Lifetime to", 20.0, default=20.0, maximum=1000,
@@ -322,30 +380,43 @@ class PTUTab(BaseTab):
         f.add_optional_float("intensity_max", "Counts to", None, default=1000.0,
                              maximum=1e9, step=10, decimals=1, auto_text="trace maximum",
                              tooltip="Upper edge of the counts axis of all maps (starts "
-                                     "at 0).\nUnchecked: maximum of the time trace + 1.")
+                                     "at 0), at the trace's bin time; maps with an "
+                                     "automatic bin time scale it along.\nUnchecked: "
+                                     "maximum of the time trace + 1.")
         f.add_int("lifetime_bins", "Lifetime bins", 100, minimum=1, maximum=1024,
                   tooltip="Number of histogram bins along the lifetime axis.")
         f.add_int("intensity_bins", "Count bins", 100, minimum=1, maximum=1024,
                   tooltip="Number of histogram bins along the counts axis.")
-        f.add_float("sigma", "Smoothing", 1.5, maximum=20, step=0.5, decimals=1,
+        f.add_float("sigma", "Map smoothing", 1.5, maximum=20, step=0.5, decimals=1,
                     suffix=" bins", tooltip="Gaussian smoothing of the 2-D histogram "
                                             "(0 disables it).")
+        f.changed.connect(self._flid_form_changed)
         layout.addWidget(f)
+        self.add_button(layout, "Copy fit window from 'Lifetime fit'", self.copy_fit_window,
+                        tooltip="Use the fit start, edge fraction, smoothing and start/end "
+                                "of the 'Lifetime fit' group for the FLIDs.")
         self.flid_button = self.add_button(
             layout, "Compute FLIDs", self.run_flids, primary=True,
-            tooltip="Fit every time bin of every ROI and build the FLID maps. "
-                    "This can take a while; use Cancel in the status bar to stop.")
+            tooltip="Compute the lifetime of every time bin of every ROI and build the "
+                    "FLID maps. Fitting can take a while; use Cancel in the status bar "
+                    "to stop.")
         form = QFormLayout()
         self.export_roi = QComboBox()
-        self.export_roi.setToolTip("Which ROI's FLID 'Export data (CSV)' writes.")
+        self.export_roi.setToolTip("Which ROI's FLID 'Export data (CSV)' writes and "
+                                   "'Pop out' opens.")
         self.export_content = QComboBox()
-        for data, text in flid_model.EXPORT_CONTENTS:
-            self.export_content.addItem(text, data)
-        self.export_content.setToolTip("FLID map: the 2-D histogram.\nPer-bin fits: "
-                                       "time, counts and fitted lifetimes of every bin.")
-        form.addRow("CSV: ROI", self.export_roi)
+        self.export_content.setToolTip("FLID map: the 2-D histogram.\nPer-bin results: "
+                                       "time, counts and lifetimes of every bin.")
+        form.addRow("ROI", self.export_roi)
         form.addRow("CSV: content", self.export_content)
         layout.addLayout(form)
+        self.popout_button = self.add_button(
+            layout, "Pop out map(s)", self.pop_out_selected,
+            tooltip="Open the map(s) of the selected ROI in their own window, with "
+                    "zoom/pan and colour-scale controls. Double-clicking a map does the "
+                    "same.")
+        self._refresh_export_rois()
+        self._update_flid_fields()
         self._update_flid_note()
 
     @staticmethod
@@ -397,10 +468,40 @@ class PTUTab(BaseTab):
 
     def _update_flid_note(self) -> None:
         self.flid_note.setText(
-            f"Uses the time-trace bin time ({self._trace_bintime():g} s), the fit window "
-            "of 'Lifetime fit' and the advanced fit settings. FLIDs usually need bins "
-            "of ≥ 0.1 s. 'Each ROI' without ROIs uses the window between the first and "
-            "last laser trigger.")
+            f"Uses the time-trace bin time ({self._trace_bintime():g} s) unless the "
+            "automatic bin time raises it, the fit window below and the advanced fit "
+            "settings (guesses, bounds, weighting). 'Region' selects the time bins, the "
+            "fit window the part of each decay. FLIDs usually need ≥ 100 photons per bin.")
+
+    def _update_flid_fields(self) -> None:
+        f = self.flid_form
+        method = f.value("method")
+        f.set_row_visible("n_exp", method != "mean_arrival")
+        f.set_row_visible("bins", method != "mean_arrival")
+        f.set_row_visible("truncation_correction", method != "fit")
+        mode = f.value("mode")
+        f.set_row_visible("fraction", mode == "fraction")
+        f.set_row_visible("smoothing", mode in ("fraction", "inflection"))
+        f.set_row_visible("start", mode == "manual")
+        f.set_row_visible("end", mode == "manual")
+
+    def _flid_form_changed(self) -> None:
+        """Map settings redraw the FLIDs at once; other settings need 'Compute FLIDs'."""
+        self._update_flid_fields()
+        result = self.flid_result
+        if result is None:
+            return
+        try:
+            params = self.flid_params()
+            params.lifetime_range()
+        except ValueError:
+            return
+        if params != result.params and params.same_lifetimes(result.params):
+            self.flid_result = flid_model.remap_flids(result, params)
+            self._draw_flids()
+
+    def copy_fit_window(self) -> None:
+        self.flid_form.set_values(self.fit_params().window_kwargs())
 
     def _trace_bintime(self) -> float:
         return self.trace.params.bintime if self.trace else self.trace_form.value("bintime")
@@ -519,13 +620,13 @@ class PTUTab(BaseTab):
         return model.LifetimeTraceParams(roi=roi, **v)
 
     def flid_params(self) -> flid_model.FlidParams:
-        window = self.fit_params().window_kwargs()
         v = self.flid_form.values()
         region = v.pop("region") or "each"
         roi = 0
         if region.startswith("roi:"):
             region, roi = "roi", int(region[4:]) - 1
-        return flid_model.FlidParams(**v, **window, region=region, roi=roi)
+        v["coverage"] = v["coverage"] / 100.0
+        return flid_model.FlidParams(**v, region=region, roi=roi)
 
     # -------------------------------------------------------------- actions
     def on_file_changed(self, kind: str, handle) -> None:
@@ -652,20 +753,26 @@ class PTUTab(BaseTab):
         table.clear()
         table.setColumnCount(1 + len(headers))
         table.setHorizontalHeaderLabels(["Parameter", *headers])
-        keys = list(dict.fromkeys(k for s in summaries for k in s))
+        # The error of τ_int is shown in its own row ("value ± error").
+        keys = [k for k in dict.fromkeys(k for s in summaries for k in s)
+                if k != "tau_int_err_ns"]
         table.setRowCount(len(keys))
+        tooltips = {"reduced_chi_squared": _CHI_TOOLTIP, "tau_int_ns": _TAU_INT_TOOLTIP}
         for row, key in enumerate(keys):
             label = QTableWidgetItem(_summary_label(key))
-            if key == "reduced_chi_squared":
-                label.setToolTip(_CHI_TOOLTIP)
+            if key in tooltips:
+                label.setToolTip(tooltips[key])
             table.setItem(row, 0, label)
             for col, summary in enumerate(summaries, 1):
                 value = summary.get(key)
-                text = "" if value is None else (f"{value:.4g}" if isinstance(value, float)
-                                                 else str(value))
+                if key == "tau_int_ns" and value is not None:
+                    text = model.format_uncertainty(value, summary.get("tau_int_err_ns", np.nan))
+                else:
+                    text = "" if value is None else (f"{value:.4g}" if isinstance(value, float)
+                                                     else str(value))
                 item = QTableWidgetItem(text)
-                if key == "reduced_chi_squared":
-                    item.setToolTip(_CHI_TOOLTIP)
+                if key in tooltips:
+                    item.setToolTip(tooltips[key])
                     colour = _chi_colour(value)
                     if colour is not None:
                         item.setForeground(QBrush(colour))
@@ -726,18 +833,34 @@ class PTUTab(BaseTab):
         for index, _roi, message in result.skipped:
             self.ctx.log.warning(f"ROI {index + 1} skipped: {message}")
         for entry in result.entries:
-            self.ctx.log.info(f"ROI {entry.index + 1}: {entry.n_fitted} of {entry.n_bins} "
-                              "time bins fitted.")
+            name = result.entry_name(entry)
+            bintime = (f" at {entry.bintime:g} s bins (automatic)"
+                       if entry.bintime != result.trace.params.bintime else "")
+            self.ctx.log.info(f"{name}: {entry.n_fitted} of {entry.n_bins} time bins "
+                              f"with a lifetime{bintime}.")
+            advice = flid_model.count_check_text(entry.count_check)
+            if advice:
+                self.ctx.log.warning(f"{name}: {advice}")
         self._refresh_export_rois()
         self._draw_flids()
         self.plots.setCurrentWidget(self.flid_plot)
 
     def _refresh_export_rois(self) -> None:
         self.export_roi.clear()
-        if self.flid_result is None:
+        self.export_content.clear()
+        result = self.flid_result
+        if result is None:
+            self.popout_button.setEnabled(False)
             return
-        for k, entry in enumerate(self.flid_result.entries):
-            self.export_roi.addItem(self.flid_result.entry_name(entry), k)
+        for k, entry in enumerate(result.entries):
+            self.export_roi.addItem(result.entry_name(entry), k)
+        methods = result.params.methods()
+        for method in methods:
+            text = "FLID map" + (f" ({flid_model.METHOD_NAMES[method]})"
+                                 if len(methods) > 1 else "")
+            self.export_content.addItem(text, f"map:{method}")
+        self.export_content.addItem("Per-bin results (time, counts, lifetimes)", "bins")
+        self.popout_button.setEnabled(bool(result.entries))
 
     # --------------------------------------------------------------- export
     def _trace_payload(self):
@@ -757,9 +880,33 @@ class PTUTab(BaseTab):
             return None
         k = self.export_roi.currentData()
         entry = self.flid_result.entries[k if k is not None else 0]
-        if self.export_content.currentData() == "bins":
+        content = self.export_content.currentData() or "map:"
+        if content == "bins":
             return flid_model.bin_fits_payload(self.flid_result, entry)
-        return flid_model.flid_payload(self.flid_result, entry)
+        return flid_model.flid_payload(self.flid_result, entry, content[4:] or None)
+
+    def pop_out_selected(self) -> None:
+        """Open every map of the ROI selected under 'ROI' in its own window."""
+        if self.flid_result is None or not self.flid_result.entries:
+            return
+        k = self.export_roi.currentData()
+        entry = self.flid_result.entries[k if k is not None else 0]
+        for method in entry.methods:
+            self.pop_out(entry, method)
+
+    def pop_out(self, entry: flid_model.FlidEntry, method: str) -> FlidWindow:
+        result = self.flid_result
+        window = FlidWindow(self.ctx, entry.images[method], self._map_title(entry, method),
+                            f"Counts / {entry.bintime * 1e3:g} ms",
+                            lambda: flid_model.flid_payload(result, entry, method), self)
+        self._popouts.append(window)
+        window.destroyed.connect(lambda _=None, w=window: self._forget_popout(w))
+        window.show()
+        return window
+
+    def _forget_popout(self, window) -> None:
+        if window in self._popouts:
+            self._popouts.remove(window)
 
     # -------------------------------------------------------------- drawing
     def _trigger_numbers(self) -> list[tuple[int, float]]:
@@ -844,6 +991,11 @@ class PTUTab(BaseTab):
                 fit = self.fit.fit
                 taus = ", ".join(f"τ{i} = {t:.3g} ns"
                                  for i, t in enumerate(np.atleast_1d(fit["tau"]), 1))
+                tau_int = model.tau_int_text(fit)
+                if tau_int and np.size(fit["tau"]) > 1:
+                    taus += f" | {tau_int}"
+                elif tau_int:  # one exponential: τ_int is τ1, shown with its error
+                    taus = tau_int.replace("τ_int", "τ1")
                 ax.set_title(f"{self.fit.histogram.label}: {taus}\n"
                              f"{model.quality_text(fit)}{self._shift_note()}")
         ax.set_ylabel("Counts")
@@ -871,8 +1023,10 @@ class PTUTab(BaseTab):
         if result.params.normalize:
             # Undo the normalisation so the curve overlays the raw counts.
             curve = curve * np.max(y[np.isin(x, fit["t_fit"])])
+        tau_int = model.tau_int_text(fit)
         label = (f"{name}: τ = " + ", ".join(f"{t:.3g}" for t in np.atleast_1d(fit["tau"]))
-                 + f" ns, {model.quality_text(fit)}") if multi else "Fit"
+                 + " ns" + (f", {tau_int}" if tau_int and np.size(fit["tau"]) > 1 else "")
+                 + f", {model.quality_text(fit)}") if multi else "Fit"
         ax.semilogy(fit["t_fit"], curve, "-", color=colour, linewidth=1.5, label=label)
         if not multi:
             ax.axvspan(fit["t_fit"][0], fit["t_fit"][-1], color=colour, alpha=0.08,
@@ -928,14 +1082,26 @@ class PTUTab(BaseTab):
         ax.grid(True, alpha=0.3)
         panel.draw()
 
+    def _map_title(self, entry: flid_model.FlidEntry, method: str) -> str:
+        result = self.flid_result
+        roi = entry.roi
+        title = f"{result.entry_name(entry)}: {roi['x_min']:.0f}–{roi['x_max']:.0f} s"
+        if len(entry.methods) > 1:
+            title += f" – {flid_model.METHOD_NAMES[method]}"
+        title += f"\n{entry.n_fitted} bins"
+        if entry.bintime != result.trace.params.bintime:
+            title += f" of {entry.bintime:g} s"
+        return title
+
     def _draw_flids(self) -> None:
         result = self.flid_result
         panel = self.flid_plot
+        self._flid_axes = {}
         if result is None or not result.entries:
             panel.show_message("None of the ROIs contained photons.")
             return
         panel.clear()
-        fig_tt, fig_maps = panel.figure.subfigures(2, 1, height_ratios=[1, 1.6])
+        fig_tt, fig_maps = panel.figure.subfigures(2, 1, height_ratios=[1, 2.2])
         ax_tt = fig_tt.subplots()
         s = result.trace.signal
         ax_tt.plot(s.x, s.y, color="k", linewidth=0.6)
@@ -944,12 +1110,16 @@ class PTUTab(BaseTab):
         ax_tt.set_title(s.label)
         ax_tt.grid(True, alpha=0.3)
 
-        n = len(result.entries)
-        ncols = min(n, 4)
+        items = [(entry, method) for entry in result.entries for method in entry.methods]
+        n = len(items)
+        ncols = min(n, 4)   # even, so the two maps of one ROI stay on one row
         nrows = int(np.ceil(n / ncols))
-        axes = np.atleast_1d(fig_maps.subplots(nrows, ncols, sharex=True, sharey=True,
+        images = [entry.images[method] for entry, method in items]
+        share_x = len({img.meta["lifetime_range"] for img in images}) == 1
+        share_y = len({img.meta["intensity_range"] for img in images}) == 1
+        axes = np.atleast_1d(fig_maps.subplots(nrows, ncols, sharex=share_x, sharey=share_y,
                                                squeeze=False)).ravel()
-        for ax, entry in zip(axes, result.entries):
+        for entry in result.entries:
             name = result.entry_name(entry)
             colour = roi_colour(entry.index) if name.startswith("ROI") else "0.4"
             roi = entry.roi
@@ -957,16 +1127,28 @@ class PTUTab(BaseTab):
                                       roi["x_max"] - roi["x_min"], roi["y_max"] - roi["y_min"],
                                       edgecolor=colour, facecolor=colour, alpha=0.25,
                                       linewidth=2))
-            img = entry.image
+        for k, (ax, (entry, method)) in enumerate(zip(axes, items)):
+            name = result.entry_name(entry)
+            colour = roi_colour(entry.index) if name.startswith("ROI") else "0.4"
+            img = entry.images[method]
             extent = (*img.meta["lifetime_range"], *img.meta["intensity_range"])
             im = ax.imshow(img.data, extent=extent, origin="lower", aspect="auto",
                            cmap="viridis")
-            fig_maps.colorbar(im, ax=ax, label=img.units["z"])
-            ax.set_title(f"{name}: {roi['x_min']:.0f}–{roi['x_max']:.0f} s "
-                         f"({entry.n_fitted} bins)", color=colour)
+            ax.set_box_aspect(1)
+            # An inset colour bar keeps the height of the square map.
+            fig_maps.colorbar(im, cax=ax.inset_axes([1.04, 0.0, 0.05, 1.0]),
+                              label=img.units["z"])
+            ax.set_title(self._map_title(entry, method), color=colour, fontsize="medium")
             ax.set_xlabel(f"Lifetime ({img.units['x']})")
-        for ax in axes[len(result.entries):]:
+            if not share_y or k % ncols == 0:
+                ax.set_ylabel(f"Counts / {entry.bintime * 1e3:g} ms")
+            self._flid_axes[ax] = (entry, method)
+        for ax in axes[n:]:
             ax.set_visible(False)
-        for row in range(nrows):
-            axes[row * ncols].set_ylabel(f"Counts / {result.trace.params.bintime * 1e3:g} ms")
+        fig_maps.suptitle("Double-click a map to open it in its own window "
+                          "(zoom, pan, colour scale).", fontsize="small", color="0.4")
         panel.draw()
+
+    def _flid_clicked(self, event) -> None:
+        if event.dblclick and event.inaxes in getattr(self, "_flid_axes", {}):
+            self.pop_out(*self._flid_axes[event.inaxes])

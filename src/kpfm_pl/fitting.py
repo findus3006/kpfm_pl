@@ -208,6 +208,42 @@ class MultiExpFit:
             "r_squared": 1 - ss_res / ss_tot if ss_tot != 0 else 0.0,
         }
 
+    def covariance(self) -> np.ndarray:
+        """Parameter covariance ``[A_1..A_n, tau_1..tau_n]`` from the fit Jacobian.
+
+        ``(J^T J)^-1`` scaled by the residual variance ``sum(r^2) / dof`` of
+        the (possibly weighted) residuals, as :func:`scipy.optimize.curve_fit`
+        does by default, so the errors also reflect a poor fit. All ``NaN``
+        without degrees of freedom.
+        """
+        result = self._require_result()
+        jac = np.asarray(result.jac, dtype=float)
+        residuals = np.asarray(result.fun, dtype=float)
+        if self.constrain_sum_A:
+            jac, residuals = jac[:-1], residuals[:-1]
+        n_params = jac.shape[1]
+        dof = residuals.size - n_params
+        if dof <= 0:
+            return np.full((n_params, n_params), np.nan)
+        variance = float(np.sum(residuals ** 2)) / dof
+        return np.linalg.pinv(jac.T @ jac) * variance
+
+    def intensity_weighted_lifetime(self) -> tuple[float, float]:
+        """Intensity-weighted mean lifetime ``sum(A tau^2) / sum(A tau)`` and its error.
+
+        Equal to ``tau`` for one exponential. The standard error is propagated
+        from :meth:`covariance`; both are ``NaN`` when all amplitudes are zero.
+        """
+        p = self.parameters()
+        A, tau = np.asarray(p["A"], dtype=float), np.asarray(p["tau"], dtype=float)
+        denominator = float(np.sum(A * tau))
+        if denominator == 0 or not np.isfinite(denominator):
+            return float("nan"), float("nan")
+        mean = float(np.sum(A * tau ** 2)) / denominator
+        gradient = np.concatenate([tau * (tau - mean), A * (2 * tau - mean)]) / denominator
+        variance = float(gradient @ self.covariance() @ gradient)
+        return mean, float(np.sqrt(variance)) if variance >= 0 else float("nan")
+
     def legend_label(self, precision: int = 2) -> str:
         """Return a LaTeX string describing the fitted model for legends."""
         p = self.parameters()
@@ -219,11 +255,23 @@ class MultiExpFit:
         return r"$f(t) = " + label + r"$"
 
     def to_dict(self) -> dict[str, Any]:
-        """Bundle parameters, curve and quality into a single dict."""
+        """Bundle parameters, curve and quality into a single dict.
+
+        Includes the standard errors ``A_err``/``tau_err`` (from
+        :meth:`covariance`) and the intensity-weighted mean lifetime
+        ``tau_int`` with its error ``tau_int_err``
+        (:meth:`intensity_weighted_lifetime`).
+        """
         params = self.parameters()
+        errors = np.sqrt(np.clip(np.diag(self.covariance()), 0.0, None))
+        tau_int, tau_int_err = self.intensity_weighted_lifetime()
         return {
             "A": params["A"],
             "tau": params["tau"],
+            "A_err": errors[:self.n_exp],
+            "tau_err": errors[self.n_exp:2 * self.n_exp],
+            "tau_int": tau_int,
+            "tau_int_err": tau_int_err,
             "offset": self.offset,
             "curve": self.curve(),
             "quality": self.quality(),

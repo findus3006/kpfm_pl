@@ -105,6 +105,14 @@ class ParamForm(QWidget):
         self._labels[key] = label_widget
         return widget
 
+    def add_heading(self, text: str, tooltip: str = "") -> QLabel:
+        """Add a bold sub-heading spanning both columns (not a field)."""
+        heading = QLabel(f"<b>{text}</b>")
+        if tooltip:
+            heading.setToolTip(tooltip)
+        self.layout_.addRow(heading)
+        return heading
+
     def add_float(self, key: str, label: str, value: float, *, minimum: float = 0.0,
                   maximum: float = 1e9, step: float = 0.1, decimals: int = 3,
                   suffix: str = "", tooltip: str = "") -> QDoubleSpinBox:

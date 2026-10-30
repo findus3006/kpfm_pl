@@ -200,3 +200,68 @@ def test_flids_computed_plotted_and_exported(window, qtbot, tmp_path, monkeypatc
     tab.flid_plot.save_figure_dialog()
     assert png.stat().st_size > 0
     assert np.isfinite(tab.flid_result.intensity_range).all()
+
+
+# ------------------------------------------- re-histogram, methods, progress
+def test_remap_rebuilds_maps_without_refitting(handle):
+    params = model.FlidParams(lifetime_bins=20, intensity_bins=20, min_counts=0)
+    result = model.compute_flids(handle, TraceParams(bintime=1.0), params, [ROI_A])
+    entry = result.entries[0]
+    remapped = model.remap_flids(result, model.FlidParams(lifetime_bins=10, intensity_bins=20,
+                                                          sigma=0.0, min_counts=0))
+    new = remapped.entries[0]
+    assert new.traces["fit"] is entry.traces["fit"]       # per-bin fits reused
+    assert new.image.data.shape == (20, 10) and entry.image.data.shape == (20, 20)
+    assert new.image.data.sum() == pytest.approx(entry.n_fitted)  # sigma 0: raw counts
+    with pytest.raises(ValueError, match="map settings"):
+        model.remap_flids(result, model.FlidParams(n_exp=2, min_counts=0))
+    assert params.same_lifetimes(model.FlidParams(sigma=5, lifetime_max=None, min_counts=0))
+
+
+def test_both_methods_give_comparable_maps_and_progress_counts_bins(handle, tmp_path):
+    params = model.FlidParams(method="both", lifetime_bins=20, intensity_bins=20,
+                              mode="manual", start=0.0, min_counts=0)
+    calls = []
+    result = model.compute_flids(handle, TraceParams(bintime=1.0), params, [ROI_A, EMPTY],
+                                 progress=lambda d, t: calls.append((d, t)))
+    entry = result.entries[0]
+    assert entry.methods == ["fit", "mean_arrival"]
+    fit, arrival = entry.images["fit"], entry.images["mean_arrival"]
+    assert fit.meta["lifetime_range"] == arrival.meta["lifetime_range"]
+    assert fit.meta["intensity_range"] == arrival.meta["intensity_range"]
+    # The test decay is multi-exponential: a single-exponential fit follows the
+    # short component, the mean arrival time the (longer) intensity-weighted mean.
+    tau_fit = np.nanmedian(entry.traces["fit"].y)
+    tau_arrival = np.nanmedian(entry.traces["mean_arrival"].y)
+    assert 1.0 < tau_fit < tau_arrival < 15.0
+    # Progress counts time bins: 40 bins per method for ROI A (+ the skipped ROI).
+    assert calls[-1][0] == calls[-1][1]
+    assert 80 <= calls[-1][1] < 1000
+    header = next(line for line in write_payload_csv(
+        tmp_path / "bins.csv", model.bin_fits_payload(result, entry)).read_text().splitlines()
+        if not line.startswith("#"))
+    assert "tau1 y (ns)" in header and "tau_mean_arrival y (ns)" in header
+    payload = model.flid_payload(result, entry, "mean_arrival")
+    assert payload.default_name.endswith("_mean_arrival")
+    assert payload.metadata["results"]["method"] == "mean_arrival"
+
+
+def test_auto_bintime_per_roi_scales_the_counts_axis(handle):
+    params = model.FlidParams(method="mean_arrival", lifetime_bins=10, intensity_bins=10,
+                              min_counts=1e4, coverage=0.5, auto_bintime=True)
+    result = model.compute_flids(handle, TraceParams(bintime=1.0), params, [ROI_A])
+    entry = result.entries[0]
+    assert entry.bintime > 1.0
+    factor = entry.bintime / 1.0
+    assert entry.image.meta["intensity_range"] == pytest.approx(
+        tuple(v * factor for v in result.intensity_range))
+    assert entry.image.units["y"] == f"counts/{entry.bintime * 1e3:g} ms"
+
+
+def test_count_check_text_reports_failed_checks_only():
+    check = {"passed": False, "fraction": 0.4, "bintime": 0.5, "min_counts": 100.0,
+             "coverage": 0.9, "suggested_bintime": 2.0}
+    text = model.count_check_text(check)
+    assert "40%" in text and "at least 2 s" in text
+    assert model.count_check_text({**check, "passed": True}) is None
+    assert model.count_check_text(None) is None

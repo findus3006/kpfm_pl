@@ -79,8 +79,9 @@ title on the left to fold it away.
    triggers. For old recordings without laser markers, untick *Laser markers*
    (the trace is then centred and its two edges serve as triggers).
 2. **Regions of interest**: on the trace, **left-drag** draws a box, dragging
-   inside moves it, the handles resize it, **Delete** removes the selected
-   box. The list shows every ROI in its colour; *Add ROI from numbers* adds
+   inside moves it, dragging an edge, a corner or a handle resizes it (the
+   cursor shows which; the handles keep their size on screen when you zoom),
+   **Delete** removes the selected box. The list shows every ROI in its colour; *Add ROI from numbers* adds
    an exact box. An ROI is a time window *and* a range of counts per bin, so
    it belongs to the bin time it was drawn at: when you change the bin time,
    the count ranges are rescaled, and everything that uses ROIs runs with the
@@ -94,6 +95,10 @@ title on the left to fold it away.
    the number of exponentials and how the fit window starts; in *Manual*
    mode you can drag across the histogram plot to set start and end.
    *Dark counts* are subtracted as an offset.
+   - **τ_int**: the intensity-weighted mean lifetime Σ Aᵢτᵢ² / Σ Aᵢτᵢ with
+     its standard error (from the fit covariance), rounded to the relevant
+     digits, in the table and the plot title. It is the lifetime the lifetime
+     trace and the FLID maps use for several exponentials.
    - **Fit quality**: the table lists the lifetimes, amplitudes and
      **χ²ᵣ** (reduced chi-squared with Poisson weights), also shown in the
      plot title. χ²ᵣ ≈ 1 (green) means the fit describes the histogram within
@@ -107,23 +112,49 @@ title on the left to fold it away.
      **Poisson weighting** (recommended for TCSPC data: the low-count tail
      is no longer ignored) and robust losses against outliers. Ticked fields
      are used, unticked ones are automatic. The settings apply to the
-     lifetime fit, the lifetime trace and the FLIDs; the line under the
+     lifetime fit, the lifetime trace and the FLID fits; the line under the
      button summarises them.
 5. **Lifetime trace**: fits every time bin separately and plots the mean
-   lifetime against time (grey: counts). *Region* restricts it to one ROI
+   lifetime against time (grey: counts). It uses the fit window of
+   *Lifetime fit*. *Region* restricts it to one ROI
    (then with the trace's bin time). This can take a while; watch the
    progress bar, *Cancel* stops it.
 6. **FLID**: *Compute FLIDs* builds fluorescence-lifetime-intensity maps with
-   the trace's bin time (FLIDs usually need ≥ 0.1 s bins). The FLID's own
-   *Region* (independent of the lifetime trace's) chooses what is mapped:
-   *Each ROI* gives one map per ROI, side by side and coloured like the ROI
-   (without ROIs: the window between the first and last laser trigger);
-   *Whole time window* gives one map of the displayed trace; *ROI n* maps
-   only that ROI. All maps share the same lifetime range (default 0–20 ns)
-   and count range, so their values are directly comparable. ROIs without
-   photons are skipped (see the log). For the
-   **CSV export** pick the ROI and whether to export its map or the per-bin
-   fits.
+   the trace's bin time. The FLID's own *Region* (independent of the lifetime
+   trace's) chooses **which time bins** are mapped: *Each ROI* gives one map
+   per ROI, coloured like the ROI (without ROIs: the window between the first
+   and last laser trigger); *Whole time window* gives one map of the
+   displayed trace; *ROI n* maps only that ROI.
+   - **Lifetime from**: *Fit* fits every time bin (*Exponentials*, *Lifetime
+     binning* and the advanced fit settings apply); *Mean arrival time* takes
+     the mean delay of the photons instead, without fitting, as a fast sanity
+     check (*Window correction* undoes the cut-off of late photons by the
+     finite window, see [ptu.md](ptu.md#mean-arrival-time-no-fit)); *Both*
+     shows the two maps of every ROI side by side on identical bins. On a
+     multi-exponential decay a one-exponential fit gives shorter lifetimes
+     than the mean arrival time, which follows the intensity-weighted mean.
+   - **Fit window**: the FLID has its own (*Fit start*, *Edge fraction*,
+     *Edge smoothing*, *Start*/*End*): **which part of each decay** is fitted
+     or averaged. *Copy fit window from 'Lifetime fit'* takes over the
+     settings of the lifetime fit.
+   - **Photons per time bin**: at least *At least* photons *in* that share of
+     the bins (90 %; 50 % is the median). Otherwise the log suggests a larger
+     bin time for that ROI. With *Bin time: automatic (per ROI)* such an ROI
+     is computed with the suggested bin time instead; its count range and
+     counts axis are scaled along, and its title shows the bin time. The
+     displayed trace keeps its bin time.
+   - **Map**: lifetime and count range, bins and *Map smoothing* redraw the
+     maps **instantly** from the stored per-bin lifetimes, without fitting
+     again. All maps share the same lifetime range (default 0–20 ns) and
+     count range, so their values are directly comparable.
+   - Maps are square. **Double-click** a map (or select its ROI and press
+     *Pop out map(s)*) to open it in its own window, with pan/zoom tools,
+     wheel zoom and colour-scale fields: minimum, maximum, colormap and
+     linear/logarithmic scale.
+
+   ROIs without photons are skipped (see the log). For the **CSV export**
+   pick the ROI and whether to export its map (fitted or mean arrival) or the
+   per-bin results.
 
 Exports: the time trace (with ROIs and trigger times), the lifetime
 histogram (before a fit just the histogram, after a fit the fitted

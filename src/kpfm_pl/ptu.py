@@ -19,9 +19,9 @@ import numpy as np
 
 from .core import Image, Signal
 from .fitting import MultiExpFit, poisson_chi_squared
-from .utils import TriggerPoint, fit_window_mask, trigger_points
+from .utils import TriggerPoint, fit_window_mask, lifetime_from_truncated_mean, trigger_points
 
-__all__ = ["PTU"]
+__all__ = ["PTU", "flid_map"]
 
 _WRAPAROUND = 65536
 #: Where ``set_lifetime_shift("auto")`` puts the histogram peak (ns after zero).
@@ -72,6 +72,167 @@ def _weighted_mean_lifetime(taus: np.ndarray, amps: np.ndarray) -> np.ndarray:
         mean = np.sum(amps * taus**2, axis=1) / np.sum(amps * taus, axis=1)
     mean[~np.isfinite(mean)] = np.nan
     return mean
+
+
+#: Extra attempts of ``auto_bintime`` after the first suggestion.
+_AUTO_BINTIME_STEPS = 3
+
+
+def _nice_ceil(value: float) -> float:
+    """Smallest number of the form 1, 2, 2.5 or 5 x 10^n that is >= ``value``."""
+    base = 10.0 ** np.floor(np.log10(value))
+    for step in (1.0, 2.0, 2.5, 5.0, 10.0):
+        if step * base >= value * (1 - 1e-9):
+            return float(f"{step * base:.12g}")
+    return float(value)  # not reached
+
+
+def _count_check(counts: np.ndarray, bintime: float, min_counts: float,
+                 coverage: float) -> dict[str, Any]:
+    """Do at least ``coverage`` of the time bins hold ``min_counts`` photons?
+
+    ``level`` is the photon count reached by that fraction of the bins (the
+    ``1 - coverage`` quantile). Counts per bin grow linearly with the bin
+    time, so ``bintime * min_counts / level`` (rounded up to a round number)
+    is the suggested bin time.
+    """
+    counts = np.asarray(counts, dtype=float)
+    level = float(np.quantile(counts, 1.0 - coverage)) if counts.size else 0.0
+    passed = bool(level >= min_counts)
+    return {
+        "min_counts": float(min_counts),
+        "coverage": float(coverage),
+        "bintime": float(bintime),
+        "level": level,
+        "fraction": float(np.mean(counts >= min_counts)) if counts.size else 0.0,
+        "passed": passed,
+        "suggested_bintime": (None if passed
+                              else _nice_ceil(bintime * min_counts / max(level, 1.0))),
+    }
+
+
+def _validate_map_args(lifetime_bins, intensity_bins, lifetime_range, intensity_range) -> None:
+    for name, value in (("lifetime_bins", lifetime_bins),
+                        ("intensity_bins", intensity_bins)):
+        if (isinstance(value, (bool, np.bool_))
+                or not isinstance(value, (int, np.integer))
+                or not 1 <= value <= 1024):
+            raise ValueError(f"{name} must be an integer between 1 and 1024.")
+    for name, value in (("lifetime_range", lifetime_range),
+                        ("intensity_range", intensity_range)):
+        if value is not None:
+            lo_hi = np.asarray(value, dtype=float)
+            if lo_hi.shape != (2,) or not np.all(np.isfinite(lo_hi)) or lo_hi[0] >= lo_hi[1]:
+                raise ValueError(f"{name} must be a finite (min, max) pair with min < max.")
+
+
+def flid_map(trace: Signal, *, lifetime_bins: int = 100, intensity_bins: int = 100,
+             lifetime_range: tuple[float, float] | None = None,
+             intensity_range: tuple[float, float] | None = None,
+             sigma: float = 1.5, isolated: bool = False,
+             label: str | None = None) -> Image | list[Image]:
+    """Build a FLID map from a per-bin lifetime trace, without fitting.
+
+    The second half of :meth:`PTU.flid`: ``trace`` is the :class:`Signal` of
+    :meth:`PTU.lifetime_trace` or :meth:`PTU.arrival_time_trace`
+    (``meta["counts"]`` holds the photons per bin). Use it to redraw a map
+    with other histogram settings, or to compare fitted and mean-arrival
+    maps on identical bins.
+
+    Parameters
+    ----------
+    trace :
+        Per-bin lifetimes (``y``, ns) with ``meta["counts"]``; bins with a
+        ``NaN`` lifetime are left out.
+    lifetime_bins, intensity_bins :
+        Number of histogram bins on the lifetime and raw-count axes. Each
+        must be between 1 and 1024, which keeps map allocation bounded.
+    lifetime_range, intensity_range :
+        ``(min, max)`` of the histogram on the lifetime (ns) and raw-count
+        axes; values outside are dropped. Pass the same ranges to several
+        FLIDs to get identical bins, so their maps can be compared directly.
+        ``None`` spans the data, padded by ``ceil(3 * sigma)`` bins on each
+        side (not below 0) so the smoothed histogram is not cut off at the
+        outermost points.
+    sigma :
+        Gaussian smoothing applied to the 2-D histogram (``0`` disables).
+    isolated :
+        One map per fitted component (``meta["taus"]``, fitted traces only)
+        instead of one map of ``y``.
+    label :
+        Map label; default derived from ``trace.label``.
+
+    Returns
+    -------
+    Image or list[Image]
+        As :meth:`PTU.flid`. ``meta`` copies ``trace.meta`` and adds
+        ``time``, ``bin_lifetimes`` (the mapped value of every bin), ``sigma``,
+        ``lifetime_bins``, ``intensity_bins`` and the ``lifetime_range``/
+        ``intensity_range`` actually used (the exact ``imshow`` extent).
+    """
+    from scipy import ndimage
+
+    _validate_map_args(lifetime_bins, intensity_bins, lifetime_range, intensity_range)
+    counts = trace.meta.get("counts")
+    if counts is None or len(counts) != len(trace):
+        raise ValueError("trace.meta['counts'] must hold the photons of every time bin.")
+    counts = np.asarray(counts, dtype=float)
+    bintime = trace.meta.get("bintime")
+    cnt_unit = f"counts/{bintime * 1e3:g} ms" if bintime else "counts"
+    if label is None:
+        label = trace.label.rsplit(" mean ", 1)[0] + " FLID"
+        if trace.meta.get("method") == "mean_arrival":
+            label += " (mean arrival)"
+    base_meta = {**trace.meta, "time": np.asarray(trace.x, dtype=float), "sigma": sigma,
+                 "lifetime_bins": int(lifetime_bins),
+                 "intensity_bins": int(intensity_bins)}
+
+    def _hist_range(values: np.ndarray, given, n_bins: int) -> tuple[float, float]:
+        if given is not None:
+            return float(given[0]), float(given[1])
+        if values.size == 0:
+            return 0.0, 1.0
+        lo, hi = float(values.min()), float(values.max())
+        pad = int(np.ceil(3 * sigma)) if sigma > 0 else 0
+        if pad == 0:
+            return lo, hi
+        # Add pad empty bins on each side so the Gaussian smoothing tails
+        # stay inside the map. The maximum sits on the lower edge of its
+        # bin, so the data covers n_bins - 2 * pad bins with n_bins - 2 * pad - 1
+        # widths between lo and hi, and the range spans n_bins widths.
+        width = (hi - lo) / max(n_bins - 2 * pad - 1, 1)
+        new_lo = lo - pad * width
+        if lo >= 0:
+            new_lo = max(new_lo, 0.0)  # lifetimes and counts are never negative
+        return new_lo, hi + (pad + 1) * width
+
+    def _make_image(tau_vals: np.ndarray, name: str) -> Image:
+        valid = np.isfinite(tau_vals) & np.isfinite(counts)
+        tau_range = _hist_range(tau_vals[valid], lifetime_range, int(lifetime_bins))
+        cnt_range = _hist_range(counts[valid], intensity_range, int(intensity_bins))
+        hist, tau_edges, cnt_edges = np.histogram2d(
+            tau_vals[valid], counts[valid],
+            bins=(int(lifetime_bins), int(intensity_bins)),
+            range=(tau_range, cnt_range))
+        if sigma > 0:
+            hist = ndimage.gaussian_filter(hist, sigma=sigma)
+        tau_centers = 0.5 * (tau_edges[:-1] + tau_edges[1:])
+        cnt_centers = 0.5 * (cnt_edges[:-1] + cnt_edges[1:])
+        # hist is (n_tau, n_counts); Image data is (ny, nx) = (counts, tau).
+        return Image(hist.T, x=tau_centers, y=cnt_centers, label=name,
+                     units={"x": "ns", "y": cnt_unit, "z": "occurrence"},
+                     meta={**base_meta, "bin_lifetimes": tau_vals,
+                           "lifetime_range": (float(tau_edges[0]), float(tau_edges[-1])),
+                           "intensity_range": (float(cnt_edges[0]), float(cnt_edges[-1]))})
+
+    if isolated:
+        taus = trace.meta.get("taus")
+        if taus is None:
+            raise ValueError("isolated maps need fitted components (meta['taus']).")
+        taus = np.asarray(taus, dtype=float)
+        return [_make_image(taus[:, i], f"{label} (tau {i + 1})")
+                for i in range(taus.shape[1])]
+    return _make_image(np.asarray(trace.y, dtype=float), label)
 
 
 class PTU:
@@ -545,46 +706,9 @@ class PTU:
 
         return roi_matrix
 
-    def _fit_time_bin_lifetimes(
-        self, roi: dict[str, float] | None = None, *,
-        x_min: float | None = None, x_max: float | None = None,
-        y_min: float | None = None, y_max: float | None = None,
-        bintime: float = 50e-3, n_exp: int = 1, bins: int = 1,
-        mode: str = "fraction", fraction: float = 0.95,
-        smoothing: float = 2.0, start: float = 0.0,
-        end: float | None = None, laser_pulse: bool | None = None,
-        weighting: str = "none",
-        progress: Callable[[int, int], Any] | None = None,
-        **fit_kwargs,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, float | None]]:
-        """Fit lifetimes per time bin while preserving time-bin positions."""
-        self._require_pulsed()
-        # Validate before the (slow) loop rather than at the first fit.
-        _poisson_weights(weighting, np.ones(1), 1.0, fit_kwargs)
-        if (isinstance(n_exp, (bool, np.bool_))
-                or not isinstance(n_exp, (int, np.integer)) or n_exp < 1):
-            raise ValueError("n_exp must be a positive integer.")
-        if (isinstance(bins, (bool, np.bool_))
-                or not isinstance(bins, (int, np.integer)) or bins < 1):
-            raise ValueError("bins must be a positive integer.")
-
-        if roi is not None:
-            x_min, x_max = roi.get("x_min"), roi.get("x_max")
-            y_min, y_max = roi.get("y_min"), roi.get("y_max")
-
-        xmn = 0.0 if x_min is None else x_min
-        xmx = self.acquisition_time if x_max is None else x_max
-        # Lifetime values must be fitted from the same time-bin layout as the
-        # PL trace they accompany.  In particular, ``laser_pulse=False``
-        # centres and pads legacy marker-less traces.  Rebuilding with the
-        # normal default would silently put the lifetime values back on the
-        # unshifted bins.  Unless explicitly overridden, inherit the mode of
-        # the most recently generated time trace.
-        if laser_pulse is None:
-            laser_pulse = bool(self._tt_cache.get("laser_pulse", True))
-        elif not isinstance(laser_pulse, (bool, np.bool_)):
-            raise TypeError("laser_pulse must be a bool or None.")
-
+    def _bins_in_window(self, bintime: float, xmn: float, xmx: float, ymn: float,
+                        ymx: float, laser_pulse: bool) -> dict[str, np.ndarray]:
+        """Time bins of ``[xmn, xmx)`` and those with counts in ``[ymn, ymx)``."""
         if laser_pulse:
             tt = self.time_trace(
                 bintime=bintime, tstart=xmn, tend=xmx, laser_pulse=True
@@ -606,22 +730,127 @@ class PTU:
             counts = full_counts[in_window]
             matrix = full_matrix[in_window]
 
-        ymn = -np.inf if y_min is None else y_min
-        ymx = np.inf if y_max is None else y_max
         selected = (counts >= ymn) & (counts < ymx)
-        selected_matrix = matrix[selected, :]
-        if selected_matrix.shape[0] == 0 or not np.any(selected_matrix):
+        if not np.any(selected) or not np.any(matrix[selected, :]):
             raise ValueError("The selected lifetime region contains no photons.")
+        return {"time": time, "counts": counts, "matrix": matrix, "selected": selected}
+
+    def _select_time_bins(
+        self, roi: dict[str, float] | None, *,
+        x_min: float | None, x_max: float | None,
+        y_min: float | None, y_max: float | None,
+        bintime: float, laser_pulse: bool | None,
+        min_counts: float | None, coverage: float, auto_bintime: bool,
+    ) -> dict[str, Any]:
+        """Time bins of a per-bin lifetime analysis, with the photon-count check.
+
+        Returns a dict with ``time``, ``counts``, ``matrix``, ``selected`` (the
+        bins inside the intensity range), ``bounds`` (the ROI actually used),
+        ``bintime`` (the bin time actually used), ``laser_pulse`` and
+        ``count_check`` (``None`` when ``min_counts`` disables the check).
+        """
+        self._require_pulsed()
+        if roi is not None:
+            x_min, x_max = roi.get("x_min"), roi.get("x_max")
+            y_min, y_max = roi.get("y_min"), roi.get("y_max")
+        if min_counts is not None and (not np.isfinite(min_counts) or min_counts < 0):
+            raise ValueError("min_counts must be a non-negative number or None.")
+        if not 0 < coverage <= 1:
+            raise ValueError("coverage must lie in (0, 1].")
+
+        xmn = 0.0 if x_min is None else x_min
+        xmx = self.acquisition_time if x_max is None else x_max
+        # Lifetime values must be computed from the same time-bin layout as
+        # the PL trace they accompany.  In particular, ``laser_pulse=False``
+        # centres and pads legacy marker-less traces.  Rebuilding with the
+        # normal default would silently put the lifetime values back on the
+        # unshifted bins.  Unless explicitly overridden, inherit the mode of
+        # the most recently generated time trace.
+        if laser_pulse is None:
+            laser_pulse = bool(self._tt_cache.get("laser_pulse", True))
+        elif not isinstance(laser_pulse, (bool, np.bool_)):
+            raise TypeError("laser_pulse must be a bool or None.")
+
+        requested = float(bintime)
+        current = requested
+        check = None
+        too_short = False
+        for attempt in range(_AUTO_BINTIME_STEPS + 1):
+            # A count range drawn at the requested bin time keeps its meaning
+            # at another bin time when it is scaled like the counts per bin.
+            factor = current / requested
+            ymn = -np.inf if y_min is None else y_min * factor
+            ymx = np.inf if y_max is None else y_max * factor
+            sel = self._bins_in_window(current, xmn, xmx, ymn, ymx, bool(laser_pulse))
+            if not min_counts:
+                break
+            check = _count_check(sel["counts"][sel["selected"]], current,
+                                 float(min_counts), float(coverage))
+            if check["passed"] or not auto_bintime or attempt == _AUTO_BINTIME_STEPS:
+                break
+            if check["suggested_bintime"] > (xmx - xmn) / 2:
+                too_short = True  # fewer than two bins would be left
+                break
+            current = check["suggested_bintime"]
+
+        stem = self.filepath.stem
+        if check is not None:
+            check["requested_bintime"] = requested
+            if not check["passed"]:
+                advice = (f"use a bin time of at least {check['suggested_bintime']:g} s"
+                          if not too_short else
+                          f"the time window is too short for the {check['suggested_bintime']:g} s "
+                          "bin time this would need")
+                warnings.warn(
+                    f"{stem}: only {check['fraction']:.0%} of the "
+                    f"{int(np.count_nonzero(sel['selected']))} time bins of {current:g} s "
+                    f"reach {check['min_counts']:g} photons ({check['coverage']:.0%} "
+                    f"required); {advice}.",
+                    RuntimeWarning,
+                    stacklevel=3,
+                )
+        if current != requested:
+            print(f"{stem}: automatic bin time {current:g} s instead of {requested:g} s "
+                  f"(count range scaled by {current / requested:g}).")
+        factor = current / requested
+        bounds = {"x_min": x_min, "x_max": x_max,
+                  "y_min": None if y_min is None else y_min * factor,
+                  "y_max": None if y_max is None else y_max * factor}
+        return {**sel, "bounds": bounds, "bintime": current,
+                "laser_pulse": bool(laser_pulse), "count_check": check}
+
+    def _lifetime_window(self, matrix: np.ndarray, mode: str, fraction: float,
+                         smoothing: float, start: float, end: float | None,
+                         ) -> tuple[np.ndarray, float, np.ndarray]:
+        """``(lt_ns, t0_ns, mask)``: the common fit window of the bins in ``matrix``.
+
+        ``mask`` is over the native lifetime bins; the window is chosen on the
+        summed histogram of all selected bins, with its maximum at ``t0_ns``.
+        """
+        lt_ns = self.lt_time * 1e9
+        lt_roi = matrix.sum(axis=0)
+        t0_ns = float(lt_ns[int(np.argmax(lt_roi))])
+        mask = fit_window_mask(lt_ns - t0_ns, lt_roi, mode, fraction=fraction,
+                               smoothing=smoothing, start=start, end=end)
+        return lt_ns, t0_ns, mask
+
+    def _fit_time_bin_lifetimes(
+        self, sel: dict[str, Any], *, n_exp: int = 1, bins: int = 1,
+        mode: str = "fraction", fraction: float = 0.95,
+        smoothing: float = 2.0, start: float = 0.0,
+        end: float | None = None, weighting: str = "none",
+        progress: Callable[[int, int], Any] | None = None,
+        **fit_kwargs,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Fit lifetimes per selected time bin; ``(taus, amps)`` keep all bin positions."""
+        time, matrix, selected = sel["time"], sel["matrix"], sel["selected"]
+        bintime = sel["bintime"]
 
         # Use the selected region to choose one common lifetime fit window, then
         # fit each selected row independently. Unselected/invalid/failed rows
         # remain NaN so their positions stay aligned with ``time``.
-        lt_ns = self.lt_time * 1e9
-        lt_roi = selected_matrix.sum(axis=0)
-        t0_ns = lt_ns[int(np.argmax(lt_roi))]
-        lt_tshift = lt_ns - t0_ns
-        mask = fit_window_mask(lt_tshift, lt_roi, mode, fraction=fraction,
-                               smoothing=smoothing, start=start, end=end)
+        lt_ns, t0_ns, mask = self._lifetime_window(
+            matrix[selected, :], mode, fraction, smoothing, start, end)
 
         group_starts = np.arange(0, matrix.shape[1], bins)
         if group_starts.size < 2:
@@ -665,10 +894,24 @@ class PTU:
                     amps[index] = fitted_amps
         if progress is not None:
             progress(rows.size, rows.size)
+        return taus, amps
 
-        bounds = {"x_min": x_min, "x_max": x_max,
-                  "y_min": y_min, "y_max": y_max}
-        return time, taus, amps, counts, bounds
+    def _validate_fit_args(self, n_exp: int, bins: int, weighting: str,
+                           fit_kwargs: dict[str, Any]) -> None:
+        # Validate before the (slow) loop rather than at the first fit.
+        _poisson_weights(weighting, np.ones(1), 1.0, fit_kwargs)
+        if (isinstance(n_exp, (bool, np.bool_))
+                or not isinstance(n_exp, (int, np.integer)) or n_exp < 1):
+            raise ValueError("n_exp must be a positive integer.")
+        if (isinstance(bins, (bool, np.bool_))
+                or not isinstance(bins, (int, np.integer)) or bins < 1):
+            raise ValueError("bins must be a positive integer.")
+
+    def _trace_meta(self, sel: dict[str, Any], method: str) -> dict[str, Any]:
+        return {"bintime": sel["bintime"], "method": method, "roi": sel["bounds"],
+                "counts": sel["counts"], "laser_pulse": sel["laser_pulse"],
+                "lifetime_shift_ns": self.lifetime_shift_ns,
+                "count_check": sel["count_check"]}
 
     def lifetime_trace(self, roi: dict[str, float] | None = None, *,
                        x_min: float | None = None, x_max: float | None = None,
@@ -679,6 +922,8 @@ class PTU:
                        end: float | None = None,
                        laser_pulse: bool | None = None,
                        weighting: str = "none",
+                       min_counts: float | None = 100, coverage: float = 0.9,
+                       auto_bintime: bool = False,
                        progress: Callable[[int, int], Any] | None = None,
                        **fit_kwargs) -> Signal:
         """Return mean fitted lifetime versus acquisition time.
@@ -700,24 +945,117 @@ class PTU:
         per-bin fit as in :meth:`fit_lifetime`. ``progress`` is an optional
         callback ``progress(done, total)`` called before each per-bin fit and
         once at the end; raise an exception from it to abort the computation
-        (see :meth:`flid`).
+        (see :meth:`flid`). ``min_counts``, ``coverage`` and ``auto_bintime``
+        check the photons per time bin, see :meth:`flid`.
         """
-        time, taus, amps, counts, bounds = self._fit_time_bin_lifetimes(
+        self._validate_fit_args(n_exp, bins, weighting, fit_kwargs)
+        sel = self._select_time_bins(
             roi, x_min=x_min, x_max=x_max, y_min=y_min, y_max=y_max,
-            bintime=bintime, n_exp=n_exp, bins=bins, mode=mode,
-            fraction=fraction, smoothing=smoothing, start=start, end=end,
-            laser_pulse=laser_pulse, weighting=weighting, progress=progress,
-            **fit_kwargs,
+            bintime=bintime, laser_pulse=laser_pulse, min_counts=min_counts,
+            coverage=coverage, auto_bintime=auto_bintime,
+        )
+        taus, amps = self._fit_time_bin_lifetimes(
+            sel, n_exp=n_exp, bins=bins, mode=mode, fraction=fraction,
+            smoothing=smoothing, start=start, end=end, weighting=weighting,
+            progress=progress, **fit_kwargs,
         )
         return Signal(
-            time, _weighted_mean_lifetime(taus, amps),
+            sel["time"], _weighted_mean_lifetime(taus, amps),
             label=f"{self.filepath.stem} mean lifetime",
             units={"x": "s", "y": "ns"},
-            meta={"bintime": bintime, "n_exp": n_exp, "lt_bins": bins,
-                  "roi": bounds, "taus": taus, "amplitudes": amps,
-                  "counts": counts,
-                  "laser_pulse": bool(self._tt_cache["laser_pulse"]),
-                  "lifetime_shift_ns": self.lifetime_shift_ns},
+            meta={**self._trace_meta(sel, "fit"), "n_exp": n_exp, "lt_bins": bins,
+                  "taus": taus, "amplitudes": amps},
+        )
+
+    def arrival_time_trace(self, roi: dict[str, float] | None = None, *,
+                           x_min: float | None = None, x_max: float | None = None,
+                           y_min: float | None = None, y_max: float | None = None,
+                           bintime: float = 50e-3,
+                           mode: str = "fraction", fraction: float = 0.95,
+                           smoothing: float = 2.0, start: float = 0.0,
+                           end: float | None = None,
+                           laser_pulse: bool | None = None,
+                           truncation_correction: bool = True,
+                           min_counts: float | None = 100, coverage: float = 0.9,
+                           auto_bintime: bool = False,
+                           progress: Callable[[int, int], Any] | None = None) -> Signal:
+        """Lifetime per time bin from the mean photon arrival time, without fitting.
+
+        A fast sanity check of :meth:`lifetime_trace`: same arguments, same
+        time bins and the same fit window (chosen on the summed histogram of
+        the selected bins). For each bin, the expected dark counts per lifetime
+        channel (``dark_counts * bintime / n_lt_bins``) are subtracted and the
+        mean delay of the remaining photons after the window start is taken.
+
+        For a decay ``sum(A_i exp(-t/tau_i))`` observed without limit this mean
+        is exactly the intensity-weighted mean lifetime
+        ``sum(A_i tau_i**2) / sum(A_i tau_i)`` of the fits, independent of where
+        the window starts. The window of length ``T`` cuts off late photons, so
+        the mean is too short: ``tau - T / (exp(T / tau) - 1)`` for one
+        exponential. ``truncation_correction=True`` (default) inverts this
+        relation (:func:`~kpfm_pl.utils.lifetime_from_truncated_mean`); it is
+        exact for one exponential and approximate for several. Without dark-count
+        subtraction (``dark_counts`` set wrongly) the flat background pulls the
+        mean towards ``T / 2``.
+
+        Returns
+        -------
+        Signal
+            ``x`` the time-bin positions, ``y`` the lifetime in ns (``NaN`` for
+            bins outside the intensity range, without photons, or whose mean
+            is not below ``T / 2``). ``meta`` holds ``mean_arrival`` (the
+            uncorrected mean in ns), ``photons`` (dark-corrected photons in
+            the window), ``window_ns`` (``T``), ``window_start_ns`` (relative
+            to the histogram maximum), ``dark_per_channel`` and, as in
+            :meth:`lifetime_trace`, ``counts``, ``roi``, ``bintime`` and
+            ``count_check``.
+        """
+        sel = self._select_time_bins(
+            roi, x_min=x_min, x_max=x_max, y_min=y_min, y_max=y_max,
+            bintime=bintime, laser_pulse=laser_pulse, min_counts=min_counts,
+            coverage=coverage, auto_bintime=auto_bintime,
+        )
+        time, matrix, selected = sel["time"], sel["matrix"], sel["selected"]
+        lt_ns, t0_ns, mask = self._lifetime_window(
+            matrix[selected, :], mode, fraction, smoothing, start, end)
+        channels = np.flatnonzero(self._drop_seam(mask))
+        if channels.size < 2:
+            raise ValueError("The selected lifetime fit window contains fewer than two bins.")
+        res_ns = self.resolution * 1e9
+        window_start = float(lt_ns[channels[0]])
+        # Delay of each channel's centre after the window start.
+        delay = lt_ns[channels] + 0.5 * res_ns - window_start
+        window_ns = float(lt_ns[channels[-1]] + res_ns - window_start)
+        dark = self.dark_counts * sel["bintime"] / self.n_lt_bins
+
+        mean = np.full(len(time), np.nan, dtype=float)
+        photons = np.full(len(time), np.nan, dtype=float)
+        rows = np.flatnonzero(selected)
+        chunk = 2048  # bounds the temporary float copy of the matrix
+        for begin in range(0, rows.size, chunk):
+            if progress is not None:
+                progress(begin, rows.size)
+            index = rows[begin:begin + chunk]
+            block = matrix[np.ix_(index, channels)].astype(float) - dark
+            total = block.sum(axis=1)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                values = (block @ delay) / total
+            values[~(total > 0)] = np.nan
+            mean[index] = values
+            photons[index] = total
+        if progress is not None:
+            progress(rows.size, rows.size)
+
+        lifetime = (lifetime_from_truncated_mean(mean, window_ns)
+                    if truncation_correction else mean.copy())
+        return Signal(
+            time, lifetime, label=f"{self.filepath.stem} mean arrival time",
+            units={"x": "s", "y": "ns"},
+            meta={**self._trace_meta(sel, "mean_arrival"), "mean_arrival": mean,
+                  "photons": photons, "window_ns": window_ns,
+                  "window_start_ns": window_start - t0_ns,
+                  "dark_per_channel": dark,
+                  "truncation_correction": bool(truncation_correction)},
         )
 
     def flid(self, roi: dict[str, float] | None = None, *,
@@ -730,6 +1068,9 @@ class PTU:
              mode: str = "fraction", fraction: float = 0.95, smoothing: float = 2.0,
              start: float = 0.0, end: float | None = None, sigma: float = 1.5,
              isolated: bool = False, weighting: str = "none",
+             method: str = "fit", truncation_correction: bool = True,
+             min_counts: float | None = 100, coverage: float = 0.9,
+             auto_bintime: bool = False,
              progress: Callable[[int, int], Any] | None = None,
              **fit_kwargs) -> Image | list[Image]:
         """Compute a FLID (Fluorescence-Lifetime-Intensity-Distribution) map.
@@ -740,6 +1081,10 @@ class PTU:
         ``isolated``, the lifetime of a bin is the intensity-weighted mean
         ``sum(A_i * tau_i**2) / sum(A_i * tau_i)`` of its fitted components
         (equal to ``tau`` for ``n_exp=1``).
+
+        This is :meth:`lifetime_trace` (or :meth:`arrival_time_trace`)
+        followed by :func:`flid_map`. Call those two yourself to redraw the
+        map with other histogram settings without fitting again.
 
         Parameters
         ----------
@@ -757,21 +1102,10 @@ class PTU:
             Number of exponential components per time-bin fit.
         bins :
             Lifetime-axis binning factor (``1`` = native resolution).
-        lifetime_bins, intensity_bins :
-            Number of histogram bins on the fitted-lifetime and raw-count axes.
-            Each must be between 1 and 1024, which keeps map allocation bounded.
-            Relevant only for plotting the histogram.
-        lifetime_range, intensity_range :
-            ``(min, max)`` of the histogram on the fitted-lifetime (ns) and
-            raw-count axes; values outside are dropped. Pass the same ranges to
-            several FLIDs to get identical bins, so their maps can be compared
-            directly. ``None`` spans the data, padded by ``ceil(3 * sigma)``
-            bins on each side (not below 0) so the smoothed histogram is not
-            cut off at the outermost points.
+        lifetime_bins, intensity_bins, lifetime_range, intensity_range, sigma :
+            Histogram settings, see :func:`flid_map`.
         mode, fraction, smoothing, start, end :
             Fit-window left-bound selection, as in :meth:`fit_lifetime`.
-        sigma :
-            Gaussian smoothing applied to the 2-D histogram (``0`` disables).
         isolated :
             When ``True`` return one :class:`Image` per exponential component;
             otherwise return a single map of the per-bin intensity-weighted
@@ -779,6 +1113,26 @@ class PTU:
         weighting :
             ``"none"`` (default) or ``"poisson"`` weighting of the per-bin
             fits, as in :meth:`fit_lifetime`.
+        method :
+            ``"fit"`` (default) fits every bin; ``"mean_arrival"`` uses the
+            mean photon arrival time instead (:meth:`arrival_time_trace`, no
+            fitting; ``n_exp``, ``bins``, ``weighting`` and ``fit_kwargs`` are
+            then ignored and ``isolated`` is not available).
+        truncation_correction :
+            Only for ``method="mean_arrival"``, see :meth:`arrival_time_trace`.
+        min_counts, coverage :
+            Photon-count check: at least the fraction ``coverage`` of the
+            selected time bins should hold ``min_counts`` photons (``coverage``
+            0.5 is the median). Otherwise a ``RuntimeWarning`` suggests the bin
+            time that would reach it, assuming counts grow linearly with the
+            bin time. ``min_counts=None`` (or 0) disables the check; the result
+            is stored in ``meta["count_check"]``.
+        auto_bintime :
+            When the check fails, recompute with the suggested bin time
+            (repeated up to three times, since blinking makes counts grow
+            more slowly than the bin time). The ROI's count range is scaled by
+            the bin-time ratio, because it was drawn at ``bintime``.
+            ``meta["bintime"]`` and ``meta["roi"]`` hold the values used.
         progress :
             Optional callback ``progress(done, total)``, called before each
             per-bin fit and once with ``done == total`` at the end (e.g. to
@@ -796,83 +1150,29 @@ class PTU:
             stored in ``meta``; ``(*lifetime_range, *intensity_range)`` is the
             exact ``imshow`` extent of the map.
         """
-        from scipy import ndimage
-
-        for name, value in (("lifetime_bins", lifetime_bins),
-                            ("intensity_bins", intensity_bins)):
-            if (isinstance(value, (bool, np.bool_))
-                    or not isinstance(value, (int, np.integer))
-                    or not 1 <= value <= 1024):
-                raise ValueError(f"{name} must be an integer between 1 and 1024.")
-        for name, value in (("lifetime_range", lifetime_range),
-                            ("intensity_range", intensity_range)):
-            if value is not None:
-                lo_hi = np.asarray(value, dtype=float)
-                if lo_hi.shape != (2,) or not np.all(np.isfinite(lo_hi)) or lo_hi[0] >= lo_hi[1]:
-                    raise ValueError(f"{name} must be a finite (min, max) pair with min < max.")
-
-        time, taus, amps, counts, bounds = self._fit_time_bin_lifetimes(
-            roi, x_min=x_min, x_max=x_max, y_min=y_min, y_max=y_max,
-            bintime=bintime, n_exp=n_exp, bins=bins, mode=mode,
-            fraction=fraction, smoothing=smoothing, start=start, end=end,
-            weighting=weighting, progress=progress, **fit_kwargs,
-        )
-        n_fitted = int(np.count_nonzero(np.all(np.isfinite(taus), axis=1)))
-        print(f"{self.filepath.stem}: FLID fitted {n_fitted} of {len(time)} time bins.")
-
-        cnt_unit = f"counts/{bintime * 1e3:.0f} ms"
-        base_meta = {
-            "bintime": bintime, "n_exp": n_exp, "lt_bins": bins, "sigma": sigma,
-            "lifetime_bins": int(lifetime_bins),
-            "intensity_bins": int(intensity_bins),
-            "roi": bounds, "time": time, "taus": taus, "amplitudes": amps,
-            "counts": counts, "lifetime_shift_ns": self.lifetime_shift_ns,
-        }
-
-        def _hist_range(values: np.ndarray, given, n_bins: int) -> tuple[float, float]:
-            if given is not None:
-                return float(given[0]), float(given[1])
-            if values.size == 0:
-                return 0.0, 1.0
-            lo, hi = float(values.min()), float(values.max())
-            pad = int(np.ceil(3 * sigma)) if sigma > 0 else 0
-            if pad == 0:
-                return lo, hi
-            # Add pad empty bins on each side so the Gaussian smoothing tails
-            # stay inside the map. The maximum sits on the lower edge of its
-            # bin, so the data covers n_bins - 2 * pad bins with n_bins - 2 * pad - 1
-            # widths between lo and hi, and the range spans n_bins widths.
-            width = (hi - lo) / max(n_bins - 2 * pad - 1, 1)
-            new_lo = lo - pad * width
-            if lo >= 0:
-                new_lo = max(new_lo, 0.0)  # lifetimes and counts are never negative
-            return new_lo, hi + (pad + 1) * width
-
-        def _make_image(tau_vals: np.ndarray, label: str) -> Image:
-            valid = np.isfinite(tau_vals) & np.isfinite(counts)
-            tau_range = _hist_range(tau_vals[valid], lifetime_range, int(lifetime_bins))
-            cnt_range = _hist_range(counts[valid], intensity_range, int(intensity_bins))
-            hist, tau_edges, cnt_edges = np.histogram2d(
-                tau_vals[valid], counts[valid],
-                bins=(int(lifetime_bins), int(intensity_bins)),
-                range=(tau_range, cnt_range))
-            if sigma > 0:
-                hist = ndimage.gaussian_filter(hist, sigma=sigma)
-            tau_centers = 0.5 * (tau_edges[:-1] + tau_edges[1:])
-            cnt_centers = 0.5 * (cnt_edges[:-1] + cnt_edges[1:])
-            # hist is (n_tau, n_counts); Image data is (ny, nx) = (counts, tau).
-            return Image(hist.T, x=tau_centers, y=cnt_centers, label=label,
-                         units={"x": "ns", "y": cnt_unit, "z": "occurrence"},
-                         meta={**base_meta,
-                               "lifetime_range": (float(tau_edges[0]), float(tau_edges[-1])),
-                               "intensity_range": (float(cnt_edges[0]), float(cnt_edges[-1]))})
-
-        if isolated:
-            return [
-                _make_image(taus[:, i], f"{self.filepath.stem} FLID (tau {i + 1})")
-                for i in range(n_exp)
-            ]
-        return _make_image(_weighted_mean_lifetime(taus, amps), f"{self.filepath.stem} FLID")
+        _validate_map_args(lifetime_bins, intensity_bins, lifetime_range, intensity_range)
+        window = {"mode": mode, "fraction": fraction, "smoothing": smoothing,
+                  "start": start, "end": end}
+        common = {"x_min": x_min, "x_max": x_max, "y_min": y_min, "y_max": y_max,
+                  "bintime": bintime, "min_counts": min_counts, "coverage": coverage,
+                  "auto_bintime": auto_bintime, "progress": progress, **window}
+        if method == "fit":
+            trace = self.lifetime_trace(roi, n_exp=n_exp, bins=bins, weighting=weighting,
+                                        **common, **fit_kwargs)
+            done = "fitted"
+        elif method == "mean_arrival":
+            if isolated:
+                raise ValueError("isolated maps need fitted components (method='fit').")
+            trace = self.arrival_time_trace(
+                roi, truncation_correction=truncation_correction, **common)
+            done = "with a mean arrival time:"
+        else:
+            raise ValueError(f"method must be 'fit' or 'mean_arrival', not {method!r}.")
+        n_ok = int(np.count_nonzero(np.isfinite(trace.y)))
+        print(f"{self.filepath.stem}: FLID {done} {n_ok} of {len(trace)} time bins.")
+        return flid_map(trace, lifetime_bins=lifetime_bins, intensity_bins=intensity_bins,
+                        lifetime_range=lifetime_range, intensity_range=intensity_range,
+                        sigma=sigma, isolated=isolated)
 
     def threshold(self, off: float = 0.0, on: float = 1.0) -> dict[str, Signal]:
         """Split the lifetime histogram into ``on``/``off`` states by count level.

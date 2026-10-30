@@ -141,3 +141,32 @@ def test_poisson_noise_gives_reduced_chi_squared_near_one():
     counts = rng.poisson(model).astype(float)
     assert poisson_chi_squared(counts, model, n_params=2)["reduced_chi_squared"] \
         == pytest.approx(1.0, abs=0.1)
+
+
+def test_covariance_matches_curve_fit_and_gives_tau_int_error():
+    from scipy.optimize import curve_fit
+
+    rng = np.random.default_rng(1)
+    t = np.linspace(0.0, 40.0, 400)
+    y = _single_exp(t, 0.6, 2.0) + _single_exp(t, 0.4, 9.0) + rng.normal(0, 0.005, t.size)
+    fit = MultiExpFit(t, y, n_exp=2)
+    p = fit.parameters()
+    popt, pcov = curve_fit(lambda tt, a1, a2, t1, t2: a1 * np.exp(-tt / t1) + a2 * np.exp(-tt / t2),
+                           t, y, p0=np.concatenate([p["A"], p["tau"]]))
+    np.testing.assert_allclose(fit.covariance(), pcov, rtol=1e-3, atol=1e-12)
+
+    out = fit.to_dict()
+    A, tau = p["A"], p["tau"]
+    assert out["tau_int"] == pytest.approx(np.sum(A * tau**2) / np.sum(A * tau))
+    assert out["tau_int"] == pytest.approx((0.6 * 4 + 0.4 * 81) / (0.6 * 2 + 0.4 * 9), rel=1e-2)
+    assert 0 < out["tau_int_err"] < 0.1
+    np.testing.assert_allclose(out["tau_err"], np.sqrt(np.diag(pcov))[2:], rtol=1e-3)
+
+
+def test_single_exponential_tau_int_equals_tau():
+    rng = np.random.default_rng(2)
+    t = np.linspace(0.0, 30.0, 300)
+    fit = MultiExpFit(t, _single_exp(t, 1.0, 4.0) + rng.normal(0, 0.01, t.size), n_exp=1)
+    out = fit.to_dict()
+    assert out["tau_int"] == pytest.approx(out["tau"][0])
+    assert out["tau_int_err"] == pytest.approx(out["tau_err"][0])

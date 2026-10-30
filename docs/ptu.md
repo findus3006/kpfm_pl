@@ -181,6 +181,8 @@ The returned dict contains:
 | Key | Meaning |
 |-----|---------|
 | `A`, `tau` | fitted amplitudes and lifetimes (ns) |
+| `A_err`, `tau_err` | their standard errors (from `MultiExpFit.covariance()`) |
+| `tau_int`, `tau_int_err` | intensity-weighted mean lifetime `sum(A_i tau_i^2) / sum(A_i tau_i)` (ns, equal to `tau` for `n_exp=1`) and its propagated standard error |
 | `offset` | constant offset used |
 | `curve` | model evaluated on the fitted grid |
 | `quality` | `{residuals, cost, success, message, r_squared}` plus the Poisson goodness of fit `{reduced_chi_squared, chi_squared, dof, weighted_residuals}` |
@@ -199,6 +201,14 @@ the histogram within photon noise; clearly larger values mean systematic
 deviations (too few exponentials, a badly placed window, ...).
 `quality["weighted_residuals"]` (on `t_fit`) shows where they are; plotted
 below the decay they should scatter around 0 without structure.
+
+**Uncertainties.** The parameter covariance is `(J^T J)^-1` of the fit
+Jacobian, scaled by the residual variance `sum(r^2) / dof` (the default of
+`scipy.optimize.curve_fit`), so a poor fit also gets larger errors. The error
+of `tau_int` is propagated from it, including the correlations between the
+amplitudes and lifetimes. Amplitudes and lifetimes of a multi-exponential fit
+are strongly correlated, so `tau_int` is usually much better defined than the
+individual `tau_i`.
 
 Plotting the fit (from `example_ptu.py`):
 
@@ -232,7 +242,68 @@ PL time trace.
 
 Like `flid`, `lifetime_trace` takes an optional `progress(done, total)`
 callback that reports progress and can cancel the fit (see
-[Progress and cancelling](#flid-map)).
+[Progress and cancelling](#flid-map)), and checks the photons per time bin
+(`min_counts`, `coverage`, `auto_bintime`, see
+[Photons per time bin](#photons-per-time-bin)).
+
+### Mean arrival time (no fit)
+
+```python
+arrival = ptu.arrival_time_trace(bintime=0.5)    # same arguments as lifetime_trace
+```
+
+A fast sanity check of the fitted lifetimes. For each time bin it takes the
+mean delay of the photons inside the fit window (chosen exactly as for the
+fits, on the summed histogram of the selected bins). For a decay
+`sum(A_i exp(-t/tau_i))` that mean is exactly the intensity-weighted mean
+lifetime `sum(A_i tau_i^2) / sum(A_i tau_i)` of the fits, wherever the window
+starts. Two effects bias it, and both are corrected:
+
+- **Truncation.** The window has a finite length `T` (e.g. 100 ns at 10 MHz,
+  minus the part before the peak), so late photons are missing and the mean
+  is too short: `tau - T / (exp(T/tau) - 1)` for one exponential. That is
+  negligible for `tau < T/7`, about 3 % at `tau = T/5` and 22 % at
+  `tau = T/2.5`. `truncation_correction=True` (default) inverts this relation
+  ([`utils.lifetime_from_truncated_mean`](../src/kpfm_pl/utils.py)); it is
+  exact for one exponential and approximate for several.
+- **Dark counts.** A flat background has the mean delay `T/2`, independent
+  of `tau`, so a background fraction `f` gives `(1 - f) tau + f T/2`. With
+  ~100 photons per bin even a few background photons matter, so the expected
+  `dark_counts * bintime / n_lt_bins` photons per lifetime channel are
+  subtracted first. Set `dark_counts` correctly.
+
+`y` is the (corrected) lifetime in ns; `meta` holds `mean_arrival` (the
+uncorrected mean), `photons` (dark-corrected photons in the window),
+`window_ns`, `window_start_ns`, `dark_per_channel` and, as for
+`lifetime_trace`, `counts`, `roi`, `bintime` and `count_check`.
+
+A clear difference between the two traces is informative: on a
+multi-exponential decay a single-exponential fit follows the short component,
+while the mean arrival time follows the intensity-weighted mean, so the fit
+needs more exponentials.
+
+### Photons per time bin
+
+`lifetime_trace`, `arrival_time_trace` and `flid` check that enough of the
+selected time bins hold enough photons for a reliable lifetime:
+
+| Parameter | Default | Meaning |
+|-----------|---------|---------|
+| `min_counts` | `100` | photons a time bin should hold; `None` or `0` disables the check |
+| `coverage` | `0.9` | fraction of the selected bins that must reach `min_counts` (`0.5` = the median) |
+| `auto_bintime` | `False` | recompute with the suggested bin time when the check fails |
+
+A failed check raises a `RuntimeWarning` with the suggested bin time:
+`bintime * min_counts / level`, rounded up to 1, 2, 2.5 or 5 × 10ⁿ s, where
+`level` is the photon number reached by `coverage` of the bins (counts grow
+linearly with the bin time). With `auto_bintime=True` the call is repeated
+with that bin time, up to three more times, since blinking makes counts grow
+more slowly than the bin time. The ROI's count range is scaled by the same
+factor, because it was drawn at the original bin time. It stops with a warning
+when fewer than two bins would be left. The result is stored in
+`meta["count_check"]` (`passed`, `level`, `fraction`, `suggested_bintime`,
+`requested_bintime`, ...). `meta["bintime"]` and `meta["roi"]` hold the values
+actually used.
 
 ## FLID map
 
@@ -245,6 +316,12 @@ A FLID (Fluorescence-Lifetime-Intensity-Distribution) fits each time bin of
 the (optionally ROI-restricted) matrix and bins the resulting
 `(lifetime, counts)` pairs into a 2-D histogram (lifetime on `x` [ns], counts
 on `y`, occurrence as `data`).
+
+`flid` is `lifetime_trace` followed by `flid_map` (see
+[Redrawing a map](#redrawing-a-map-without-fitting-again)).
+`method="mean_arrival"` uses `arrival_time_trace` instead, without fitting
+(`n_exp`, `bins`, `weighting` and fit keywords are then ignored, `isolated` is
+not available; `truncation_correction` is passed on).
 
 For `n_exp > 1` the lifetime of a time bin is the **intensity-weighted mean**
 of its fitted components,
@@ -271,6 +348,9 @@ Key parameters:
 | `sigma` | `1.5` | Gaussian smoothing of the 2-D histogram (`0` disables) |
 | `isolated` | `False` | when `True`, return one `Image` per exponential; otherwise a single map of the intensity-weighted mean lifetime |
 | `weighting` | `"none"` | `"poisson"` weights every per-bin fit by photon noise, as in `fit_lifetime` (also for `lifetime_trace`) |
+| `method` | `"fit"` | `"mean_arrival"`: map the mean photon arrival time instead of fitting |
+| `truncation_correction` | `True` | for `method="mean_arrival"`, see [Mean arrival time](#mean-arrival-time-no-fit) |
+| `min_counts`/`coverage`/`auto_bintime` | `100`/`0.9`/`False` | photon-count check, see [Photons per time bin](#photons-per-time-bin) |
 | `progress` | `None` | callback `progress(done, total)`, see below |
 
 **Progress and cancelling.** Fitting every time bin can take a while (seconds
@@ -308,6 +388,29 @@ plt.imshow(flid.data, extent=extent, origin="lower", aspect="auto")
 
 `flid.extent` spans only the first to last bin *centre*, which is half a bin
 short on every side.
+
+### Redrawing a map without fitting again
+
+The slow part of a FLID is the per-bin lifetime; the map is a cheap 2-D
+histogram of it. `flid_map` builds the map from a `lifetime_trace` or
+`arrival_time_trace` `Signal`, so other histogram settings, or a fitted and a
+mean-arrival map on identical bins, need no new fits:
+
+```python
+from kpfm_pl import flid_map
+
+lt = ptu.lifetime_trace(roi=roi, bintime=0.5)
+arrival = ptu.arrival_time_trace(roi=roi, bintime=0.5)
+ranges = dict(lifetime_range=(0, 20), intensity_range=(0, 4000))
+fitted = flid_map(lt, sigma=1.5, **ranges)
+check = flid_map(arrival, sigma=1.5, **ranges)     # same bins: directly comparable
+smoother = flid_map(lt, sigma=3.0, **ranges)       # no new fits
+```
+
+`flid_map` takes `lifetime_bins`, `intensity_bins`, `lifetime_range`,
+`intensity_range`, `sigma`, `isolated` and an optional `label`. The map's
+`meta` copies the trace's `meta` and adds `time`, `bin_lifetimes` (the mapped
+value of every time bin), the histogram settings and the ranges actually used.
 
 `get_roi_matrix(roi, bintime)` returns the raw photon count matrix filtered by
 an ROI's time window and count threshold (useful to build custom histograms).

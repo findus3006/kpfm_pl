@@ -216,3 +216,79 @@ def test_groups_fold(tab):
     group.button.click()
     assert group.is_expanded() and group.body.isVisibleTo(tab)
     assert np.all([tab.groups[t].is_expanded() for t in ("Time trace", "Lifetime fit")])
+
+
+def test_fit_table_and_title_show_tau_int_with_error(window, qtbot, tab):
+    tab.fit_form.set_value("n_exp", 2)
+    tab.run_fit()
+    _wait(window, qtbot, lambda: tab.fit is not None)
+    rows = [tab.fit_table.item(r, 0).text() for r in range(tab.fit_table.rowCount())]
+    assert "τ_int (ns)" in rows and "tau_int_err_ns" not in rows
+    value = tab.fit_table.item(rows.index("τ_int (ns)"), 1).text()
+    assert "±" in value
+    assert "τ_int = " in tab.hist_plot.figure.axes[0].get_title()
+
+
+def test_flid_has_its_own_fit_window(window, qtbot, tab):
+    tab.fit_form.set_values({"mode": "manual", "start": 1.5})
+    assert tab.flid_params().mode == "fraction"   # not taken from 'Lifetime fit'
+    tab.copy_fit_window()
+    params = tab.flid_params()
+    assert params.mode == "manual" and params.start == 1.5
+    assert tab.flid_form.fields["start"].isVisibleTo(tab.flid_form)
+    tab.flid_form.set_value("method", "mean_arrival")
+    assert not tab.flid_form.fields["n_exp"].isVisibleTo(tab.flid_form)
+    assert tab.flid_form.fields["truncation_correction"].isVisibleTo(tab.flid_form)
+
+
+def test_flid_maps_redraw_without_refit_square_and_pop_out(window, qtbot, tab, monkeypatch):
+    from kpfm_pl.gui.tabs.flid_window import FlidWindow
+
+    tab.set_rois([ROI_A])
+    tab.flid_form.set_values({"lifetime_bins": 10, "intensity_bins": 10, "method": "both",
+                              "min_counts": 0})
+    tab.run_flids()
+    _wait(window, qtbot, lambda: tab.flid_result is not None, timeout=120000)
+    result = tab.flid_result
+    maps = list(tab._flid_axes)
+    assert len(maps) == 2 and all(ax.get_box_aspect() == 1 for ax in maps)
+    assert tab.export_content.count() == 3
+
+    # Map settings redraw at once from the stored per-bin results (no job).
+    submitted = []
+    monkeypatch.setattr(window.runner, "submit", lambda *a, **k: submitted.append(a))
+    tab.flid_form.set_value("sigma", 0.0)
+    tab.flid_form.set_value("lifetime_bins", 20)
+    assert not submitted
+    assert tab.flid_result is not result and tab.flid_result.params.sigma == 0.0
+    entry = tab.flid_result.entries[0]
+    assert entry.traces is result.entries[0].traces
+    assert entry.images["fit"].data.shape == (10, 20)
+    # Changing what is computed waits for 'Compute FLIDs'.
+    tab.flid_form.set_value("n_exp", 2)
+    assert tab.flid_result.params.n_exp == 1
+
+    tab.pop_out_selected()
+    windows = list(tab._popouts)
+    assert len(windows) == 2 and all(isinstance(w, FlidWindow) for w in windows)
+    popped = windows[0]
+    assert popped.ax.get_box_aspect() == 1
+    popped.form.set_values({"scale": "log", "cmap": "magma"})
+    assert type(popped.im.norm).__name__ == "LogNorm" and popped.im.get_cmap().name == "magma"
+    popped.form.set_values({"scale": "linear", "vmin": 0.0, "vmax": 0.5})
+    assert popped.im.norm.vmax == 0.5
+    popped.form.set_value("vmax", None)
+    popped.form.set_value("vmin", 1e6)
+    assert "smaller" in popped.message.text()
+    popped.close()
+    qtbot.waitUntil(lambda: len(tab._popouts) == 1)
+
+    # Double-clicking a map in the FLID plot pops it out as well.
+    from matplotlib.backend_bases import MouseEvent
+
+    tab.flid_plot.canvas.draw()
+    ax = next(iter(tab._flid_axes))
+    x, y = ax.transAxes.transform((0.5, 0.5))
+    MouseEvent("button_press_event", tab.flid_plot.canvas, x, y, button=1,
+               dblclick=True)._process()
+    assert len(tab._popouts) == 2

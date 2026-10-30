@@ -22,6 +22,7 @@ __all__ = [
     "left_bound_fraction",
     "inflection_left_bound",
     "fit_window_mask",
+    "lifetime_from_truncated_mean",
     "linear_line_level",
     "set_zero",
     "downsample_sum",
@@ -210,6 +211,54 @@ def fit_window_mask(
         end = t_shifted[-1] if end is None else end
         return (t_shifted >= start) & (t_shifted <= end)
     raise ValueError(f"Unknown mode: {mode!r}")
+
+
+def lifetime_from_truncated_mean(mean: np.ndarray | float, window: np.ndarray | float,
+                                 ) -> np.ndarray | float:
+    """Lifetime of a single exponential from its mean delay inside a finite window.
+
+    Photons of a decay ``exp(-t/tau)`` observed only for ``0 <= t < T`` have
+    the mean delay ``tau - T / (exp(T/tau) - 1)``: the late photons are cut
+    off, so the mean is shorter than ``tau`` (by < 0.1 % for ``tau < T/7``,
+    about 3 % at ``tau = T/5`` and 22 % at ``tau = T/2.5``). It grows
+    monotonically from 0 to ``T/2``, so it is inverted here by bisection.
+
+    Parameters
+    ----------
+    mean :
+        Mean delay(s) after the window start (same unit as ``window``).
+    window :
+        Window length(s) ``T``.
+
+    Returns
+    -------
+    float or ndarray
+        ``tau``; ``NaN`` where ``mean`` is not inside ``(0, T/2)`` (e.g. a
+        background-dominated bin) or not finite.
+    """
+    scalar = np.ndim(mean) == 0 and np.ndim(window) == 0
+    mean, window = np.broadcast_arrays(np.asarray(mean, dtype=float),
+                                       np.asarray(window, dtype=float))
+    out = np.full(mean.shape, np.nan)
+    ok = (np.isfinite(mean) & np.isfinite(window) & (window > 0)
+          & (mean > 0) & (mean < window / 2))
+    m, t = mean[ok], window[ok]
+
+    def truncated_mean(tau: np.ndarray) -> np.ndarray:
+        x = t / tau
+        with np.errstate(over="ignore"):
+            return tau * (1.0 - x / np.expm1(x))
+
+    # tau >= mean always; for large tau the mean approaches T/2 - T^2/(12 tau).
+    lo = np.log(m)
+    hi = np.log(np.maximum(4 * t ** 2 / (12 * (t / 2 - m)), 4 * m))
+    for _ in range(100):
+        mid = 0.5 * (lo + hi)
+        below = truncated_mean(np.exp(mid)) < m
+        lo = np.where(below, mid, lo)
+        hi = np.where(below, hi, mid)
+    out[ok] = np.exp(0.5 * (lo + hi))
+    return float(out) if scalar else out
 
 
 def linear_line_level(data: np.ndarray, axis: int = 1) -> np.ndarray:

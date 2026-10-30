@@ -268,3 +268,14 @@ def test_fit_respects_lifetime_bounds(handle):
     assert result.options is options
     payload = model.fit_payload(result)
     assert payload.metadata["parameters"]["fit_options"]["tau_min"][0] == 2.0
+
+
+@pytest.mark.parametrize("value,error,text", [
+    (3.4167, 0.0512, "3.42 ± 0.05"),
+    (3.4167, 0.0123, "3.417 ± 0.012"),
+    (3.4167, 0.096, "3.4 ± 0.1"),
+    (123.4, 37.0, "120 ± 40"),
+    (2.5, float("nan"), "2.5"),
+])
+def test_format_uncertainty_rounds_to_the_error(value, error, text):
+    assert model.format_uncertainty(value, error) == text

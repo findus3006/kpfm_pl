@@ -50,6 +50,8 @@ __all__ = [
     "compute_roi_fits",
     "compute_lifetime_trace",
     "fit_summary",
+    "format_uncertainty",
+    "tau_int_text",
     "shifted_histogram_x",
     "trace_payload",
     "histogram_payload",
@@ -559,6 +561,9 @@ def fit_summary(fit: dict[str, Any]) -> dict[str, Any]:
     for i, (a, tau) in enumerate(zip(np.atleast_1d(fit["A"]), np.atleast_1d(fit["tau"])), 1):
         summary[f"A{i}"] = float(a)
         summary[f"tau{i}_ns"] = float(tau)
+    if "tau_int" in fit:
+        summary["tau_int_ns"] = float(fit["tau_int"])
+        summary["tau_int_err_ns"] = float(fit.get("tau_int_err", np.nan))
     summary["offset"] = float(fit.get("offset", 0.0))
     summary["reduced_chi_squared"] = float(quality.get("reduced_chi_squared", np.nan))
     summary["r_squared"] = float(quality.get("r_squared", np.nan))
@@ -569,6 +574,36 @@ def fit_summary(fit: dict[str, Any]) -> dict[str, Any]:
     if fit.get("lifetime_shift_ns"):
         summary["lifetime_shift_ns"] = float(fit["lifetime_shift_ns"])
     return summary
+
+
+def format_uncertainty(value: float, error: float) -> str:
+    """``"3.42 ± 0.05"``: the error to 1 significant digit (2 if it starts with 1 or 2).
+
+    The value is rounded to the same decimal place; without a finite error
+    it is shown with 4 significant digits.
+    """
+    if not np.isfinite(value):
+        return "–"
+    if not np.isfinite(error) or error <= 0:
+        return f"{value:.4g}"
+    exponent = int(np.floor(np.log10(error)))
+    leading = error / 10.0 ** exponent
+    digits = 2 if leading < 3 else 1
+    decimals = digits - 1 - exponent
+    if round(error, decimals) >= 10.0 ** (exponent + 1):  # e.g. 0.096 -> 0.10
+        decimals -= 1
+    shown = max(decimals, 0)
+    return f"{round(value, decimals):.{shown}f} ± {round(error, decimals):.{shown}f}"
+
+
+def tau_int_text(fit: dict[str, Any]) -> str | None:
+    """``"τ_int = 3.42 ± 0.05 ns"``: intensity-weighted mean lifetime with its error.
+
+    Equal to ``τ1`` (with its error) for one exponential.
+    """
+    if "tau_int" not in fit:
+        return None
+    return f"τ_int = {format_uncertainty(fit['tau_int'], fit.get('tau_int_err', np.nan))} ns"
 
 
 def quality_text(fit: dict[str, Any]) -> str:

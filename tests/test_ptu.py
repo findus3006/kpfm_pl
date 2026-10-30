@@ -681,3 +681,157 @@ def test_lifetime_shift_validation():
         p.set_lifetime_shift(5.0)
     q = PTU(WRAPPED, lifetime_shift="auto")
     assert q.lifetime_shift_ns > 0
+
+
+# ------------------------------------------------- mean arrival time / flid_map
+def _decay_ptu(tau=3.0, n_channels=200, res_ns=0.1, amplitude=1e6, background=0.0,
+               rows=3):
+    """Synthetic PTU with noise-free single-exponential rows (1 s bins)."""
+    edges = np.arange(n_channels + 1) * res_ns
+    row = amplitude * tau * (np.exp(-edges[:-1] / tau) - np.exp(-edges[1:] / tau))
+    matrix = np.round(np.tile(row + background, (rows, 1))).astype(np.uint32)
+    p = _synthetic_ptu(matrix, bintime=1.0, acquisition_time=float(rows))
+    p.lt_time = np.arange(n_channels, dtype=float) * res_ns * 1e-9
+    p.resolution = res_ns * 1e-9
+    # The flat background, expressed as dark counts per second.
+    p.dark_counts = background * n_channels / 1.0
+    return p
+
+
+def test_arrival_time_trace_corrects_truncation():
+    # A 20 ns window cuts off a lot of a 5 ns decay: the raw mean is too short.
+    p = _decay_ptu(tau=5.0)
+    trace = p.arrival_time_trace(bintime=1.0, mode="manual", start=0, min_counts=None)
+    assert trace.meta["window_ns"] == pytest.approx(20.0)
+    expected_raw = 5.0 - 20.0 / np.expm1(20.0 / 5.0)
+    np.testing.assert_allclose(trace.meta["mean_arrival"], expected_raw, rtol=2e-3)
+    np.testing.assert_allclose(trace.y, 5.0, rtol=2e-3)
+    assert trace.meta["method"] == "mean_arrival" and trace.units == {"x": "s", "y": "ns"}
+
+    raw = p.arrival_time_trace(bintime=1.0, mode="manual", start=0, min_counts=None,
+                               truncation_correction=False)
+    np.testing.assert_allclose(raw.y, raw.meta["mean_arrival"])
+
+
+def test_arrival_time_trace_subtracts_dark_counts():
+    p = _decay_ptu(tau=3.0, background=500.0)
+    trace = p.arrival_time_trace(bintime=1.0, mode="manual", start=0, min_counts=None)
+    np.testing.assert_allclose(trace.y, 3.0, rtol=5e-3)
+    # Without the dark-count correction the flat floor pulls the mean upwards.
+    p.dark_counts = 0.0
+    biased = p.arrival_time_trace(bintime=1.0, mode="manual", start=0, min_counts=None)
+    assert np.all(biased.y > 3.2)
+
+
+def test_arrival_time_matches_intensity_weighted_fit_lifetime():
+    # Two components: the mean arrival time is sum(A tau^2) / sum(A tau).
+    n, res = 2000, 0.1
+    edges = np.arange(n + 1) * res
+    row = sum(a * tau * (np.exp(-edges[:-1] / tau) - np.exp(-edges[1:] / tau))
+              for a, tau in ((6e5, 1.0), (4e5, 6.0)))
+    p = _synthetic_ptu(np.round(np.tile(row, (2, 1))).astype(np.uint32), bintime=1.0,
+                       acquisition_time=2.0)
+    p.lt_time = np.arange(n, dtype=float) * res * 1e-9
+    p.resolution = res * 1e-9
+    trace = p.arrival_time_trace(bintime=1.0, mode="manual", start=0, min_counts=None)
+    expected = (0.6 * 1 + 0.4 * 36) / (0.6 * 1 + 0.4 * 6)
+    np.testing.assert_allclose(trace.y, expected, rtol=2e-3)
+
+
+def test_flid_mean_arrival_method_uses_flid_map():
+    from kpfm_pl.ptu import flid_map
+
+    p = _decay_ptu(tau=4.0)
+    kwargs = dict(bintime=1.0, mode="manual", start=0, min_counts=None)
+    image = p.flid(method="mean_arrival", lifetime_bins=10, lifetime_range=(0, 10),
+                   sigma=0, **kwargs)
+    direct = flid_map(p.arrival_time_trace(**kwargs), lifetime_bins=10,
+                      lifetime_range=(0, 10), sigma=0)
+    np.testing.assert_array_equal(image.data, direct.data)
+    assert image.label == "synthetic FLID (mean arrival)"
+    assert image.data[:, 4].sum() == 3  # three bins at tau = 4 ns
+    with pytest.raises(ValueError, match="fitted components"):
+        p.flid(method="mean_arrival", isolated=True, **kwargs)
+    with pytest.raises(ValueError, match="method"):
+        p.flid(method="guess", **kwargs)
+
+
+def test_flid_map_redraws_a_fitted_trace_like_flid(monkeypatch):
+    from kpfm_pl.ptu import flid_map
+
+    p = _flid_ptu(monkeypatch, [2.0, 4.0, 6.0, 2.0, 4.0, 6.0])
+    kwargs = dict(bintime=1.0, mode="manual", start=-1, end=10, min_counts=None)
+    image = p.flid(lifetime_bins=10, intensity_bins=5, sigma=0.5, **kwargs)
+    redrawn = flid_map(p.lifetime_trace(**kwargs), lifetime_bins=10, intensity_bins=5,
+                       sigma=0.5)
+    np.testing.assert_allclose(image.data, redrawn.data)
+    assert image.label == redrawn.label == "synthetic FLID"
+    assert image.meta["lifetime_range"] == redrawn.meta["lifetime_range"]
+    np.testing.assert_allclose(redrawn.meta["bin_lifetimes"], [2.0, 4.0, 6.0])
+    with pytest.raises(ValueError, match="counts"):
+        flid_map(Signal([0.0, 1.0], [1.0, 2.0]))
+
+
+# ------------------------------------------------------------ count check
+def _event_ptu(rate=30.0, duration=20.0, tau=3.0, seed=0):
+    """Synthetic PTU from photon events: ``rate`` photons/s, 10 MHz sync."""
+    rng = np.random.default_rng(seed)
+    n = rng.poisson(rate * duration)
+    times = np.sort(rng.uniform(0, duration, n))
+    rep = 1e-7
+    p = _synthetic_ptu(np.zeros((1, 100), dtype=np.uint32), bintime=-1.0,
+                       acquisition_time=duration)
+    p.rep_time = rep
+    # 100 channels of 0.5 ns: the decay fits well inside the 50 ns window.
+    p.resolution = 5e-10
+    p.lt_time = np.arange(100, dtype=float) * 5e-10
+    dtime = np.minimum((rng.exponential(tau * 1e-9, n) / 5e-10).astype(int), 99)
+    p.events = np.column_stack([np.floor(times / rep), dtime, times]).astype(float)
+    return p
+
+
+def test_count_check_warns_with_suggested_bintime():
+    p = _event_ptu(rate=30.0)
+    with pytest.warns(RuntimeWarning, match=r"at least 5 s"):
+        trace = p.arrival_time_trace(bintime=1.0, mode="manual", start=0)
+    check = trace.meta["count_check"]
+    assert not check["passed"] and check["suggested_bintime"] == 5.0
+    assert check["min_counts"] == 100 and check["coverage"] == 0.9
+    assert trace.meta["bintime"] == 1.0
+
+    # Median coverage and a lower threshold pass; None disables the check.
+    trace = p.arrival_time_trace(bintime=1.0, mode="manual", start=0, min_counts=20,
+                                 coverage=0.5)
+    assert trace.meta["count_check"]["passed"]
+    assert p.arrival_time_trace(bintime=1.0, mode="manual", start=0,
+                                min_counts=None).meta["count_check"] is None
+    with pytest.raises(ValueError, match="coverage"):
+        p.arrival_time_trace(bintime=1.0, coverage=0)
+
+
+def test_auto_bintime_recomputes_and_scales_the_roi_count_range(capsys):
+    p = _event_ptu(rate=30.0, duration=40.0)
+    roi = {"x_min": 0.0, "x_max": 40.0, "y_min": 0.0, "y_max": 1000.0}
+    trace = p.arrival_time_trace(roi=roi, bintime=1.0, mode="manual", start=0,
+                                 auto_bintime=True)
+    assert trace.meta["bintime"] == 5.0
+    assert trace.meta["count_check"]["passed"]
+    assert trace.meta["count_check"]["requested_bintime"] == 1.0
+    assert trace.meta["roi"]["y_max"] == 5000.0 and trace.meta["roi"]["x_max"] == 40.0
+    np.testing.assert_allclose(np.diff(trace.x), 5.0)
+    assert "automatic bin time 5 s" in capsys.readouterr().out
+
+
+def test_auto_bintime_stops_when_the_window_is_too_short():
+    p = _event_ptu(rate=3.0, duration=20.0)
+    with pytest.warns(RuntimeWarning, match="too short"):
+        trace = p.arrival_time_trace(bintime=1.0, mode="manual", start=0,
+                                     auto_bintime=True)
+    assert not trace.meta["count_check"]["passed"]
+
+
+def test_fit_lifetime_returns_intensity_weighted_lifetime(ptu):
+    fit = ptu.fit_lifetime(ptu.lifetime_histogram(), n_exp=2)
+    A, tau = np.asarray(fit["A"]), np.asarray(fit["tau"])
+    assert fit["tau_int"] == pytest.approx(np.sum(A * tau**2) / np.sum(A * tau))
+    assert np.isfinite(fit["tau_int_err"]) and fit["tau_int_err"] > 0

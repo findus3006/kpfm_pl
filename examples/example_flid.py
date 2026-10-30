@@ -64,6 +64,10 @@ for i, roi in enumerate(rois):
         print(f"ROI {i + 1} skipped: {err}")
 if not flids:
     raise SystemExit("None of the ROIs contained photons.")
+# Sanity check without fitting: ptu.flid(..., method="mean_arrival") maps the mean photon arrival
+# time per bin, comparable to the intensity-weighted mean of the fits. ptu.lifetime_trace(roi=roi, ...)
+# followed by k.flid_map(...) redraws a map with other histogram settings without fitting again.
+# flid warns when too few bins hold min_counts=100 photons and suggests a larger bintime.
 
 # Plot the time trace with the ROIs on top and their FLIDs below
 fig = plt.figure(figsize=(16,9), layout="constrained")

@@ -86,7 +86,7 @@ manuals.
 ### PL time traces and lifetimes (`PTU`)
 
 ```python
-from kpfm_pl import PTU
+from kpfm_pl import PTU, flid_map
 
 ptu = PTU("scan.ptu", dark_counts=2.25)
 tt = ptu.time_trace(bintime=0.05)              # Signal: counts per bin vs time (s)
@@ -95,9 +95,12 @@ triggers = ptu.laser_triggers()                # [{"index", "time"}, ...] from t
 states = ptu.threshold(off=0.1, on=0.6)        # {"on": Signal, "off": Signal} lifetime histograms
 fit = ptu.fit_lifetime(states["on"], n_exp=2)  # dict: A, tau (ns), curve, quality, ...
 print(fit["tau"], fit["quality"]["reduced_chi_squared"])  # ≈ 1 for a good fit
+print(fit["tau_int"], fit["tau_int_err"])     # intensity-weighted mean lifetime ± error
 
 lt = ptu.lifetime_trace(bintime=0.5, n_exp=1)  # Signal: fitted lifetime (ns) per time bin
+arrival = ptu.arrival_time_trace(bintime=0.5)  # Signal: lifetime from the mean arrival time (no fit)
 flid = ptu.flid(bintime=0.05, n_exp=1)         # Image: occurrence over lifetime (ns) x counts
+smoother = flid_map(lt, sigma=3)               # redraw a FLID map without fitting again
 # both accept progress=lambda done, total: ... to report (or cancel) the per-bin fits
 # For n_exp > 1 both use the intensity-weighted mean lifetime sum(A τ²) / sum(A τ).
 ```

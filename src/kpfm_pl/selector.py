@@ -35,8 +35,15 @@ class InteractiveBoxSelector:
     box_color, box_alpha :
         Appearance of drawn boxes.
     handle_size :
-        Resize-handle size in data units (auto-scaled when ``None``).
+        Resize-handle half-size in data units of both axes. ``None`` (default)
+        keeps the handles :attr:`HANDLE_POINTS` large on screen whatever the
+        zoom level or axis scales, and lets the whole box edge be grabbed
+        within :attr:`GRAB_POINTS`; the cursor shows what a drag will do.
     """
+
+    #: Half-size of the resize handles and of their grab zone, in points.
+    HANDLE_POINTS = 4.0
+    GRAB_POINTS = 6.0
 
     HANDLE_POSITIONS = [
         ("left", 0.0, 0.5), ("right", 1.0, 0.5),
@@ -68,15 +75,24 @@ class InteractiveBoxSelector:
             self.fig.canvas.mpl_connect("button_release_event", self._on_release),
             self.fig.canvas.mpl_connect("key_press_event", self._on_key),
         ]
-        # Handle size is relative to the x-range, so rescale handles on zoom/pan.
-        self._xlim_cid = ax.callbacks.connect("xlim_changed", lambda _ax: self._redraw_all())
+        self._cursor = None
+        self._scale_key = None
+        # Handles have a fixed size on screen, so their data size changes with
+        # zoom/pan and with the axes size (window resize, layout engine).
+        self._lim_cids = [
+            ax.callbacks.connect("xlim_changed", lambda _ax: self._redraw_all()),
+            ax.callbacks.connect("ylim_changed", lambda _ax: self._redraw_all()),
+        ]
+        self._cids.append(self.fig.canvas.mpl_connect("draw_event", self._on_draw))
 
     # ------------------------------------------------------------------ public
     def disconnect(self) -> None:
         """Detach all event listeners."""
         for cid in self._cids:
             self.fig.canvas.mpl_disconnect(cid)
-        self.ax.callbacks.disconnect(self._xlim_cid)
+        for cid in self._lim_cids:
+            self.ax.callbacks.disconnect(cid)
+        self._set_cursor(None)
 
     def get_boxes(self) -> list[dict]:
         """Return the current boxes as ``{x_min, x_max, y_min, y_max}`` dicts."""
@@ -106,11 +122,19 @@ class InteractiveBoxSelector:
         self._redraw_all()
 
     # ------------------------------------------------------------------ geometry
-    def _handle_size_data(self) -> float:
+    def _points_to_pixels(self, points: float) -> float:
+        return points * self.fig.dpi / 72.0
+
+    def _handle_extent(self, cx: float, cy: float) -> tuple[float, float, float, float]:
+        """Data extent ``(left, right, bottom, top)`` of the handle centred at ``(cx, cy)``."""
         if self._handle_size is not None:
-            return self._handle_size
-        xlim = self.ax.get_xlim()
-        return (xlim[1] - xlim[0]) * 0.005
+            hs = self._handle_size
+            return cx - hs, cx + hs, cy - hs, cy + hs
+        half = self._points_to_pixels(self.HANDLE_POINTS)
+        px, py = self.ax.transData.transform((cx, cy))
+        inv = self.ax.transData.inverted()
+        (x0, y0), (x1, y1) = inv.transform([(px - half, py - half), (px + half, py + half)])
+        return min(x0, x1), max(x0, x1), min(y0, y1), max(y0, y1)
 
     @staticmethod
     def _box_to_coords(b: dict) -> dict:
@@ -126,11 +150,31 @@ class InteractiveBoxSelector:
         return {name: (x0 + fx * w, y0 + fy * h) for name, fx, fy in self.HANDLE_POSITIONS}
 
     def _hit_handle(self, b: dict, x: float, y: float):
-        hs = self._handle_size_data()
-        for name, (cx, cy) in self._handle_centers(b).items():
-            if abs(x - cx) <= hs and abs(y - cy) <= hs:
-                return name
-        return None
+        """Name of the handle (or, with screen-sized handles, the edge) at ``(x, y)``."""
+        if self._handle_size is not None:
+            hs = self._handle_size
+            for name, (cx, cy) in self._handle_centers(b).items():
+                if abs(x - cx) <= hs and abs(y - cy) <= hs:
+                    return name
+            return None
+        # Compare in pixels so the grab zone has the same size on both axes.
+        grab = self._points_to_pixels(self.GRAB_POINTS)
+        to_px = self.ax.transData.transform
+        px, py = to_px((x, y))
+        c = self._box_to_coords(b)
+        (left, bottom), (right, top) = to_px([(c["x_min"], c["y_min"]),
+                                              (c["x_max"], c["y_max"])])
+        left, right = sorted((left, right))
+        bottom, top = sorted((bottom, top))
+        if not (left - grab <= px <= right + grab and bottom - grab <= py <= top + grab):
+            return None
+        horizontal = ("left" if abs(px - left) <= grab
+                      else "right" if abs(px - right) <= grab else "")
+        vertical = ("bottom" if abs(py - bottom) <= grab
+                    else "top" if abs(py - top) <= grab else "")
+        if horizontal and vertical:
+            return f"{vertical}_{horizontal}"
+        return horizontal or vertical or None
 
     @staticmethod
     def _hit_interior(b: dict, x: float, y: float) -> bool:
@@ -159,24 +203,35 @@ class InteractiveBoxSelector:
             rect.set_edgecolor(edge)
             rect.set_linewidth(lw)
 
-        hs = self._handle_size_data()
         for i, (cx, cy) in enumerate(self._handle_centers(b).values()):
+            left, right, bottom, top = self._handle_extent(cx, cy)
             if i >= len(b.get("handles", [])):
-                hp = patches.Rectangle((cx - hs, cy - hs), 2 * hs, 2 * hs, linewidth=1,
+                hp = patches.Rectangle((left, bottom), right - left, top - bottom, linewidth=1,
                                        edgecolor=edge, facecolor="white", alpha=0.9, zorder=5)
                 self.ax.add_patch(hp)
                 b.setdefault("handles", []).append(hp)
             else:
                 hp = b["handles"][i]
-                hp.set_xy((cx - hs, cy - hs))
-                hp.set_width(2 * hs)
-                hp.set_height(2 * hs)
+                hp.set_xy((left, bottom))
+                hp.set_width(right - left)
+                hp.set_height(top - bottom)
                 hp.set_edgecolor(edge)
 
     def _redraw_all(self) -> None:
         for b in self.boxes:
             self._draw_box(b)
+        self._scale_key = self._current_scale()
         self.fig.canvas.draw_idle()
+
+    def _current_scale(self) -> tuple[float, ...]:
+        """Pixel positions of two data points; they change whenever handles need resizing."""
+        return tuple(self.ax.transData.transform([(0.0, 0.0), (1.0, 1.0)]).ravel().round(6))
+
+    def _on_draw(self, _event) -> None:
+        # The axes size can change without new limits (window resize, layout
+        # engine on the first draw): resize the handles once and redraw.
+        if self._handle_size is None and self.boxes and self._current_scale() != self._scale_key:
+            self._redraw_all()
 
     def _remove_box_patches(self, b: dict) -> None:
         if b.get("patch"):
@@ -228,8 +283,41 @@ class InteractiveBoxSelector:
         self.ax.add_patch(self._preview_rect)
         self._redraw_all()
 
+    #: Cursor shown while hovering over an edge, a corner or a box interior.
+    _CURSORS = {"left": "RESIZE_HORIZONTAL", "right": "RESIZE_HORIZONTAL",
+                "bottom": "RESIZE_VERTICAL", "top": "RESIZE_VERTICAL",
+                "corner": "SELECT_REGION", "drag": "MOVE"}
+
+    def _set_cursor(self, kind: str | None) -> None:
+        if kind == self._cursor:
+            return
+        from matplotlib.backend_tools import Cursors
+
+        self._cursor = kind
+        try:
+            self.fig.canvas.set_cursor(getattr(Cursors, self._CURSORS[kind])
+                                       if kind else Cursors.POINTER)
+        except (AttributeError, NotImplementedError, RuntimeError):  # e.g. closed canvas
+            pass
+
+    def _hover(self, event) -> None:
+        kind = None
+        if event.inaxes == self.ax and event.xdata is not None and event.ydata is not None:
+            for b in reversed(self.boxes):
+                handle = self._hit_handle(b, event.xdata, event.ydata)
+                if handle:
+                    kind = "corner" if "_" in handle else handle
+                    break
+                if self._hit_interior(b, event.xdata, event.ydata):
+                    kind = "drag"
+                    break
+        self._set_cursor(kind)
+
     def _on_motion(self, event):
-        if event.inaxes != self.ax or self._mode is None:
+        if self._mode is None:
+            self._hover(event)
+            return
+        if event.inaxes != self.ax:
             return
         if event.xdata is None or event.ydata is None:
             return

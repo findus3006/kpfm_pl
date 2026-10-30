@@ -3,13 +3,22 @@
 Mirrors ``examples/example_flid.py``; used by the *PL lifetime* tab. A region of interest (ROI) is a box
 ``{"x_min", "x_max", "y_min", "y_max"}`` on the time trace (time in s, counts
 per time bin). Because the count range of a box depends on the bin time, the
-FLIDs are always computed with the bin time of the trace the boxes were drawn
-on. All maps share one lifetime and one intensity range, so their bins and
+FLIDs are computed with the bin time of the trace the boxes were drawn on,
+unless the automatic bin time raises it for an ROI with too few photons (its
+count range is then scaled along). All maps share one lifetime range and one
+intensity range (scaled per map with its bin time), so their bins and
 occurrence values can be compared directly.
+
+Computing a FLID has two steps: the slow per-bin lifetimes
+(``PTU.lifetime_trace`` and/or ``PTU.arrival_time_trace``) and the fast map
+(``flid_map``). :func:`compute_flids` does both; :func:`remap_flids` only
+redoes the maps, e.g. after the smoothing or an axis setting changed.
 """
 
 from __future__ import annotations
 
+import dataclasses
+import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -17,9 +26,10 @@ from typing import Any
 import numpy as np
 
 from ...core import Image, Signal
+from ...ptu import flid_map
 from ..export import ExportPayload, build_metadata, describe_meta
 from .files import LoadedFile
-from .ptu import FitOptions, TraceParams, TraceResult, clip_roi, compute_trace
+from .ptu import FitOptions, TraceParams, TraceResult, clip_roi, compute_trace, roi_mask
 
 __all__ = [
     "FlidParams",
@@ -29,13 +39,19 @@ __all__ = [
     "window_roi",
     "scale_rois",
     "compute_flids",
+    "remap_flids",
+    "count_check_text",
     "flid_payload",
     "bin_fits_payload",
 ]
 
-#: What the CSV export of one ROI contains.
-EXPORT_CONTENTS = (("map", "FLID map (2-D histogram)"),
-                   ("bins", "Per-bin fits (time, counts, lifetimes)"))
+#: Per-bin lifetimes the maps can show: fitted, mean arrival time, or both side by side.
+METHODS = (("fit", "Fit (per bin)"), ("mean_arrival", "Mean arrival time (no fit)"),
+           ("both", "Both, side by side"))
+METHOD_NAMES = {"fit": "Fit", "mean_arrival": "Mean arrival"}
+#: :class:`FlidParams` fields that only change the maps, not the per-bin lifetimes.
+MAP_FIELDS = ("lifetime_bins", "intensity_bins", "sigma", "lifetime_min", "lifetime_max",
+              "intensity_max")
 
 
 @dataclass
@@ -44,12 +60,19 @@ class FlidParams:
 
     ``lifetime_max=None`` lets every map span its own data (maps are then not
     directly comparable). ``intensity_max=None`` uses ``(0, trace max + 1)``,
-    shared by all maps.
+    shared by all maps; with the automatic bin time it is scaled per map by
+    its bin time.
 
     ``region`` chooses what is mapped: ``"each"`` (one map per ROI, or the
     :func:`default_roi` fallback without ROIs), ``"window"`` (one map of the
     whole time window of the trace, all count levels) or ``"roi"`` (only the
     ROI with the 0-based index ``roi``).
+
+    ``mode``/``fraction``/``smoothing``/``start``/``end`` are the FLID's own
+    fit window (part of each decay that is fitted or averaged), ``method`` is
+    ``"fit"``, ``"mean_arrival"`` or ``"both"``. ``min_counts`` (0 disables),
+    ``coverage`` and ``auto_bintime`` are the photon-count check of
+    ``PTU.flid``.
     """
 
     n_exp: int = 1
@@ -67,6 +90,11 @@ class FlidParams:
     end: float | None = None
     region: str = "each"
     roi: int = 0
+    method: str = "fit"
+    truncation_correction: bool = True
+    min_counts: float = 100.0
+    coverage: float = 0.9
+    auto_bintime: bool = False
 
     def lifetime_range(self) -> tuple[float, float] | None:
         if self.lifetime_max is None:
@@ -83,23 +111,61 @@ class FlidParams:
         return {"mode": self.mode, "fraction": self.fraction, "smoothing": self.smoothing,
                 "start": self.start, "end": self.end}
 
+    def methods(self) -> list[str]:
+        """The per-bin lifetimes to compute, in display order."""
+        if self.method == "both":
+            return ["fit", "mean_arrival"]
+        if self.method not in ("fit", "mean_arrival"):
+            raise ValueError(f"Unknown FLID method {self.method!r}.")
+        return [self.method]
+
+    def same_lifetimes(self, other: FlidParams) -> bool:
+        """``True`` when ``other`` only differs in map settings (:data:`MAP_FIELDS`)."""
+        mine = {k: v for k, v in asdict(self).items() if k not in MAP_FIELDS}
+        theirs = {k: v for k, v in asdict(other).items() if k not in MAP_FIELDS}
+        return mine == theirs
+
 
 @dataclass
 class FlidEntry:
-    """The FLID of one ROI; ``index`` is the ROI's position in the input list."""
+    """The FLID(s) of one ROI; ``index`` is the ROI's position in the input list.
+
+    ``traces`` holds the per-bin lifetimes (``"fit"`` and/or
+    ``"mean_arrival"``) and ``images`` the maps built from them. ``roi`` is the
+    box at the trace's bin time; ``bintime`` is the bin time actually used.
+    """
 
     index: int
     roi: dict[str, float]
-    image: Image
+    traces: dict[str, Signal]
+    images: dict[str, Image] = field(default_factory=dict)
+
+    @property
+    def methods(self) -> list[str]:
+        return list(self.traces)
+
+    @property
+    def image(self) -> Image:
+        """The first map (the fitted one when both were computed)."""
+        return next(iter(self.images.values()))
+
+    @property
+    def bintime(self) -> float:
+        return float(next(iter(self.traces.values())).meta["bintime"])
+
+    @property
+    def count_check(self) -> dict[str, Any] | None:
+        return next(iter(self.traces.values())).meta.get("count_check")
 
     @property
     def n_fitted(self) -> int:
-        taus = np.asarray(self.image.meta.get("taus", np.empty((0, 1))))
-        return int(np.count_nonzero(np.all(np.isfinite(taus), axis=1))) if taus.size else 0
+        """Time bins with a lifetime in the first map."""
+        values = np.asarray(next(iter(self.traces.values())).y, dtype=float)
+        return int(np.count_nonzero(np.isfinite(values)))
 
     @property
     def n_bins(self) -> int:
-        return int(len(self.image.meta.get("time", ())))
+        return int(len(next(iter(self.traces.values()))))
 
 
 @dataclass
@@ -122,6 +188,11 @@ class FlidResult:
         if self.fallback:
             return "Fallback window"
         return f"ROI {entry.index + 1}"
+
+    def entry_intensity_range(self, entry: FlidEntry) -> tuple[float, float]:
+        """The shared counts range, scaled to the bin time of ``entry``."""
+        factor = entry.bintime / self.trace.params.bintime
+        return self.intensity_range[0] * factor, self.intensity_range[1] * factor
 
 
 def window_roi(trace: TraceResult) -> dict[str, float]:
@@ -157,6 +228,57 @@ def scale_rois(rois: Sequence[dict[str, float]], factor: float) -> list[dict[str
             for roi in rois]
 
 
+def count_check_text(check: dict[str, Any] | None) -> str | None:
+    """Advice for a failed photon-count check (``None`` if passed or disabled)."""
+    if not check or check.get("passed"):
+        return None
+    return (f"only {check['fraction']:.0%} of the time bins of {check['bintime']:g} s "
+            f"reach {check['min_counts']:g} photons ({check['coverage']:.0%} required); "
+            f"use a bin time of at least {check['suggested_bintime']:g} s or the "
+            "automatic bin time.")
+
+
+class _Progress:
+    """Overall ``progress(done, total)`` in time bins over several backend calls.
+
+    Each call starts with an estimate of its bins, replaced by the true number
+    as soon as the backend reports it (it differs with the automatic bin time).
+    """
+
+    def __init__(self, progress: Callable[[int, int], Any] | None,
+                 estimates: Sequence[int]) -> None:
+        self.progress = progress
+        self.done = [0] * len(estimates)
+        self.totals = [max(int(n), 1) for n in estimates]
+
+    def part(self, k: int) -> Callable[[int, int], None]:
+        def report(done: int, total: int) -> None:
+            self.done[k], self.totals[k] = int(done), max(int(total), 1)
+            self.emit()
+        return report
+
+    def finish(self, k: int) -> None:
+        self.done[k] = self.totals[k]
+        self.emit()
+
+    def emit(self) -> None:
+        if self.progress is not None:
+            self.progress(sum(self.done), sum(self.totals))
+
+
+def _selected_bins(trace: TraceResult, roi: dict[str, float]) -> int:
+    return int(np.count_nonzero(roi_mask(trace.signal, [roi])))
+
+
+def _build_maps(entry: FlidEntry, result: FlidResult) -> None:
+    params = result.params
+    for method, signal in entry.traces.items():
+        entry.images[method] = flid_map(
+            signal, lifetime_bins=params.lifetime_bins, intensity_bins=params.intensity_bins,
+            lifetime_range=result.lifetime_range,
+            intensity_range=result.entry_intensity_range(entry), sigma=params.sigma)
+
+
 def compute_flids(handle: LoadedFile, trace_params: TraceParams, params: FlidParams,
                   rois: Sequence[dict[str, float]],
                   progress: Callable[[int, int], Any] | None = None,
@@ -168,11 +290,15 @@ def compute_flids(handle: LoadedFile, trace_params: TraceParams, params: FlidPar
     whole trace window. ``"roi"``: one FLID of ``rois[params.roi]``; entry
     indices are always positions in ``rois``. ROIs are limited to the time window of the trace. ROIs that
     contain no photons are reported in ``result.skipped`` instead of raising.
-    ``progress(done, total)`` reports the overall progress across all ROIs;
-    an exception raised by it (e.g. a cancellation) aborts the computation.
-    ``options`` are the advanced fit settings of the per-bin fits.
+    ``progress(done, total)`` reports the overall progress in time bins across
+    all ROIs and methods; an exception raised by it (e.g. a cancellation)
+    aborts the computation. ``options`` are the advanced fit settings of the
+    per-bin fits. A failed photon-count check is not warned about by the
+    backend; :func:`count_check_text` of ``entry.count_check`` gives the
+    advice per ROI.
     """
     lifetime_range = params.lifetime_range()
+    methods = params.methods()
     options = options or FitOptions()
     options.validate()
     fit_kwargs = options.fit_kwargs(params.n_exp)
@@ -194,37 +320,65 @@ def compute_flids(handle: LoadedFile, trace_params: TraceParams, params: FlidPar
         else:
             raise ValueError(f"Unknown FLID region {params.region!r}.")
 
-        # Per-ROI totals are only known once fitting starts, so each ROI gets
-        # an equal share of a fixed overall scale.
-        scale = 1000
-        total = scale * len(selected)
-
-        entries, skipped = [], []
+        ptu = handle.reader
+        common = {"bintime": trace_params.bintime, "min_counts": params.min_counts or None,
+                  "coverage": params.coverage, "auto_bintime": params.auto_bintime,
+                  "laser_pulse": trace_params.laser_pulse, **params.window_kwargs()}
+        tracker = _Progress(progress, [_selected_bins(trace, roi)
+                                       for _, roi in selected for _ in methods])
+        result = FlidResult([], [], trace, params, lifetime_range, intensity_range,
+                            str(handle.path), fallback, options=options)
         for k, (i, roi) in enumerate(selected):
-            def _sub(done: int, n: int, _k: int = k) -> None:
-                if progress is not None:
-                    progress(_k * scale + int(scale * done / max(n, 1)), total)
-
+            parts = range(k * len(methods), (k + 1) * len(methods))
+            traces: dict[str, Signal] = {}
             try:
-                image = handle.reader.flid(
-                    roi=roi, bintime=trace_params.bintime, n_exp=params.n_exp,
-                    bins=params.bins, lifetime_bins=params.lifetime_bins,
-                    intensity_bins=params.intensity_bins, lifetime_range=lifetime_range,
-                    intensity_range=intensity_range, sigma=params.sigma,
-                    progress=_sub, **params.window_kwargs(), **fit_kwargs,
-                )
+                # The tab reports the count check per ROI (count_check_text).
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", message=r".* photons \(",
+                                            category=RuntimeWarning)
+                    for part, method in zip(parts, methods):
+                        if method == "fit":
+                            traces[method] = ptu.lifetime_trace(
+                                roi=roi, n_exp=params.n_exp, bins=params.bins,
+                                progress=tracker.part(part), **common, **fit_kwargs)
+                        else:
+                            traces[method] = ptu.arrival_time_trace(
+                                roi=roi, truncation_correction=params.truncation_correction,
+                                progress=tracker.part(part), **common)
+                        tracker.finish(part)
             except ValueError as exc:  # e.g. a box containing no photons
-                skipped.append((i, roi, str(exc)))
+                result.skipped.append((i, roi, str(exc)))
+                for part in parts:
+                    tracker.finish(part)
                 continue
-            entries.append(FlidEntry(i, roi, image))
-        if progress is not None:
-            progress(total, total)
-    return FlidResult(entries, skipped, trace, params, lifetime_range, intensity_range,
-                      str(handle.path), fallback, options=options)
+            entry = FlidEntry(i, roi, traces)
+            _build_maps(entry, result)
+            result.entries.append(entry)
+        tracker.emit()
+    return result
+
+
+def remap_flids(result: FlidResult, params: FlidParams) -> FlidResult:
+    """``result`` with its maps rebuilt for the map settings of ``params``.
+
+    Only :data:`MAP_FIELDS` may differ from ``result.params``; the per-bin
+    lifetimes are reused, so nothing is fitted again.
+    """
+    if not params.same_lifetimes(result.params):
+        raise ValueError("Only the map settings may change without recomputing the FLIDs.")
+    lifetime_range = params.lifetime_range()
+    new = dataclasses.replace(
+        result, params=params, lifetime_range=lifetime_range,
+        intensity_range=params.intensity_range(result.trace.signal),
+        entries=[FlidEntry(e.index, e.roi, e.traces) for e in result.entries])
+    for entry in new.entries:
+        _build_maps(entry, new)
+    return new
 
 
 # ------------------------------------------------------------------ export
 def _metadata(result: FlidResult, entry: FlidEntry, analysis: str) -> dict[str, Any]:
+    image = entry.image
     return build_metadata(
         analysis, sources=[result.source],
         parameters={"time_trace": asdict(result.trace.params),
@@ -235,35 +389,56 @@ def _metadata(result: FlidResult, entry: FlidEntry, analysis: str) -> dict[str, 
                                 else entry.index + 1),
                  "roi": entry.roi,
                  "roi_is_fallback": result.fallback,
+                 "bintime_s": entry.bintime,
+                 "count_check": entry.count_check,
                  "time_bins_in_roi": entry.n_bins,
                  "time_bins_fitted": entry.n_fitted,
-                 "lifetime_range_ns": entry.image.meta.get("lifetime_range"),
-                 "intensity_range_counts": entry.image.meta.get("intensity_range")},
+                 "lifetime_range_ns": image.meta.get("lifetime_range"),
+                 "intensity_range_counts": image.meta.get("intensity_range")},
     )
 
 
-def flid_payload(result: FlidResult, entry: FlidEntry) -> ExportPayload:
-    """The FLID map of ``entry`` with its ROI and parameters."""
+def _stem(result: FlidResult) -> str:
+    return result.trace.signal.label.replace(" time trace", "").replace(" ", "_")
+
+
+def flid_payload(result: FlidResult, entry: FlidEntry,
+                 method: str | None = None) -> ExportPayload:
+    """The FLID map of ``entry`` (``method``: its first map by default)."""
+    method = method or entry.methods[0]
     meta = _metadata(result, entry, "FLID map")
-    meta["note"] = ("Rows: counts per time bin (bin centres); columns: fitted lifetime "
-                    "in ns (bin centres); values: occurrence (smoothed).")
-    stem = result.trace.signal.label.replace(" time trace", "").replace(" ", "_")
-    return ExportPayload(meta, image=entry.image, default_name=f"{stem}_FLID_ROI{entry.index + 1}")
+    meta["results"]["method"] = method
+    meta["note"] = ("Rows: counts per time bin (bin centres); columns: "
+                    + ("mean-arrival lifetime" if method == "mean_arrival" else "fitted lifetime")
+                    + " in ns (bin centres); values: occurrence (smoothed).")
+    suffix = "_mean_arrival" if method == "mean_arrival" else ""
+    return ExportPayload(meta, image=entry.images[method],
+                         default_name=f"{_stem(result)}_FLID_ROI{entry.index + 1}{suffix}")
 
 
 def bin_fits_payload(result: FlidResult, entry: FlidEntry) -> ExportPayload:
-    """Per-time-bin fit results behind the FLID map of ``entry``."""
-    m = entry.image.meta
-    time = np.asarray(m["time"], dtype=float)
-    taus = np.asarray(m["taus"], dtype=float)
-    amps = np.asarray(m["amplitudes"], dtype=float)
-    columns = [Signal(time, np.asarray(m["counts"], dtype=float), label="counts",
+    """Per-time-bin results behind the FLID map(s) of ``entry``."""
+    first = next(iter(entry.traces.values()))
+    time = np.asarray(first.x, dtype=float)
+    columns = [Signal(time, np.asarray(first.meta["counts"], dtype=float), label="counts",
                       units={"x": "s", "y": "counts per bin"})]
-    for i in range(taus.shape[1]):
-        columns.append(Signal(time, taus[:, i], label=f"tau{i + 1}", units={"x": "s", "y": "ns"}))
-        columns.append(Signal(time, amps[:, i], label=f"A{i + 1}", units={"x": "s", "y": ""}))
+    if "fit" in entry.traces:
+        m = entry.traces["fit"].meta
+        taus = np.asarray(m["taus"], dtype=float)
+        amps = np.asarray(m["amplitudes"], dtype=float)
+        if taus.shape[1] > 1:
+            columns.append(Signal(time, np.asarray(entry.traces["fit"].y, dtype=float),
+                                  label="tau_int", units={"x": "s", "y": "ns"}))
+        for i in range(taus.shape[1]):
+            columns.append(Signal(time, taus[:, i], label=f"tau{i + 1}", units={"x": "s", "y": "ns"}))
+            columns.append(Signal(time, amps[:, i], label=f"A{i + 1}", units={"x": "s", "y": ""}))
+    if "mean_arrival" in entry.traces:
+        arrival = entry.traces["mean_arrival"]
+        columns.append(Signal(time, np.asarray(arrival.y, dtype=float),
+                              label="tau_mean_arrival", units={"x": "s", "y": "ns"}))
+        columns.append(Signal(time, np.asarray(arrival.meta["mean_arrival"], dtype=float),
+                              label="mean_arrival_uncorrected", units={"x": "s", "y": "ns"}))
     meta = _metadata(result, entry, "FLID per-bin fits")
-    meta["image_meta"] = describe_meta(m)
+    meta["image_meta"] = describe_meta(entry.image.meta)
     meta["note"] = "Empty cells: time bins outside the ROI count range, empty, or failed fits."
-    stem = result.trace.signal.label.replace(" time trace", "").replace(" ", "_")
-    return ExportPayload(meta, columns, default_name=f"{stem}_FLID_ROI{entry.index + 1}_bins")
+    return ExportPayload(meta, columns, default_name=f"{_stem(result)}_FLID_ROI{entry.index + 1}_bins")

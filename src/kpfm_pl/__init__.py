@@ -42,7 +42,7 @@ from .fitting import (
 from .io import pick_files, pick_folder, sort_measurement_files
 from .jpk import JPK
 from .match import Match
-from .ptu import PTU
+from .ptu import PTU, flid_map
 from .utils import (
     TriggerPoint,
     bin_average,
@@ -51,6 +51,7 @@ from .utils import (
     feature_scale,
     fit_window_mask,
     inflection_left_bound,
+    lifetime_from_truncated_mean,
     left_bound_fraction,
     linear_line_level,
     nearest_index,
@@ -66,6 +67,7 @@ __all__ = [
     "Signal",
     "Image",
     "PTU",
+    "flid_map",
     "Zurich",
     "JPK",
     "Match",
@@ -83,6 +85,7 @@ __all__ = [
     "left_bound_fraction",
     "inflection_left_bound",
     "fit_window_mask",
+    "lifetime_from_truncated_mean",
     "linear_line_level",
     "set_zero",
     "downsample_sum",

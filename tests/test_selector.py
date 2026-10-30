@@ -73,18 +73,79 @@ def test_set_boxes_restores_editable_boxes_and_clears():
     assert selector.get_boxes() == [] and not ax.patches
 
 
-def test_box_handles_rescale_with_zoom():
-    ax = _image_axes()
+def _trace_axes():
+    """A long time trace: very different x (s) and y (counts) data ranges."""
+    fig, ax = plt.subplots()
+    ax.plot([0, 3000], [0, 20000])
+    ax.set_xlim(0, 3000)
+    ax.set_ylim(0, 20000)
+    fig.canvas.draw()
+    return ax
+
+
+def _pixel_size(ax, patch):
+    (x0, y0), (x1, y1) = ax.transData.transform(
+        [patch.get_xy(), (patch.get_x() + patch.get_width(), patch.get_y() + patch.get_height())])
+    return abs(x1 - x0), abs(y1 - y0)
+
+
+def test_box_handles_keep_their_screen_size_on_zoom():
+    ax = _trace_axes()
     selector = InteractiveBoxSelector(ax)
-    _drag(ax, (20, 20), (60, 60), button=1)
-    width = selector.boxes[0]["handles"][0].get_width()
-    x0, x1 = ax.get_xlim()
-    ax.set_xlim(x0 / 2, x1 / 2)
-    assert selector.boxes[0]["handles"][0].get_width() == pytest.approx(width / 2)
+    selector.set_boxes([{"x_min": 1000, "x_max": 2000, "y_min": 5000, "y_max": 15000}])
+    handle = selector.boxes[0]["handles"][0]
+    expected = 2 * InteractiveBoxSelector.HANDLE_POINTS * ax.figure.dpi / 72
+    # Square on screen although x and y have very different data ranges.
+    assert _pixel_size(ax, handle) == pytest.approx((expected, expected))
+
+    width, height = handle.get_width(), handle.get_height()
+    ax.set_xlim(1000, 2500)
+    assert handle.get_width() == pytest.approx(width / 2)
+    ax.set_ylim(5000, 10000)
+    assert handle.get_height() == pytest.approx(height / 4)
+    assert _pixel_size(ax, handle) == pytest.approx((expected, expected))
 
     selector.disconnect()
-    ax.set_xlim(x0, x1)
-    assert selector.boxes[0]["handles"][0].get_width() == pytest.approx(width / 2)
+    ax.set_xlim(0, 3000)
+    assert handle.get_width() == pytest.approx(width / 2)
+
+
+def test_box_edges_resize_and_set_the_cursor(monkeypatch):
+    from matplotlib.backend_tools import Cursors
+
+    ax = _trace_axes()
+    selector = InteractiveBoxSelector(ax)
+    selector.set_boxes([{"x_min": 1000, "x_max": 2000, "y_min": 5000, "y_max": 15000}])
+    cursors = []
+    monkeypatch.setattr(ax.figure.canvas, "set_cursor", cursors.append)
+
+    # Hovering over the right edge (away from its handle) shows a resize cursor.
+    _mouse(ax, "motion_notify_event", 2000, 7000)
+    assert cursors[-1] == Cursors.RESIZE_HORIZONTAL
+    _mouse(ax, "motion_notify_event", 1500, 10000)
+    assert cursors[-1] == Cursors.MOVE
+    _mouse(ax, "motion_notify_event", 500, 10000)
+    assert cursors[-1] == Cursors.POINTER
+
+    # Dragging that edge resizes the box instead of moving it.
+    _drag(ax, (2000, 7000), (2500, 7000), button=1)
+    box = selector.get_boxes()[0]
+    assert box["x_min"] == pytest.approx(1000) and box["x_max"] == pytest.approx(2500)
+    assert (box["y_min"], box["y_max"]) == pytest.approx((5000, 15000))
+
+    # The top edge resizes vertically only.
+    _drag(ax, (1200, 15000), (1200, 18000), button=1)
+    box = selector.get_boxes()[0]
+    assert box["y_max"] == pytest.approx(18000) and box["x_max"] == pytest.approx(2500)
+
+
+def test_explicit_handle_size_stays_in_data_units():
+    ax = _trace_axes()
+    selector = InteractiveBoxSelector(ax, handle_size=10.0)
+    selector.set_boxes([{"x_min": 1000, "x_max": 2000, "y_min": 5000, "y_max": 15000}])
+    handle = selector.boxes[0]["handles"][0]
+    ax.set_xlim(1000, 1500)
+    assert (handle.get_width(), handle.get_height()) == pytest.approx((20.0, 20.0))
 
 
 def test_draggable_circle_only_reacts_to_left_button():

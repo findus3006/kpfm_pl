@@ -139,7 +139,7 @@ rois = selector.get_boxes()   # [{"x_min", "x_max", "y_min", "y_max"}, ...]
 |-------|--------|
 | Left-drag on empty area | draw a new box |
 | Left-drag inside a box | move it |
-| Left-drag an edge/corner handle | resize it |
+| Left-drag an edge, a corner or a handle | resize it |
 | Right-click | deselect the active box |
 | `Delete` | remove the active (red) box |
 | `Enter` | call `on_save(boxes)` if given |
@@ -148,7 +148,7 @@ rois = selector.get_boxes()   # [{"x_min", "x_max", "y_min", "y_max"}, ...]
 |-----------|---------|---------|
 | `on_save` | `None` | callback receiving the box list when `Enter` is pressed |
 | `box_color`, `box_alpha` | `"royalblue"`, `0.25` | box appearance |
-| `handle_size` | `None` | handle half-width in data units; `None` = 0.5 % of the visible x-range (updated when you zoom) |
+| `handle_size` | `None` | handle half-width in data units of both axes; `None` = handles of a fixed size on screen (`HANDLE_POINTS`, kept when you zoom, pan or resize) and the whole box edge can be grabbed within `GRAB_POINTS`; the cursor shows the action (resize horizontally/vertically, corner, move) |
 
 `get_boxes()` returns plain dicts ordered by drawing order, with `x_min <
 x_max` and `y_min < y_max`. `set_boxes(boxes)` replaces all boxes with dicts in

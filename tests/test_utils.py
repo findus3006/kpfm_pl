@@ -242,3 +242,15 @@ def test_downsample_sum_drops_trailing_partial_blocks():
     out = downsample_sum(image, 2, 2)
     assert out.shape == (2, 2)
     assert np.all(out == 4.0)
+
+
+def test_lifetime_from_truncated_mean_inverts_the_truncated_mean():
+    from kpfm_pl.utils import lifetime_from_truncated_mean
+
+    window = 50.0
+    taus = np.array([0.5, 2.0, 10.0, 20.0, 200.0])
+    means = taus - window / np.expm1(window / taus)
+    np.testing.assert_allclose(lifetime_from_truncated_mean(means, window), taus, rtol=1e-9)
+    # A mean at or above T/2 (flat background) or <= 0 has no exponential lifetime.
+    assert np.isnan(lifetime_from_truncated_mean(np.array([0.0, 25.0, 30.0, np.nan]), window)).all()
+    assert isinstance(lifetime_from_truncated_mean(3.0, window), float)
