@@ -160,11 +160,13 @@ def test_advanced_fit_settings_dialog_round_trip(window, qtbot, tab):
     options = model.FitOptions()
     options.tau_min[0], options.tau_max[0] = 2.0, 2.5
     options.weighting = "poisson"
+    options.constrain_sum_A = True
     dialog = FitOptionsDialog(options)
     qtbot.addWidget(dialog)
     back = dialog.options()
     assert back.tau_min[0] == 2.0 and back.tau_max[0] == 2.5 and back.tau_min[1] is None
-    assert back.weighting == "poisson"
+    assert back.weighting == "poisson" and back.constrain_sum_A
+    assert "sum(A)" in describe_options(back)
     # an invalid entry keeps the dialog open with a message
     dialog.cells[("tau_max", 0)].set_value(1.0)
     dialog._accept()

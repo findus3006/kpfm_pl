@@ -227,8 +227,10 @@ def test_roi_lifetime_trace_uses_trace_bin_time(handle):
 
 # -------------------------------------------------------------- fit options
 def test_default_fit_options_change_nothing():
-    options = model.FitOptions()
-    assert options.is_default() and options.fit_kwargs(2, 1000.0) == {}
+    # The GUI default is Poisson weighting; without it nothing is overridden.
+    assert model.FitOptions().fit_kwargs(2, 1000.0) == {"weighting": "poisson"}
+    plain = model.FitOptions(weighting="none")
+    assert plain.is_default() and plain.fit_kwargs(2, 1000.0) == {}
 
 
 def test_fit_options_build_scaled_bounds_and_guesses():
@@ -257,6 +259,37 @@ def test_fit_options_validation():
     options.amp_guess[1], options.amp_max[1] = 2.0, 1.0
     with pytest.raises(ValueError, match="A2"):
         options.validate()
+    # with sum(A) <= 1 the implicit amplitude bound is 1
+    options = model.FitOptions()
+    options.constrain_sum_A = True
+    options.amp_guess[0] = 1.5
+    with pytest.raises(ValueError, match="A1"):
+        options.validate()
+
+
+def test_fit_options_constrain_sum_only_for_normalised_data():
+    options = model.FitOptions()
+    options.constrain_sum_A = True
+    assert options.fit_kwargs(2)["constrain_sum_A"] is True
+    # Raw counts: the constraint would cap the amplitude at 1 count.
+    assert "constrain_sum_A" not in options.fit_kwargs(2, amplitude_scale=1000.0)
+    # Unset amplitude bounds follow the constraint instead of being unbounded.
+    options.tau_min[0] = 1.0
+    lower, upper = options.fit_kwargs(2)["bounds"]
+    np.testing.assert_allclose(lower, [0.0, 0.0, 1.0, 1e-10])
+    np.testing.assert_allclose(upper, [1.0, 1.0, np.inf, np.inf])
+    # An explicit amplitude bound is kept.
+    options.amp_max[1] = 0.8
+    assert options.fit_kwargs(2)["bounds"][1][1] == 0.8
+
+
+def test_fit_options_constrain_sum_applies_to_normalised_fit(handle):
+    options = model.FitOptions()
+    options.constrain_sum_A = True
+    result = model.compute_fit(handle, model.TraceParams(bintime=1.0),
+                               model.FitParams(n_exp=2, normalize=True),
+                               model.StateParams(), options=options)
+    assert np.sum(result.fit["A"]) <= 1.0 + 1e-3
 
 
 def test_fit_respects_lifetime_bounds(handle):

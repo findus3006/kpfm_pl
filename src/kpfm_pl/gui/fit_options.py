@@ -53,6 +53,8 @@ def describe_options(options: FitOptions) -> str:
         parts.append(f"{options.weighting} weighting")
     if options.loss != "linear":
         parts.append(f"{options.loss} loss (scale {options.f_scale:g})")
+    if options.constrain_sum_A:
+        parts.append("sum(A) ≤ 1 (normalised fits)")
     return ", ".join(parts) if parts else "defaults"
 
 
@@ -104,6 +106,12 @@ class FitOptionsDialog(QDialog):
                     tooltip="Residual size where a robust loss starts to down-weight "
                             "points: in Poisson standard deviations with Poisson "
                             "weighting, otherwise as a fraction of the histogram peak.")
+        f.add_bool("constrain_sum_A", "Constraint", False, text="sum(A) ≤ 1",
+                   tooltip="Keep the amplitudes of all components below one peak in total, "
+                           "so they stay fractions of the decay. Applied only to "
+                           "normalised fits: the lifetime trace and FLID per-bin fits, "
+                           "and the lifetime fit with 'Normalise' ticked. Raw-count fits "
+                           "ignore it (their amplitudes are counts).")
         f.changed.connect(self._update_fields)
         layout.addWidget(f)
 
@@ -130,7 +138,8 @@ class FitOptionsDialog(QDialog):
         for (attr, i), cell in self.cells.items():
             cell.set_value(getattr(options, attr)[i])
         self.form.set_values({"weighting": options.weighting, "loss": options.loss,
-                              "f_scale": options.f_scale})
+                              "f_scale": options.f_scale,
+                              "constrain_sum_A": options.constrain_sum_A})
         self._update_fields()
 
     def options(self) -> FitOptions:

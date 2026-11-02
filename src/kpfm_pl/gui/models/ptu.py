@@ -141,6 +141,12 @@ class FitOptions:
     (``scipy.optimize.least_squares``). ``f_scale`` is the residual size where
     a robust loss starts to down-weight outliers: in Poisson standard
     deviations with Poisson weighting, otherwise as a fraction of the peak.
+
+    ``constrain_sum_A`` enforces ``sum(A) <= 1``. It is only applied to
+    normalised fits (``amplitude_scale == 1``), where the amplitudes are
+    fractions of the peak: the per-bin lifetime-trace/FLID fits, or the
+    lifetime fit with *Normalise*. Raw-count fits ignore it because their
+    amplitudes are counts, not fractions.
     """
 
     tau_guess: list[float | None] = field(default_factory=_components)
@@ -149,9 +155,10 @@ class FitOptions:
     amp_guess: list[float | None] = field(default_factory=_components)
     amp_min: list[float | None] = field(default_factory=_components)
     amp_max: list[float | None] = field(default_factory=_components)
-    weighting: str = "none"
+    weighting: str = "poisson"
     loss: str = "linear"
     f_scale: float = 1.0
+    constrain_sum_A: bool = False
 
     def is_default(self) -> bool:
         return not self.fit_kwargs(MAX_COMPONENTS)
@@ -162,6 +169,8 @@ class FitOptions:
                                     ("A", self.amp_guess, self.amp_min, self.amp_max)):
             for i in range(MAX_COMPONENTS):
                 g, a, b = guess[i], lo[i], hi[i]
+                if name == "A" and b is None and self.constrain_sum_A:
+                    b = 1.0  # effective upper bound of the sum(A) constraint
                 if a is not None and b is not None and a >= b:
                     raise ValueError(f"{name}{i + 1}: the minimum must be smaller than "
                                      "the maximum.")
@@ -177,9 +186,14 @@ class FitOptions:
         Only settings that differ from the defaults are returned, so default
         options reproduce the plain backend call. ``amplitude_scale`` is the
         histogram peak in the units of the fitted data (1 for normalised fits).
+
+        ``constrain_sum_A`` only enters the kwargs when ``amplitude_scale`` is
+        1: on raw counts the amplitudes are not fractions of the peak, so the
+        constraint would cap them at 1 count and ruin the fit.
         """
         n = int(n_exp)
         scale = float(amplitude_scale)
+        constrained = bool(self.constrain_sum_A) and scale == 1.0
 
         def scaled(values, factor, default):
             return [default if v is None else float(v) * factor for v in values[:n]]
@@ -188,7 +202,8 @@ class FitOptions:
         if any(v is not None for v in (*self.amp_min[:n], *self.amp_max[:n],
                                        *self.tau_min[:n], *self.tau_max[:n])):
             lower = scaled(self.amp_min, scale, 0.0) + scaled(self.tau_min, 1.0, 1e-10)
-            upper = scaled(self.amp_max, scale, np.inf) + scaled(self.tau_max, 1.0, np.inf)
+            upper = scaled(self.amp_max, scale,
+                           1.0 if constrained else np.inf) + scaled(self.tau_max, 1.0, np.inf)
             kwargs["bounds"] = (np.array(lower), np.array(upper))
         if any(v is not None for v in (*self.amp_guess[:n], *self.tau_guess[:n])):
             # NaN entries are filled with MultiExpFit's automatic guess.
@@ -200,6 +215,8 @@ class FitOptions:
             kwargs["loss"] = self.loss
             kwargs["f_scale"] = float(self.f_scale) * (1.0 if self.weighting == "poisson"
                                                        else scale)
+        if constrained:
+            kwargs["constrain_sum_A"] = True
         return kwargs
 
 

@@ -114,6 +114,12 @@ title on the left to fold it away.
      are used, unticked ones are automatic. The settings apply to the
      lifetime fit, the lifetime trace and the FLID fits; the line under the
      button summarises them.
+   - **Constraint** (*sum(A) ≤ 1*): caps the total amplitude at one peak, so
+     the components stay fractions of the decay. It is only applied to
+     normalised fits — the lifetime trace and FLID per-bin fits (always
+     normalised) and the lifetime fit with *Normalise* ticked. Raw-count
+     fits ignore it, because there the amplitudes are counts and the
+     constraint would cap them at 1 count.
 5. **Lifetime trace**: fits every time bin separately and plots the mean
    lifetime against time (grey: counts). It uses the fit window of
    *Lifetime fit*. *Region* restricts it to one ROI
