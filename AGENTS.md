@@ -48,7 +48,8 @@ src/kpfm_pl/
         logcapture.py   print()/warnings -> log panel
         models/         Qt-free workflow logic, one module per tab
         tabs/           one widget per workflow (ptu = PL lifetime incl. ROIs/FLID,
-                        correlate, jpk, database); rois.py = RoiEditor
+                        correlate, jpk, jpk_shift = drift between up to 4 scans,
+                        database); rois.py = RoiEditor
 src/examples/       runnable scripts + a `Test data/` folder of sample files
 tests/              pytest suite
 docs/               per-module manuals (ptu, zurich, jpk, match, database, plotting, gui)
@@ -173,6 +174,7 @@ docs/               per-module manuals (ptu, zurich, jpk, match, database, plott
 - Always ask the user for approval if a backend change is necessary. 
 - You have free reign over the frontend, as long as the requested features and changes are implemented.
 - Read Changes.md to see what needs doing and update it afterwards.
+- Update the version when changes are made. Increment version number in a reasonable manner.
 
 ## Scope & safety
 - Do not create scratch files, notebooks or scripts in the repo root. Keep the

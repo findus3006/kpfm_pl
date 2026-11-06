@@ -52,16 +52,18 @@ class JPKTab(BaseTab):
             "colormap and colorbar unit.\n"
             "3. Draw a circle on one channel (left-drag on the image; drag inside to "
             "move, right-click to delete). The statistics inside it are listed for "
-            "every channel.\nHover over a field for an explanation."
+            "every channel.\n4. 'Export data (CSV)' writes every plotted channel to "
+            "its own file (<name>_<channel>.csv).\nHover over a field for an "
+            "explanation."
         )
         self._build_file_group()
         self._build_channel_group()
         self._build_display_group()
         self._build_circle_group()
-        self._build_export_group()
 
         self.plot = PlotPanel(ctx, navigation="minimal", figsize=(10, 6))
-        self.plot.set_export_provider(self._export_payload)
+        self.plot.set_export_provider(self._export_payloads)
+        self.plot.set_figure_provider(self._figure_info)
         self.plot.show_message("Open a .jpk file to start.")
         self.content_layout.addWidget(self.plot)
         self._set_enabled(False)
@@ -140,18 +142,10 @@ class JPKTab(BaseTab):
             layout, "Copy statistics", self.copy_stats,
             tooltip="Copy the table (tab-separated) to paste into Excel or Origin.")
 
-    def _build_export_group(self) -> None:
-        layout = self.add_group("Data export")
-        f = self.export_form = ParamForm()
-        f.add_choice("channel", "Channel for CSV", [("", "")],
-                     tooltip="'Export data (CSV)' above the plot writes this channel as "
-                             "a matrix in SI units (first row x, first column y).")
-        layout.addWidget(f)
-
     def _set_enabled(self, enabled: bool) -> None:
         for widget in (self.channel_list, self.channel_form, self.circle_form,
                        self.set_circle_button, self.remove_circle_button,
-                       self.copy_button, self.export_form):
+                       self.copy_button):
             widget.setEnabled(enabled)
 
     # ------------------------------------------------------------- state
@@ -239,9 +233,7 @@ class JPKTab(BaseTab):
         self._draw()
 
     def _refresh_choices(self) -> None:
-        options = [(name, name) for name in self.images]
-        for form, key in ((self.circle_form, "draw_on"), (self.export_form, "channel")):
-            form.set_choices(key, options)
+        self.circle_form.set_choices("draw_on", [(name, name) for name in self.images])
 
     def _current_channel(self) -> str | None:
         item = self.channel_list.currentItem()
@@ -299,14 +291,22 @@ class JPKTab(BaseTab):
                 model.stats_text(self.stats, self.circle, self.extent_unit))
             self.ctx.log.info("Circle statistics copied to the clipboard.")
 
-    def _export_payload(self):
+    def _export_payloads(self):
+        """All plotted channels, one CSV each (SI units, first row x, first column y)."""
         handle = self._handle()
-        name = self.export_form.value("channel")
-        if handle is None or name not in self.images:
+        if handle is None or not self.images:
             return None
-        return model.image_payload(handle, self.images[name], process=self.process,
-                                   style=self.styles.get(name), circle=self.circle,
-                                   stats=self.stats)
+        return model.channel_payloads(handle, self.images, process=self.process,
+                                      styles=self.styles, circle=self.circle,
+                                      stats=self.stats)
+
+    def _figure_info(self):
+        handle = self._handle()
+        if handle is None or not self.images:
+            return None
+        return model.figure_info(handle, self.images, process=self.process,
+                                 styles=self.styles, unit=self.extent_unit,
+                                 circle=self.circle, stats=self.stats)
 
     # -------------------------------------------------------------- circle
     def _detach_selector(self) -> None:

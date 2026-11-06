@@ -101,5 +101,26 @@ circle_params = plotting.make_circle(ax)   # interactive circular ROI
 ax.add_patch(Circle(circle_params[0],circle_params[1], edgecolor = "red", fill=False)) # Adds circle patch to axis object
 ```
 
+## Drift between two scans
+
+[`utils.image_shift`](../src/kpfm_pl/utils.py) estimates the translation
+between two images of equal shape by FFT cross-correlation with sub-pixel
+refinement. Rows point down in the stored arrays (row 0 is the top of the
+scan), so convert to scan coordinates like this:
+
+```python
+from kpfm_pl import JPK, image_shift
+
+a = JPK("scan1.jpk").image("Height (measured)")
+b = JPK("scan2.jpk").image("Height (measured)")
+drow, dcol, corr = image_shift(a["data"], b["data"], return_peak=True)
+dx = dcol * (a.x[1] - a.x[0])     # metres, to the right
+dy = -drow * (a.y[1] - a.y[0])    # metres, upwards
+```
+
+`corr` is the correlation coefficient at the peak: close to 1 for a clean
+match, small values mean the shift is unreliable. The *AFM shift* tab of the
+GUI does the same for up to four files, also on a window around a circle.
+
 `get_save_path(name="AFM")` returns a `processed/<stem> <name>.png` path
 (creating the `processed/` folder) for saving figures next to the source file.

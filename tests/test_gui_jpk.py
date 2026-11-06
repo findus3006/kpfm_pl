@@ -94,6 +94,14 @@ def test_load_images_and_payload(tmp_path):
             if not line.startswith("#")]
     assert len(rows) == 1 + images["Height (measured)"].data.shape[0]
 
+    payloads = model.channel_payloads(handle, images, process=True, styles=styles)
+    assert [p.part for p in payloads] == ["Precision 5", "Height (measured)"]
+    name, meta = model.figure_info(handle, images, process=True, styles=styles,
+                                   circle=circle, stats=stats)
+    assert name == f"{JPK_FILE.stem}_channels"
+    assert meta["parameters"]["channels"] == ["Precision 5", "Height (measured)"]
+    assert meta["results"]["circle_m"]["radius"] == pytest.approx(2e-7)
+
 
 # -------------------------------------------------------------------- tab
 qt = pytest.importorskip  # alias keeps the import guards below readable
@@ -153,13 +161,22 @@ def test_tab_circle_fields_mirror_and_stats(window, qtbot, tmp_path, monkeypatch
     assert len(tab._mirrors) == 2      # dashed copies on the two other channels
     assert all(row["pixels"] > 0 for row in tab.stats)
 
+    # 'Export data (CSV)' writes every plotted channel to its own file.
     target = tmp_path / "jpk.csv"
     monkeypatch.setattr(window.ctx, "save_file_dialog", lambda *a, **k: str(target))
-    tab.export_form.set_value("channel", "Precision 5")
     tab.plot.export_csv_dialog()
-    text = target.read_text(encoding="utf-8")
+    written = sorted(p.name for p in tmp_path.glob("jpk_*.csv"))
+    assert written == ["jpk_Height_(measured).csv", "jpk_Photon_Counter_1.csv",
+                       "jpk_Precision_5.csv"]
+    text = (tmp_path / "jpk_Precision_5.csv").read_text(encoding="utf-8")
     assert text.startswith("# analysis: JPK channel")
     assert '"channel": "Precision 5"' in text and "circle_m" in text
+
+    # The figure is named after the file, not after the first channel.
+    name, meta = tab.plot.figure_info()
+    assert name == f"{JPK_FILE.stem}_channels"
+    assert meta["analysis"] == "JPK channels"
+    assert set(meta["parameters"]["channels"]) == set(tab.images)
 
     # Switching the axes unit keeps the circle where it is.
     tab.channel_form.set_value("extent_unit", "nm")

@@ -254,3 +254,56 @@ def test_lifetime_from_truncated_mean_inverts_the_truncated_mean():
     # A mean at or above T/2 (flat background) or <= 0 has no exponential lifetime.
     assert np.isnan(lifetime_from_truncated_mean(np.array([0.0, 25.0, 30.0, np.nan]), window)).all()
     assert isinstance(lifetime_from_truncated_mean(3.0, window), float)
+
+
+# ------------------------------------------------------------- image_shift
+def _blobs(shape=(140, 160), seed=0):
+    from scipy import ndimage
+
+    rng = np.random.default_rng(seed)
+    return ndimage.gaussian_filter(rng.normal(size=shape), 3)
+
+
+def test_image_shift_integer_and_subpixel():
+    from scipy import ndimage
+
+    from kpfm_pl.utils import image_shift
+
+    base = _blobs()
+    ref = base[10:110, 10:130]
+    for drow, dcol in [(3, -5), (2.4, 1.3), (-7.6, 4.2)]:
+        moved = ndimage.shift(base, (drow, dcol), order=3)[10:110, 10:130]
+        r, c, peak = image_shift(ref, moved, return_peak=True)
+        assert r == pytest.approx(drow, abs=0.25)
+        assert c == pytest.approx(dcol, abs=0.25)
+        assert peak > 0.8
+
+
+def test_image_shift_periodic_roll_is_exact_without_window():
+    from kpfm_pl.utils import image_shift
+
+    ref = _blobs((64, 80))
+    assert image_shift(ref, np.roll(ref, (3, -5), axis=(0, 1)), window=False) == (3.0, -5.0)
+    assert image_shift(ref, ref, upsample=1) == (0.0, 0.0)
+
+
+def test_image_shift_handles_nan_and_flags_noise():
+    from kpfm_pl.utils import image_shift
+
+    ref = _blobs((64, 64))
+    noisy = ref.copy()
+    noisy[:3] = np.nan
+    r, c = image_shift(ref, noisy)
+    assert abs(r) < 0.5 and abs(c) < 0.5
+    rng = np.random.default_rng(1)
+    *_, peak = image_shift(ref, rng.normal(size=ref.shape), return_peak=True)
+    assert peak < 0.3
+
+
+def test_image_shift_rejects_mismatched_shapes():
+    from kpfm_pl.utils import image_shift
+
+    with pytest.raises(ValueError):
+        image_shift(np.zeros((8, 8)), np.zeros((8, 9)))
+    with pytest.raises(ValueError):
+        image_shift(np.zeros((2, 8)), np.zeros((2, 8)))

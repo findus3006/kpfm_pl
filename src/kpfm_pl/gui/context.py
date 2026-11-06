@@ -96,6 +96,14 @@ class AppContext:
             self.remember_dir(path)
         return path or None
 
+    def open_files_dialog(self, title: str, file_filter: str) -> list[str]:
+        """Ask for one or more files; returns their paths (empty when cancelled)."""
+        paths, _ = QFileDialog.getOpenFileNames(self.window, title, self.last_dir,
+                                                f"{file_filter};;All files (*)")
+        if paths:
+            self.remember_dir(paths[0])
+        return list(paths)
+
     def open_folder_dialog(self, title: str) -> str | None:
         path = QFileDialog.getExistingDirectory(self.window, title, self.last_dir)
         if path:

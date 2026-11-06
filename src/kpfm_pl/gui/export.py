@@ -8,6 +8,9 @@ entered in the GUI, scalar results (e.g. fitted lifetimes) and the
 * CSV files start with ``# key: value`` comment lines, followed by one header
   row and the data. ``numpy.loadtxt(path, delimiter=",", skiprows=1)`` (after
   the comments) or ``pandas.read_csv(path, comment="#")`` read them back.
+* A plot showing several images (e.g. three AFM channels) exports a list of
+  payloads, one CSV each: ``<chosen name>_<part>.csv`` (see
+  :func:`multi_csv_paths`).
 * Figures (PNG, SVG, PDF) store the same metadata as JSON in the file's own
   metadata fields (PNG text chunk, SVG description, PDF subject).
 """
@@ -34,7 +37,11 @@ __all__ = [
     "describe_meta",
     "write_signals_csv",
     "write_image_csv",
+    "write_table_csv",
     "write_payload_csv",
+    "safe_name",
+    "multi_base_name",
+    "multi_csv_paths",
     "save_figure",
 ]
 
@@ -50,14 +57,19 @@ FIGURE_FILTERS = "PNG image (*.png);;SVG vector graphic (*.svg);;PDF document (*
 class ExportPayload:
     """What a plot can export: its data plus the metadata describing it.
 
-    Exactly one of ``signals`` or ``image`` should be set. ``default_name`` is
-    the suggested file stem in the save dialog.
+    Exactly one of ``signals``, ``image`` or ``table`` should be set.
+    ``table`` is a list of rows (dicts with the same keys) written as plain
+    columns. ``default_name`` is the suggested file stem in the save dialog.
+    ``part`` names this payload when several are exported together: the
+    file then becomes ``<chosen stem>_<part>.csv``.
     """
 
     metadata: dict[str, Any]
     signals: list[Signal] = field(default_factory=list)
     image: Image | None = None
     default_name: str = "export"
+    table: list[dict[str, Any]] | None = None
+    part: str = ""
 
 
 def _jsonable(value: Any) -> Any:
@@ -221,11 +233,77 @@ def write_image_csv(path: str | Path, image: Image,
     return path
 
 
+def write_table_csv(path: str | Path, rows: Sequence[Mapping[str, Any]],
+                    metadata: Mapping[str, Any]) -> Path:
+    """Write ``rows`` (dicts) as a table; the columns are the keys in first-seen order."""
+    if not rows:
+        raise ValueError("Nothing to export.")
+    path = Path(path)
+    columns: list[str] = []
+    for row in rows:
+        columns += [key for key in row if key not in columns]
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        for line in _header_lines(metadata):
+            fh.write(line + "\n")
+        writer = csv.writer(fh)
+        writer.writerow(columns)
+        for row in rows:
+            writer.writerow([_format(row[key]) if key in row else "" for key in columns])
+    return path
+
+
 def write_payload_csv(path: str | Path, payload: ExportPayload) -> Path:
     """Write an :class:`ExportPayload` with the matching CSV writer."""
     if payload.image is not None:
         return write_image_csv(path, payload.image, payload.metadata)
+    if payload.table is not None:
+        return write_table_csv(path, payload.table, payload.metadata)
     return write_signals_csv(path, payload.signals, payload.metadata)
+
+
+_UNSAFE = '<>:"/\\|?*'
+
+
+def safe_name(text: str) -> str:
+    """``text`` usable in a file name: spaces become ``_``, reserved characters are dropped."""
+    text = "".join(ch for ch in str(text) if ch not in _UNSAFE and ord(ch) >= 32)
+    return text.strip().replace(" ", "_") or "export"
+
+
+def multi_base_name(payloads: Sequence[ExportPayload]) -> str:
+    """Suggested stem when several payloads are exported together.
+
+    When every ``default_name`` ends with ``_<part>`` and they share the rest,
+    that shared rest is used (``scan_Height`` + ``scan_KPFM`` -> ``scan``);
+    otherwise the first payload's ``default_name``.
+    """
+    bases = set()
+    for payload in payloads:
+        suffix = "_" + safe_name(payload.part) if payload.part else ""
+        name = payload.default_name
+        if not suffix or not name.endswith(suffix):
+            return payloads[0].default_name if payloads else "export"
+        bases.add(name[: -len(suffix)])
+    return bases.pop() if len(bases) == 1 else payloads[0].default_name
+
+
+def multi_csv_paths(path: str | Path, payloads: Sequence[ExportPayload]) -> list[Path]:
+    """File per payload for a multi-export: ``<stem of path>_<part>.csv`` next to ``path``.
+
+    Payloads without a ``part`` are numbered. Duplicate parts get a counter.
+    """
+    path = Path(path)
+    stem = path.stem if path.suffix.lower() == ".csv" else path.name
+    paths: list[Path] = []
+    for i, payload in enumerate(payloads, 1):
+        part = safe_name(payload.part) if payload.part else str(i)
+        candidate = path.parent / f"{stem}_{part}.csv"
+        n = 2
+        while candidate in paths:
+            candidate = path.parent / f"{stem}_{part}_{n}.csv"
+            n += 1
+        paths.append(candidate)
+    return paths
 
 
 def save_figure(figure, path: str | Path, metadata: Mapping[str, Any],

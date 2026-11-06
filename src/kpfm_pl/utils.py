@@ -26,6 +26,7 @@ __all__ = [
     "linear_line_level",
     "set_zero",
     "downsample_sum",
+    "image_shift",
     "nearest_index",
     "trigger_points",
 ]
@@ -299,6 +300,108 @@ def downsample_sum(image: np.ndarray, fx: int, fy: int) -> np.ndarray:
     w2 = (w // fy) * fy
     cropped = image[:h2, :w2]
     return cropped.reshape(h2 // fx, fx, w2 // fy, fy).sum(axis=(1, 3))
+
+
+def _upsampled_dft(data: np.ndarray, size: int, upsample: int,
+                   offsets: tuple[float, float]) -> np.ndarray:
+    """Inverse-DFT style evaluation of ``data`` on a fine ``size`` x ``size`` grid.
+
+    Matrix-multiply DFT of Guizar-Sicairos et al., Opt. Lett. 33, 156 (2008):
+    evaluates only the neighbourhood of the correlation peak, ``upsample``
+    times finer than the pixel grid, without zero-padding the whole array.
+    """
+    for axis_len, offset in zip(data.shape[::-1], offsets[::-1]):
+        kernel = np.exp(-2j * np.pi * (np.arange(size) - offset)[:, None]
+                        * np.fft.fftfreq(axis_len, upsample))
+        data = np.tensordot(kernel, data, axes=(1, -1))
+    return data
+
+
+def image_shift(reference: np.ndarray, image: np.ndarray, *, window: bool = True,
+                upsample: int = 20, return_peak: bool = False) -> tuple[float, ...]:
+    """Translation of ``image`` relative to ``reference`` by cross-correlation.
+
+    Both arrays must have the same shape and pixel size (resample one onto
+    the other first if needed). Non-finite pixels are replaced by the image
+    mean, the mean is subtracted and, with ``window``, a Hann window is applied
+    so the image borders do not dominate the correlation. The integer peak of
+    the FFT cross-correlation is refined to ``1 / upsample`` pixel with an
+    upsampled DFT around the peak (Guizar-Sicairos et al., Opt. Lett. 33,
+    156 (2008)).
+
+    Plain (not phase-normalised) cross-correlation is used on purpose: phase
+    correlation weights all spatial frequencies equally and is therefore
+    easily thrown off by pixel noise, which dominates the high frequencies of
+    AFM/KPFM scans.
+
+    Parameters
+    ----------
+    reference, image :
+        2-D arrays of equal shape (at least 3 x 3 pixels).
+    window :
+        Apply a Hann window before the FFT (recommended for non-periodic
+        images such as AFM scans). The window biases large shifts slightly
+        towards zero (typically ~0.1 pixel).
+    upsample :
+        Sub-pixel refinement factor; ``1`` returns whole pixels.
+    return_peak :
+        Also return the correlation coefficient at the peak (-1 ... 1, computed
+        on the prepared images). Values close to 1 mean a clean match; small
+        values mean the result is unreliable (noise, little structure, or a
+        shift that moves most of the content out of the image).
+
+    Returns
+    -------
+    (drow, dcol) or (drow, dcol, peak)
+        Shift in pixels: a feature at pixel ``(row, col)`` of ``reference`` is
+        found at ``(row + drow, col + dcol)`` in ``image``. Shifts are only
+        unambiguous up to half the image size in each direction.
+
+    Examples
+    --------
+    >>> drow, dcol = image_shift(scan1, scan2)      # pixels, rows point down
+    """
+    ref = np.asarray(reference, dtype=float)
+    img = np.asarray(image, dtype=float)
+    if ref.ndim != 2 or ref.shape != img.shape:
+        raise ValueError("reference and image must be 2-D arrays of the same shape.")
+    if min(ref.shape) < 3:
+        raise ValueError("images must be at least 3 x 3 pixels.")
+    upsample = max(int(upsample), 1)
+
+    def _prepare(data: np.ndarray) -> np.ndarray:
+        finite = np.isfinite(data)
+        fill = float(np.mean(data[finite])) if finite.any() else 0.0
+        data = np.where(finite, data, fill)
+        data = data - data.mean()
+        if window:
+            data = data * np.outer(np.hanning(data.shape[0]), np.hanning(data.shape[1]))
+        return data
+
+    ref, img = _prepare(ref), _prepare(img)
+    norm = float(np.sqrt(np.sum(ref ** 2) * np.sum(img ** 2)))
+    cross = np.fft.fft2(img) * np.conj(np.fft.fft2(ref))
+    corr = np.real(np.fft.ifft2(cross))
+
+    shape = np.array(corr.shape)
+    shift = np.array(np.unravel_index(int(np.argmax(corr)), corr.shape), dtype=float)
+    peak = float(corr.max())
+    # Indices past the middle are negative shifts (the correlation is periodic).
+    wrapped = shift > shape // 2
+    shift[wrapped] -= shape[wrapped]
+    if upsample > 1:
+        size = int(np.ceil(upsample * 1.5))
+        centre = np.fix(size / 2.0)
+        offsets = centre - shift * upsample
+        # conj(DFT(conj(x))) evaluates the inverse transform of ``cross``.
+        fine = np.real(np.conj(_upsampled_dft(np.conj(cross), size, upsample,
+                                              (offsets[0], offsets[1]))))
+        index = np.array(np.unravel_index(int(np.argmax(fine)), fine.shape), dtype=float)
+        shift = shift + (index - centre) / upsample
+        peak = float(fine.max()) / cross.size
+    if return_peak:
+        return float(shift[0]), float(shift[1]), peak / norm if norm > 0 else 0.0
+    return float(shift[0]), float(shift[1])
 
 
 def nearest_index(axis: np.ndarray, value: float) -> int:

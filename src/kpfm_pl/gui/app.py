@@ -26,6 +26,7 @@ from .context import AppContext, AppState
 from .logcapture import LogBus, install
 from .tabs.correlate_tab import CorrelateTab
 from .tabs.database_tab import DatabaseTab
+from .tabs.jpk_shift_tab import JPKShiftTab
 from .tabs.jpk_tab import JPKTab
 from .tabs.ptu_tab import PTUTab
 from .workers import JobRunner
@@ -33,7 +34,7 @@ from .workers import JobRunner
 __all__ = ["MainWindow", "run"]
 
 #: Tabs in display order.
-TAB_CLASSES = (PTUTab, CorrelateTab, JPKTab, DatabaseTab)
+TAB_CLASSES = (PTUTab, CorrelateTab, JPKTab, JPKShiftTab, DatabaseTab)
 
 _LEVEL_COLOURS = {"info": None, "warning": "#b36b00", "error": "#c00000"}
 

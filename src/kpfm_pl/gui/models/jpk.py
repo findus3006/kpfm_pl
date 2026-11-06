@@ -16,7 +16,7 @@ from typing import Any
 import numpy as np
 
 from ...core import Image
-from ..export import ExportPayload, build_metadata
+from ..export import ExportPayload, build_metadata, safe_name
 from .files import LoadedFile
 
 __all__ = [
@@ -33,6 +33,8 @@ __all__ = [
     "circle_mask",
     "circle_stats",
     "image_payload",
+    "channel_payloads",
+    "figure_info",
     "stats_text",
 ]
 
@@ -210,5 +212,41 @@ def image_payload(handle: LoadedFile, image: Image, *, process: bool,
         note="Data are in the SI units given in the header (x/y in m); the display "
              "scaling only affects the plot.",
     )
-    name = f"{handle.stem}_{image.label}".replace(" ", "_")
-    return ExportPayload(meta, image=image, default_name=name)
+    name = f"{handle.stem}_{safe_name(image.label)}"
+    return ExportPayload(meta, image=image, default_name=name, part=image.label)
+
+
+def channel_payloads(handle: LoadedFile, images: Mapping[str, Image], *, process: bool,
+                     styles: Mapping[str, ChannelStyle] | None = None,
+                     circle: CircleROI | None = None,
+                     stats: Sequence[Mapping[str, Any]] = ()) -> list[ExportPayload]:
+    """One CSV payload per plotted channel (exported as ``<name>_<channel>.csv``)."""
+    styles = styles or {}
+    return [image_payload(handle, image, process=process, style=styles.get(name),
+                          circle=circle, stats=stats)
+            for name, image in images.items()]
+
+
+def figure_info(handle: LoadedFile, images: Mapping[str, Image], *, process: bool,
+                styles: Mapping[str, ChannelStyle] | None = None, unit: str = "um",
+                circle: CircleROI | None = None,
+                stats: Sequence[Mapping[str, Any]] = ()) -> tuple[str, dict[str, Any]]:
+    """``(file stem, metadata)`` for saving the figure with all plotted channels.
+
+    The stem is ``<file>_channels`` rather than the name of one channel.
+    """
+    styles = styles or {}
+    reader = handle.reader
+    results: dict[str, Any] = {"scan_size_m": [float(reader.dx), float(reader.dy)]}
+    if circle is not None:
+        results["circle_m"] = asdict(circle)
+        results["circle_stats"] = [dict(row) for row in stats]
+    parameters: dict[str, Any] = {
+        "channels": list(images),
+        "process": bool(process),
+        "extent_unit": unit,
+        "display": {name: asdict(styles[name]) for name in images if name in styles},
+    }
+    meta = build_metadata("JPK channels", sources=[handle.path], parameters=parameters,
+                          results=results)
+    return f"{handle.stem}_channels", meta

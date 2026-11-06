@@ -39,7 +39,8 @@ although the package imports, the installation predates the GUI: run
 Files are opened from the **File** menu (Ctrl+O PTU, Ctrl+K Zurich, Ctrl+J
 JPK) or the *Open…* buttons in the tabs. One file of each kind is open at a
 time, and all tabs share it: a PTU file opened in the *PL lifetime* tab is
-also used by *Correlate*.
+also used by *Correlate*. The *AFM shift* tab is the exception: it keeps its
+own list of up to four `.jpk` files.
 
 ## Exported files and their metadata
 
@@ -51,6 +52,9 @@ main results (fitted lifetimes, time shift, ROI bounds, statistics, …).
   then one header row with names and units, then the data. Empty cells are
   missing values (e.g. failed fits). Images (FLID maps, AFM channels) are
   written as a matrix: the first row holds x, the first column holds y.
+  A plot with several images (e.g. three AFM channels) writes **one CSV per
+  image**: choosing `scan.csv` in the dialog writes `scan_<channel>.csv` for
+  every channel.
   Reading it back: `pandas.read_csv(path, comment="#")`; Origin and Excel
   can skip the `#` lines on import.
 - **Figures**: the metadata is stored as JSON inside the file (PNG text
@@ -214,8 +218,46 @@ View calibrated AFM channels, like `examples/example_jpk.py`.
    inside it for each channel. *Copy statistics* puts the table on the
    clipboard for Excel or Origin.
 
-**CSV export** writes the channel chosen in *Channel for CSV* in SI units
-(metres, volts, …), including the circle and its statistics in the metadata.
+**CSV export** writes every plotted channel to its own file
+(`<name>_<channel>.csv`) in SI units (metres, volts, …), including the circle
+and its statistics in the metadata. **Save figure** suggests
+`<file>_channels.png` and lists all plotted channels in the metadata.
+
+## AFM shift
+
+Compare up to four scans of the same area to see how far the sample drifted
+between them.
+
+1. **Files**: *Add files…* (several at once) or *Add from AFM tab*. Pick the
+   **Reference**. Each file is one row of the plot, each ticked channel one
+   column; only channels present in every file are offered. *Colour range:
+   same for all files* uses one colour scale per channel.
+2. **Circle**: on the reference row, left-drag on the *Draw on* channel. The
+   circle is copied to the same scan position (metres from the scan origin)
+   on every other file. *Show the circle also on* selects the channels with
+   dashed copies; the blue dotted circle marks the reference position on the
+   other files.
+3. **Manual shift**: drag each file's circle onto the feature. The *Shift*
+   table lists dx, dy and |d| relative to the reference (x to the right,
+   y up, in the axes unit). Moving the reference circle later moves only the
+   circles you have not moved yet; all circles share the reference radius.
+   Right-click on a file's circle puts it back on the reference position;
+   right-click on the reference deletes all circles.
+4. **Automatic shift**: *Detect shift* cross-correlates every plotted channel
+   of each file with the reference
+   ([`utils.image_shift`](../src/kpfm_pl/utils.py), sub-pixel). *Detect on:
+   Whole image* gives the overall drift; *Around the circle* uses a square of
+   *Window* circle diameters around the reference circle (local drift of that
+   feature; shifts larger than about half the window are missed). The
+   *correlation* column tells how reliable a result is: close to 1 is a clean
+   match, below ~0.3 a warning is logged. *Move circles to detected shift*
+   places the circles using the channel chosen in *Use shift of*.
+5. **Circle statistics**: mean, std, min, max inside each file's own circle.
+
+Files with a different scan size or resolution are interpolated onto the
+reference grid before correlating. **CSV export** writes `<name>_shifts.csv`
+(shifts in metres) and `<name>_circle_stats.csv`; **Save figure** stores all
+source files, circles and shifts in the metadata.
 
 ## Database
 

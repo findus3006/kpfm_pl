@@ -6,8 +6,11 @@ is touched), adds the standard navigation toolbar and the package's wheel
 zoom / middle-drag pan, and offers "Save figure" and "Export data" buttons.
 
 What gets exported is decided by the tab: it registers an ``export_provider``
-callable returning an :class:`~kpfm_pl.gui.export.ExportPayload` (or ``None``
-while there is nothing to export).
+callable returning an :class:`~kpfm_pl.gui.export.ExportPayload`, a list of
+them (one CSV file each, e.g. one per plotted AFM channel) or ``None`` while
+there is nothing to export. A tab whose figure shows more than one payload
+can also register a ``figure_provider`` returning ``(file stem, metadata)``
+for *Save figure*; without it the (first) CSV payload names the figure.
 """
 
 from __future__ import annotations
@@ -21,11 +24,19 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QHBoxLayout, QMessageBox, QPushButton, QVBoxLayout, QWidget
 
 from ..plotting import enable_zoom_pan
-from .export import FIGURE_FILTERS, ExportPayload, save_figure, write_payload_csv
+from .export import (
+    FIGURE_FILTERS,
+    ExportPayload,
+    multi_base_name,
+    multi_csv_paths,
+    save_figure,
+    write_payload_csv,
+)
 
 __all__ = ["PlotPanel"]
 
-ExportProvider = Callable[[], "ExportPayload | None"]
+ExportProvider = Callable[[], "ExportPayload | list[ExportPayload] | None"]
+FigureProvider = Callable[[], "tuple[str, dict] | None"]
 
 _HINT = ("Wheel: zoom (Shift: x only, Ctrl: y only) | Middle-drag: pan | "
          "Home button: reset view")
@@ -61,13 +72,16 @@ class PlotPanel(QWidget):
         self.toolbar.setToolTip(_HINT)
         enable_zoom_pan(self.figure)
         self.export_provider: ExportProvider | None = None
+        self.figure_provider: FigureProvider | None = None
 
         self.save_button = QPushButton("Save figure…")
         self.save_button.setToolTip("Save this plot as PNG, SVG or PDF. The analysis "
                                     "parameters are stored in the file's metadata.")
         self.csv_button = QPushButton("Export data (CSV)…")
-        self.csv_button.setToolTip("Save the plotted data as a CSV file. Analysis "
-                                   "parameters are written as '#' comment lines on top.")
+        self.csv_button.setToolTip("Save the plotted data as CSV. Analysis parameters "
+                                   "are written as '#' comment lines on top.\nPlots with "
+                                   "several images write one file per image "
+                                   "(<name>_<channel>.csv).")
         self.save_button.clicked.connect(self.save_figure_dialog)
         self.csv_button.clicked.connect(self.export_csv_dialog)
 
@@ -109,17 +123,34 @@ class PlotPanel(QWidget):
         self.save_button.setEnabled(has_axes)
         self.csv_button.setEnabled(has_axes and self.export_provider is not None)
 
-    def _payload(self) -> ExportPayload | None:
+    def set_figure_provider(self, provider: FigureProvider | None) -> None:
+        """Name and metadata for *Save figure* (``(stem, metadata)`` or ``None``)."""
+        self.figure_provider = provider
+
+    def _payloads(self) -> list[ExportPayload]:
         if self.export_provider is None:
-            return None
-        return self.export_provider()
+            return []
+        result = self.export_provider()
+        if result is None:
+            return []
+        return list(result) if isinstance(result, (list, tuple)) else [result]
+
+    def figure_info(self) -> tuple[str, dict]:
+        """``(file stem, metadata)`` used when saving the figure."""
+        if self.figure_provider is not None:
+            info = self.figure_provider()
+            if info is not None:
+                return info
+        payloads = self._payloads()
+        if not payloads:
+            return "figure", {"analysis": "kpfm_pl figure"}
+        name = payloads[0].default_name if len(payloads) == 1 else multi_base_name(payloads)
+        return name, payloads[0].metadata
 
     def save_figure_dialog(self) -> None:
         if self.ctx is None:
             return
-        payload = self._payload()
-        name = payload.default_name if payload else "figure"
-        metadata = payload.metadata if payload else {"analysis": "kpfm_pl figure"}
+        name, metadata = self.figure_info()
         path = self.ctx.save_file_dialog("Save figure", f"{name}.png", FIGURE_FILTERS)
         if not path:
             return
@@ -136,10 +167,14 @@ class PlotPanel(QWidget):
     def export_csv_dialog(self) -> None:
         if self.ctx is None:
             return
-        payload = self._payload()
-        if payload is None:
+        payloads = self._payloads()
+        if not payloads:
             QMessageBox.information(self, "Export data", "There is no data to export yet.")
             return
+        if len(payloads) > 1:
+            self._export_many(payloads)
+            return
+        payload = payloads[0]
         path = self.ctx.save_file_dialog("Export data", f"{payload.default_name}.csv",
                                          "CSV file (*.csv)")
         if not path:
@@ -153,3 +188,30 @@ class PlotPanel(QWidget):
             QMessageBox.warning(self, "Export data", f"Could not export the data:\n{exc}")
             return
         self.ctx.log.info(f"Data exported: {path}")
+
+    def _export_many(self, payloads: list[ExportPayload]) -> None:
+        """One CSV per payload: ``<chosen name>_<part>.csv``."""
+        path = self.ctx.save_file_dialog(
+            f"Export data ({len(payloads)} files: <name>_<part>.csv)",
+            f"{multi_base_name(payloads)}.csv", "CSV file (*.csv)")
+        if not path:
+            return
+        paths = multi_csv_paths(path, payloads)
+        existing = [p for p in paths if p.exists()]
+        if existing:
+            names = "\n".join(p.name for p in existing)
+            answer = QMessageBox.question(
+                self, "Export data", f"These files exist already:\n{names}\n\nOverwrite them?")
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        written = []
+        for target, payload in zip(paths, payloads):
+            try:
+                write_payload_csv(target, payload)
+            except Exception as exc:
+                QMessageBox.warning(self, "Export data",
+                                    f"Could not export {target.name}:\n{exc}")
+                break
+            written.append(target)
+        for target in written:
+            self.ctx.log.info(f"Data exported: {target}")

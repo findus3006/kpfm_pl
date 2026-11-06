@@ -57,8 +57,9 @@ is created at install time, so an install from before the GUI existed lacks
 it.
 
 Each tab is one workflow: **PL lifetime (PTU)** (time trace, ROIs, lifetime
-fits, lifetime trace and FLIDs), **Correlate** (KPFM ↔ PL), **AFM (JPK)** and
-**Database**. Parameters sit on the left, with
+fits, lifetime trace and FLIDs), **Correlate** (KPFM ↔ PL), **AFM (JPK)**,
+**AFM shift** (drift between up to four scans, manual and by
+cross-correlation) and **Database**. Parameters sit on the left, with
 an explanation on hover, and plots on the right. Every plot can be saved as
 PNG/SVG/PDF and its data exported as CSV; both carry the source files and
 analysis parameters as metadata. Long fits run in the background with a
@@ -219,7 +220,7 @@ jpks = pick_folder(r"D:\Measurements")               # all .jpk files below a ch
 | [`selector`](src/kpfm_pl/selector.py) | `InteractiveBoxSelector`, `SingleBoxSelector`, `DraggableCircle` | [plotting.md](docs/plotting.md) |
 | [`fitting`](src/kpfm_pl/fitting.py) | `MultiExpFit` (used by `PTU`), `poisson_chi_squared` (fit quality of photon counts); `gaussian2d`, `fit_gaussian2d`, `peak_power_density` for laser spot profiles | docstrings |
 | [`io`](src/kpfm_pl/io.py) | `pick_files`, `pick_folder` (tkinter dialogs), `sort_measurement_files` | docstrings |
-| [`utils`](src/kpfm_pl/utils.py) | smoothing, resampling, fit-window selection, AFM levelling, trigger points | docstrings |
+| [`utils`](src/kpfm_pl/utils.py) | smoothing, resampling, fit-window selection, AFM levelling, image shift, trigger points | docstrings |
 | [`core`](src/kpfm_pl/core.py) | `Signal`, `Image` | – |
 | [`gui`](src/kpfm_pl/gui) | optional PySide6 desktop GUI (`kpfm-pl-gui`); not imported by the core | [gui.md](docs/gui.md) |
 

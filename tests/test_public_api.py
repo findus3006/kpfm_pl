@@ -36,7 +36,7 @@ def test_lazy_public_names_are_discoverable():
 def test_version_has_one_package_source():
     from kpfm_pl._version import __version__
 
-    assert kpfm_pl.__version__ == __version__ == "1.3.0"
+    assert kpfm_pl.__version__ == __version__ == "1.4.0"
 
 
 def test_pep561_marker_is_shipped_in_source_package():

@@ -93,3 +93,41 @@ def test_save_figure_rejects_unknown_format(tmp_path):
 
     with pytest.raises(ValueError):
         save_figure(Figure(), tmp_path / "fig.bmp", {})
+
+
+def test_table_payload_csv(tmp_path):
+    from kpfm_pl.gui.export import ExportPayload, write_payload_csv
+
+    rows = [{"file": "a.jpk", "dx_m": 1e-7}, {"file": "b.jpk", "dx_m": float("nan"),
+                                               "extra": 2}]
+    payload = ExportPayload(build_metadata("table"), table=rows)
+    path = write_payload_csv(tmp_path / "t.csv", payload)
+    meta, body = _comments(path)
+    assert meta["analysis"] == "table"
+    assert body[0] == "file,dx_m,extra"
+    assert body[1] == "a.jpk,1e-07,"
+    assert body[2] == "b.jpk,,2"
+
+
+def test_multi_csv_names():
+    from kpfm_pl.gui.export import (
+        ExportPayload,
+        multi_base_name,
+        multi_csv_paths,
+        safe_name,
+    )
+
+    assert safe_name("Height (measured)") == "Height_(measured)"
+    assert safe_name('a/b:c?') == "abc"
+    payloads = [ExportPayload({}, default_name=f"scan_{safe_name(p)}", part=p)
+                for p in ("Height (measured)", "Precision 5")]
+    assert multi_base_name(payloads) == "scan"
+    paths = multi_csv_paths(tmp := __import__("pathlib").Path("out") / "x.csv", payloads)
+    assert [p.name for p in paths] == ["x_Height_(measured).csv", "x_Precision_5.csv"]
+    assert all(p.parent == tmp.parent for p in paths)
+    # Without parts: the first name, numbered files; duplicate parts get a counter.
+    plain = [ExportPayload({}, default_name="a"), ExportPayload({}, default_name="b")]
+    assert multi_base_name(plain) == "a"
+    assert [p.name for p in multi_csv_paths("y.csv", plain)] == ["y_1.csv", "y_2.csv"]
+    same = [ExportPayload({}, part="h"), ExportPayload({}, part="h")]
+    assert [p.name for p in multi_csv_paths("z", same)] == ["z_h.csv", "z_h_2.csv"]
