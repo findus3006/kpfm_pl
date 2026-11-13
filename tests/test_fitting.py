@@ -329,3 +329,54 @@ def test_corrected_covariance_matches_numerical_propagation():
     assert fit.corrected_covariance()[1, 1] == pytest.approx(cov[1, 1])
     with pytest.raises(ValueError, match="period"):
         MultiExpFit(t, y, 1, period=0.0)
+
+
+# ------------------------------------------------- fractions and mean lifetimes
+def test_fraction_and_mean_lifetime_helpers():
+    from kpfm_pl import amplitude_fractions, intensity_fractions, mean_lifetime
+
+    A, tau = np.array([0.6, 0.4]), np.array([2.0, 9.0])
+    np.testing.assert_allclose(amplitude_fractions(A), [0.6, 0.4])
+    np.testing.assert_allclose(intensity_fractions(A, tau), [1.2 / 4.8, 3.6 / 4.8])
+    assert mean_lifetime(A, tau) == pytest.approx((0.6 * 4 + 0.4 * 81) / 4.8)
+    assert mean_lifetime(A, tau, "amplitude") == pytest.approx(4.8)
+    # row-wise on many fits; zero weights and NaN rows give NaN
+    rows_A = np.array([[0.6, 0.4], [0.0, 0.0], [np.nan, 1.0]])
+    rows_tau = np.array([[2.0, 9.0], [1.0, 2.0], [1.0, 2.0]])
+    means = mean_lifetime(rows_A, rows_tau, "amplitude")
+    assert means[0] == pytest.approx(4.8) and np.isnan(means[1:]).all()
+    assert np.isnan(amplitude_fractions(rows_A)[1]).all()
+    with pytest.raises(ValueError, match="kind"):
+        mean_lifetime(A, tau, "number")
+
+
+def test_multiexpfit_fractions_and_tau_amp_with_errors():
+    rng = np.random.default_rng(8)
+    t = np.linspace(0.0, 40.0, 400)
+    y = _single_exp(t, 0.6, 2.0) + _single_exp(t, 0.4, 9.0) + rng.normal(0, 0.005, t.size)
+    fit = MultiExpFit(t, y, n_exp=2)
+    out = fit.to_dict()
+    A, tau = out["A"], out["tau"]
+    np.testing.assert_allclose(out["f_amp"], A / A.sum())
+    np.testing.assert_allclose(out["f_int"], A * tau / np.sum(A * tau))
+    assert out["tau_amp"] == pytest.approx(np.sum(A * tau) / A.sum())
+    assert out["f_amp"].sum() == pytest.approx(1.0) and out["f_int"].sum() == pytest.approx(1.0)
+    # errors: numerical propagation through the covariance
+    p = fit._require_result().x
+    cov = fit.covariance()
+
+    def numeric(func, eps=1e-7):
+        grad = np.array([(func(p + e) - func(p - e)) / (2 * eps)
+                         for e in np.eye(p.size) * eps])
+        return np.sqrt(np.einsum("i...,ij,j...->...", grad, cov, grad))
+
+    np.testing.assert_allclose(out["f_amp_err"], numeric(lambda q: q[:2] / q[:2].sum()),
+                               rtol=1e-4)
+    np.testing.assert_allclose(out["f_int_err"],
+                               numeric(lambda q: q[:2] * q[2:] / np.sum(q[:2] * q[2:])),
+                               rtol=1e-4)
+    assert out["tau_amp_err"] == pytest.approx(
+        float(numeric(lambda q: np.sum(q[:2] * q[2:]) / q[:2].sum())), rel=1e-4)
+    assert fit.mean_lifetime("intensity") == fit.intensity_weighted_lifetime()
+    with pytest.raises(ValueError, match="kind"):
+        fit.fractions("number")

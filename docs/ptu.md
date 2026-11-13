@@ -193,7 +193,11 @@ The returned dict contains:
 | `A_err`, `tau_err` | their standard errors (from `MultiExpFit.corrected_covariance()`) |
 | `A_fit`, `A_fit_err` | the fitted amplitudes of the curve (uncorrected) and their errors |
 | `tau_int`, `tau_int_err` | intensity-weighted mean lifetime `sum(A_i tau_i^2) / sum(A_i tau_i)` of the per-pulse amplitudes (ns, equal to `tau` for `n_exp=1`) and its propagated standard error; `tau_int_fit` is the uncorrected value |
-| `period` | laser period `T` (ns) used for the correction |
+| `tau_amp`, `tau_amp_err` | amplitude-weighted mean lifetime `sum(A_i tau_i) / sum(A_i)` and its error; `tau_amp_fit` uncorrected |
+| `tau_mean`, `tau_mean_err`, `mean_lifetime` | the mean chosen with `mean_lifetime=` (`"intensity"` = `tau_int`, default, or `"amplitude"` = `tau_amp`) |
+| `f_amp`, `f_amp_err` | amplitude fractions `A_i / sum(A)` (0..1) and their errors |
+| `f_int`, `f_int_err` | intensity fractions `A_i tau_i / sum(A tau)` (0..1, share of the photons) and their errors |
+| `period`, `decay_correction` | laser period `T` (ns) used for the incomplete-decay correction (`None` with `decay_correction=False`) |
 | `offset` | constant offset used |
 | `curve` | model evaluated on the fitted grid |
 | `quality` | `{residuals, cost, success, message, r_squared}` plus the Poisson goodness of fit `{reduced_chi_squared, chi_squared, dof, deviance, weighted_residuals}` and the model selection `{bic, bic_statistic, n_points, n_params}` |
@@ -229,9 +233,22 @@ holds photons of all earlier pulses. For an exponential they add up to
 but the fitted amplitudes are too large, the long components most (at
 `T = 100 ns`: 0.7 % for `tau = 20 ns`, 16 % for `tau = 50 ns`). That would
 push `tau_int` towards the long components. `fit_lifetime` (and the per-bin
-fits of `lifetime_trace`/`flid`) therefore always report per-pulse amplitudes
-`A = A_fit * (1 - exp(-T/tau))` and compute `tau_int` from them; the errors
-are propagated. The curve (`curve`, `label`) uses the fitted `A_fit`.
+fits of `lifetime_trace`/`flid`) therefore report per-pulse amplitudes
+`A = A_fit * (1 - exp(-T/tau))` by default and compute the mean lifetimes and
+fractions from them; the errors are propagated. The curve (`curve`, `label`)
+uses the fitted `A_fit`. Pass `decay_correction=False` to report the fitted
+amplitudes unchanged.
+
+**Mean lifetime and fractions.** For several exponentials,
+`tau_int = sum(A tau^2) / sum(A tau)` weights each component by its photons
+and equals the mean photon arrival time (comparable with
+[`arrival_time_trace`](#mean-arrival-time-no-fit)); `tau_amp = sum(A tau) /
+sum(A)` weights by the amplitudes, i.e. the share of emitters (common for
+quenching and FRET). `f_amp` and `f_int` give the same two views per
+component. `mean_lifetime="amplitude"` makes `tau_mean`, the lifetime trace
+and the FLID maps use `tau_amp`. The helpers
+[`mean_lifetime`, `amplitude_fractions`, `intensity_fractions`](../src/kpfm_pl/fitting.py)
+work on any amplitudes, also row-wise on `lifetime_trace(...).meta`.
 
 **How many exponentials? (BIC and warnings)** Adding an exponential always
 lowers χ², even if it only fits noise. `quality["bic"]` is the Bayesian
@@ -274,7 +291,9 @@ lt = ptu.lifetime_trace(bintime=0.5, n_exp=2, bins=10)
 
 `lifetime_trace` fits every photon time bin and returns a `Signal` containing
 the fitted lifetime in ns: for `n_exp > 1`, the intensity-weighted mean
-`sum(A_i tau_i^2) / sum(A_i tau_i)`, as in the [FLID map](#flid-map). Its `x`
+`sum(A_i tau_i^2) / sum(A_i tau_i)` (or the amplitude-weighted
+`sum(A_i tau_i) / sum(A_i)` with `mean_lifetime="amplitude"`), as in the
+[FLID map](#flid-map). `decay_correction` works as in `fit_lifetime`. Its `x`
 and `y` arrays have exactly one entry per selected time bin. Bins outside an
 intensity ROI, empty bins, failed fits and bins whose amplitudes are all zero
 remain `NaN` at their original positions; the individual fitted components
@@ -397,6 +416,8 @@ Key parameters:
 | `sigma` | `1.5` | Gaussian smoothing of the 2-D histogram (`0` disables) |
 | `isolated` | `False` | when `True`, return one `Image` per exponential; otherwise a single map of the intensity-weighted mean lifetime |
 | `weighting` | `"none"` | `"poisson"` weights every per-bin fit by photon noise, `"mle"` fits each bin by Poisson maximum likelihood (recommended for few photons per bin), as in `fit_lifetime` (also for `lifetime_trace`) |
+| `mean_lifetime` | `"intensity"` | mean lifetime of a bin with `n_exp > 1`: `"intensity"` (`tau_int`) or `"amplitude"` (`tau_amp`); fitted maps only (also for `lifetime_trace`) |
+| `decay_correction` | `True` | correct the per-bin amplitudes for the incomplete decay of earlier pulses, as in `fit_lifetime` (also for `lifetime_trace`) |
 | `method` | `"fit"` | `"mean_arrival"`: map the mean photon arrival time instead of fitting |
 | `truncation_correction` | `True` | for `method="mean_arrival"`, see [Mean arrival time](#mean-arrival-time-no-fit) |
 | `min_counts`/`coverage`/`auto_bintime` | `100`/`0.9`/`False` | photon-count check, see [Photons per time bin](#photons-per-time-bin) |

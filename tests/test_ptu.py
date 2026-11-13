@@ -615,6 +615,52 @@ def test_fit_lifetime_reports_bic_warnings_and_period_correction(ptu):
     assert any("collapsed" in w for w in strict["warnings"])
 
 
+def test_fit_lifetime_mean_lifetime_and_decay_correction_switch(ptu):
+    hist = ptu.lifetime_histogram()
+    fit = ptu.fit_lifetime(hist, n_exp=2, weighting="poisson")
+    assert fit["mean_lifetime"] == "intensity" and fit["decay_correction"]
+    assert fit["tau_mean"] == fit["tau_int"] and fit["tau_mean_err"] == fit["tau_int_err"]
+    np.testing.assert_allclose(fit["f_amp"], fit["A"] / np.sum(fit["A"]))
+    amp = ptu.fit_lifetime(hist, n_exp=2, weighting="poisson", mean_lifetime="amplitude")
+    assert amp["tau_mean"] == pytest.approx(amp["tau_amp"])
+    assert amp["tau_amp"] < amp["tau_int"]      # the intensity weighting favours long tau
+    raw = ptu.fit_lifetime(hist, n_exp=2, weighting="poisson", decay_correction=False)
+    assert raw["period"] is None and not raw["decay_correction"]
+    np.testing.assert_allclose(raw["A"], raw["A_fit"])
+    np.testing.assert_allclose(raw["A_fit"], fit["A_fit"])
+    assert raw["tau_int"] == pytest.approx(fit["tau_int_fit"])
+    with pytest.raises(ValueError, match="mean_lifetime"):
+        ptu.fit_lifetime(hist, n_exp=1, mean_lifetime="median")
+
+
+def test_lifetime_trace_mean_lifetime_and_decay_correction(monkeypatch):
+    seen = []
+
+    class DummyFit:
+        def __init__(self, t, y, n_exp, offset, **kwargs):
+            seen.append(kwargs.get("period"))
+            self.success = True
+
+        def parameters(self):
+            return {"A": np.array([0.5, 0.5]), "tau": np.array([1.0, 3.0]),
+                    "A_fit": np.array([0.5, 0.5])}
+
+    monkeypatch.setattr("kpfm_pl.ptu.MultiExpFit", DummyFit)
+    matrix = np.array([[16, 4, 1, 0, 0], [64, 16, 4, 1, 0]], dtype=np.uint32)
+    p = _synthetic_ptu(matrix, bintime=1.0, acquisition_time=2.0)
+    p.rep_time = 50e-9
+    kw = dict(bintime=1.0, n_exp=2, mode="manual", start=-1, end=10)
+    intensity = p.lifetime_trace(**kw)
+    np.testing.assert_allclose(intensity.y, (0.5 * 1 + 0.5 * 9) / (0.5 + 1.5))
+    amplitude = p.lifetime_trace(mean_lifetime="amplitude", decay_correction=False, **kw)
+    np.testing.assert_allclose(amplitude.y, 2.0)
+    assert amplitude.meta["mean_lifetime"] == "amplitude"
+    assert not amplitude.meta["decay_correction"]
+    assert seen[:2] == [pytest.approx(50.0)] * 2 and seen[2:] == [None, None]
+    with pytest.raises(ValueError, match="mean_lifetime"):
+        p.lifetime_trace(mean_lifetime="median", **kw)
+
+
 def test_fit_lifetime_mle(ptu):
     hist = ptu.lifetime_histogram()
     neyman = ptu.fit_lifetime(hist, n_exp=2, weighting="poisson")

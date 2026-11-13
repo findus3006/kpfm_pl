@@ -24,10 +24,13 @@ import numpy as np
 from scipy.optimize import curve_fit, least_squares
 
 __all__ = ["MultiExpFit", "poisson_chi_squared", "poisson_deviance", "fit_warnings",
+           "amplitude_fractions", "intensity_fractions", "mean_lifetime",
            "gaussian2d", "fit_gaussian2d", "peak_power_density"]
 
 #: Fit statistics of :class:`MultiExpFit`.
 STATISTICS = ("least_squares", "poisson_mle")
+#: Kinds of mean lifetime, see :func:`mean_lifetime`.
+MEAN_LIFETIMES = ("intensity", "amplitude")
 #: Iterations of the iteratively reweighted least squares behind the Poisson MLE.
 _MLE_MAX_ITER = 30
 #: Relative parameter change below which the MLE iterations stop.
@@ -36,6 +39,57 @@ _MLE_RTOL = 1e-7
 #: fewer expected counts carry almost no information; the floor keeps their
 #: weight finite.
 _MLE_MODEL_FLOOR = 0.1
+
+
+def _safe_ratio(numerator: np.ndarray, denominator: np.ndarray) -> np.ndarray:
+    """``numerator / denominator`` with ``NaN`` where the denominator is 0 or not finite."""
+    numerator = np.asarray(numerator, dtype=float)
+    denominator = np.asarray(denominator, dtype=float)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out = numerator / denominator
+    out = np.where(np.isfinite(denominator) & (denominator != 0), out, np.nan)
+    return np.where(np.isfinite(out), out, np.nan)
+
+
+def amplitude_fractions(A: np.ndarray) -> np.ndarray:
+    """Amplitude fractions ``A_i / sum(A)`` along the last axis.
+
+    The share of excited molecules (or emitters) in each component at the
+    excitation time. ``NaN`` where all amplitudes are zero. Works on one fit
+    (shape ``(n_exp,)``) or on many (e.g. ``(time bins, n_exp)``).
+    """
+    A = np.asarray(A, dtype=float)
+    return _safe_ratio(A, np.sum(A, axis=-1, keepdims=True))
+
+
+def intensity_fractions(A: np.ndarray, tau: np.ndarray) -> np.ndarray:
+    """Intensity fractions ``A_i tau_i / sum(A tau)`` along the last axis.
+
+    The share of the emitted photons in each component (the integral of
+    ``A_i exp(-t/tau_i)`` is ``A_i tau_i``). ``NaN`` where the total is zero.
+    """
+    weight = np.asarray(A, dtype=float) * np.asarray(tau, dtype=float)
+    return _safe_ratio(weight, np.sum(weight, axis=-1, keepdims=True))
+
+
+def mean_lifetime(A: np.ndarray, tau: np.ndarray, kind: str = "intensity") -> np.ndarray:
+    """Mean lifetime of a multi-exponential decay along the last axis.
+
+    ``kind="intensity"`` (default): ``tau_int = sum(A tau^2) / sum(A tau)``,
+    the mean weighted by the photons of each component, which equals the mean
+    photon arrival time after the excitation. ``kind="amplitude"``:
+    ``tau_amp = sum(A tau) / sum(A)``, weighted by the amplitudes (share of
+    emitters), e.g. for quenching/FRET analyses. Both equal ``tau`` for one
+    exponential. ``NaN`` where the weights sum to zero or a value is not
+    finite.
+    """
+    if kind not in MEAN_LIFETIMES:
+        raise ValueError(f"kind must be one of {MEAN_LIFETIMES}, not {kind!r}.")
+    A = np.asarray(A, dtype=float)
+    tau = np.asarray(tau, dtype=float)
+    if kind == "intensity":
+        return _safe_ratio(np.sum(A * tau ** 2, axis=-1), np.sum(A * tau, axis=-1))
+    return _safe_ratio(np.sum(A * tau, axis=-1), np.sum(A, axis=-1))
 
 
 class MultiExpFit:
@@ -353,29 +407,83 @@ class MultiExpFit:
         jac[:n, n:] = np.diag(-A_fit * np.exp(-self.period / tau) * self.period / tau ** 2)
         return jac @ cov @ jac.T
 
+    def _values(self, corrected: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """``(A, tau, covariance)``: per-pulse (``corrected``) or fitted amplitudes."""
+        p = self.parameters()
+        if corrected:
+            return p["A"], p["tau"], self.corrected_covariance()
+        return p["A_fit"], p["tau"], self.covariance()
+
     @staticmethod
-    def _tau_int(A: np.ndarray, tau: np.ndarray, cov: np.ndarray) -> tuple[float, float]:
-        A, tau = np.asarray(A, dtype=float), np.asarray(tau, dtype=float)
-        denominator = float(np.sum(A * tau))
-        if denominator == 0 or not np.isfinite(denominator):
-            return float("nan"), float("nan")
-        mean = float(np.sum(A * tau ** 2)) / denominator
-        gradient = np.concatenate([tau * (tau - mean), A * (2 * tau - mean)]) / denominator
+    def _propagate(gradient: np.ndarray, cov: np.ndarray) -> float:
+        """Standard error ``sqrt(g^T C g)`` (``NaN`` for a negative variance)."""
         variance = float(gradient @ cov @ gradient)
-        return mean, float(np.sqrt(variance)) if variance >= 0 else float("nan")
+        return float(np.sqrt(variance)) if variance >= 0 else float("nan")
+
+    def mean_lifetime(self, kind: str = "intensity",
+                      corrected: bool = True) -> tuple[float, float]:
+        """Mean lifetime (see :func:`mean_lifetime`) and its standard error.
+
+        ``kind`` is ``"intensity"`` (``sum(A tau^2) / sum(A tau)``) or
+        ``"amplitude"`` (``sum(A tau) / sum(A)``). Uses the per-pulse
+        amplitudes ``A`` (see ``period``); ``corrected=False`` uses the fitted
+        ``A_fit`` instead. The error is propagated from the covariance,
+        including the correlations of amplitudes and lifetimes; both are
+        ``NaN`` when the weights sum to zero.
+        """
+        A, tau, cov = self._values(corrected)
+        A, tau = np.asarray(A, dtype=float), np.asarray(tau, dtype=float)
+        mean = float(mean_lifetime(A, tau, kind))
+        if not np.isfinite(mean):
+            return float("nan"), float("nan")
+        if kind == "intensity":
+            denominator = float(np.sum(A * tau))
+            gradient = np.concatenate([tau * (tau - mean), A * (2 * tau - mean)]) / denominator
+        else:
+            denominator = float(np.sum(A))
+            gradient = np.concatenate([tau - mean, A]) / denominator
+        return mean, self._propagate(gradient, cov)
 
     def intensity_weighted_lifetime(self, corrected: bool = True) -> tuple[float, float]:
         """Intensity-weighted mean lifetime ``sum(A tau^2) / sum(A tau)`` and its error.
 
-        Equal to ``tau`` for one exponential. Uses the per-pulse amplitudes
-        ``A`` (see ``period``); ``corrected=False`` uses the fitted ``A_fit``
-        instead. The standard error is propagated from the covariance; both
-        are ``NaN`` when all amplitudes are zero.
+        Equal to ``tau`` for one exponential. Shorthand for
+        :meth:`mean_lifetime` with ``kind="intensity"``.
         """
-        p = self.parameters()
-        if corrected:
-            return self._tau_int(p["A"], p["tau"], self.corrected_covariance())
-        return self._tau_int(p["A_fit"], p["tau"], self.covariance())
+        return self.mean_lifetime("intensity", corrected)
+
+    def fractions(self, kind: str = "amplitude",
+                  corrected: bool = True) -> tuple[np.ndarray, np.ndarray]:
+        """Component fractions and their standard errors.
+
+        ``kind="amplitude"``: ``A_i / sum(A)`` (:func:`amplitude_fractions`);
+        ``kind="intensity"``: ``A_i tau_i / sum(A tau)``
+        (:func:`intensity_fractions`). Fractions of 0..1, ``NaN`` when the
+        total is zero. Errors are propagated from the covariance.
+        """
+        if kind not in MEAN_LIFETIMES:
+            raise ValueError(f"kind must be one of {MEAN_LIFETIMES}, not {kind!r}.")
+        A, tau, cov = self._values(corrected)
+        A, tau = np.asarray(A, dtype=float), np.asarray(tau, dtype=float)
+        n = A.size
+        nan = np.full(n, np.nan)
+        if kind == "amplitude":
+            values = amplitude_fractions(A)
+            total = float(np.sum(A))
+            if not np.all(np.isfinite(values)):
+                return nan, nan.copy()
+            jac = np.zeros((n, 2 * n))
+            jac[:, :n] = (np.eye(n) - values[:, None]) / total
+        else:
+            values = intensity_fractions(A, tau)
+            total = float(np.sum(A * tau))
+            if not np.all(np.isfinite(values)):
+                return nan, nan.copy()
+            jac = np.zeros((n, 2 * n))
+            jac[:, :n] = (np.diag(tau) - values[:, None] * tau[None, :]) / total
+            jac[:, n:] = (np.diag(A) - values[:, None] * A[None, :]) / total
+        errors = np.array([self._propagate(row, cov) for row in jac])
+        return values, errors
 
     def diagnostics(self, **thresholds: float) -> list[str]:
         """Warnings about a probably over-parameterised fit, see :func:`fit_warnings`.
@@ -411,16 +519,21 @@ class MultiExpFit:
         Includes the standard errors ``A_err``/``tau_err`` (from
         :meth:`corrected_covariance`) and the intensity-weighted mean lifetime
         ``tau_int`` with its error ``tau_int_err``
-        (:meth:`intensity_weighted_lifetime`). ``A``/``A_err``/``tau_int`` are
-        per-pulse values (see ``period``); ``A_fit``/``A_fit_err``/
-        ``tau_int_fit`` are the uncorrected values of the fitted curve.
+        (:meth:`intensity_weighted_lifetime`), the amplitude-weighted mean
+        lifetime ``tau_amp`` with ``tau_amp_err``, and the amplitude and
+        intensity fractions ``f_amp``/``f_int`` (0..1) with their errors
+        ``f_amp_err``/``f_int_err`` (:meth:`fractions`). These are per-pulse
+        values (see ``period``); ``A_fit``/``A_fit_err``/``tau_int_fit``/
+        ``tau_amp_fit`` are the uncorrected values of the fitted curve.
         """
         params = self.parameters()
         n = self.n_exp
         errors = np.sqrt(np.clip(np.diag(self.corrected_covariance()), 0.0, None))
         fit_errors = np.sqrt(np.clip(np.diag(self.covariance()), 0.0, None))
-        tau_int, tau_int_err = self.intensity_weighted_lifetime()
-        tau_int_fit, _ = self.intensity_weighted_lifetime(corrected=False)
+        tau_int, tau_int_err = self.mean_lifetime("intensity")
+        tau_amp, tau_amp_err = self.mean_lifetime("amplitude")
+        f_amp, f_amp_err = self.fractions("amplitude")
+        f_int, f_int_err = self.fractions("intensity")
         return {
             "A": params["A"],
             "tau": params["tau"],
@@ -428,9 +541,16 @@ class MultiExpFit:
             "tau_err": errors[n:2 * n],
             "tau_int": tau_int,
             "tau_int_err": tau_int_err,
+            "tau_amp": tau_amp,
+            "tau_amp_err": tau_amp_err,
+            "f_amp": f_amp,
+            "f_amp_err": f_amp_err,
+            "f_int": f_int,
+            "f_int_err": f_int_err,
             "A_fit": params["A_fit"],
             "A_fit_err": fit_errors[:n],
-            "tau_int_fit": tau_int_fit,
+            "tau_int_fit": self.mean_lifetime("intensity", corrected=False)[0],
+            "tau_amp_fit": self.mean_lifetime("amplitude", corrected=False)[0],
             "period": self.period,
             "statistic": self.statistic,
             "offset": self.offset,
@@ -492,15 +612,14 @@ def fit_warnings(A: np.ndarray, tau: np.ndarray, A_err: np.ndarray | None = None
                else np.atleast_1d(np.asarray(tau_err, float)))
     out: list[str] = []
 
-    weight = A * tau
-    total = float(np.sum(weight))
+    f_int = intensity_fractions(A, tau)
     for i in range(n):
         name = f"component {i + 1}"
         if np.isfinite(A_err[i]) and A_err[i] > 0 and abs(A[i]) < amp_sigma * A_err[i]:
             out.append(f"Amplitude A{i + 1} = {A[i]:.3g} ± {A_err[i]:.2g} is compatible with "
                        f"zero (< {amp_sigma:g} σ): {name} is probably not needed.")
-        elif total > 0 and np.isfinite(total) and weight[i] / total < min_fraction:
-            out.append(f"Component {i + 1} carries only {100 * weight[i] / total:.2g} % of "
+        elif np.isfinite(f_int[i]) and f_int[i] < min_fraction:
+            out.append(f"Component {i + 1} carries only {100 * f_int[i]:.2g} % of "
                        f"the intensity (< {100 * min_fraction:g} %): it has collapsed.")
     for i in range(n):
         for j in range(i + 1, n):

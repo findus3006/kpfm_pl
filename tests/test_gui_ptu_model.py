@@ -284,12 +284,19 @@ def test_fit_options_constrain_sum_only_for_normalised_data():
 
 
 def test_fit_options_constrain_sum_applies_to_normalised_fit(handle):
+    # The lifetime fit has no 'Normalise' any more (v1.6.0): the constraint acts
+    # on the normalised per-bin fits and leaves the raw-count fit alone.
     options = model.FitOptions()
     options.constrain_sum_A = True
+    signal = model.compute_lifetime_trace(handle, model.TraceParams(bintime=1.0),
+                                          model.FitParams(),
+                                          model.LifetimeTraceParams(bintime=60.0, n_exp=2),
+                                          options=options)
+    sums = np.nansum(signal.meta["amplitudes_fit"], axis=1)
+    assert np.all(sums[np.isfinite(signal.y)] <= 1.0 + 1e-3)
     result = model.compute_fit(handle, model.TraceParams(bintime=1.0),
-                               model.FitParams(n_exp=2, normalize=True),
-                               model.StateParams(), options=options)
-    assert np.sum(result.fit["A"]) <= 1.0 + 1e-3
+                               model.FitParams(n_exp=2), model.StateParams(), options=options)
+    assert np.sum(result.fit["A_fit"]) > 10     # counts, not capped at 1
 
 
 def test_fit_respects_lifetime_bounds(handle):
@@ -359,10 +366,47 @@ def test_fit_options_pass_warning_thresholds_and_validate(handle):
 def test_mle_fit_through_the_model(handle):
     options = model.FitOptions(weighting="mle")
     result = model.compute_fit(handle, model.TraceParams(bintime=1.0),
-                               model.FitParams(n_exp=1, normalize=True), model.StateParams(),
+                               model.FitParams(n_exp=1), model.StateParams(),
                                options=options)
     assert result.fit["success"] and result.fit["statistic"] == "poisson_mle"
     assert result.fit["quality"]["bic_statistic"] == "deviance"
+
+
+def test_fit_summary_fractions_mean_and_decay_switch(handle):
+    params, states = model.TraceParams(bintime=1.0), model.StateParams()
+    result = model.compute_fit(handle, params, model.FitParams(n_exp=2), states)
+    summary = model.fit_summary(result.fit)
+    assert summary["A1_pct"] + summary["A2_pct"] == pytest.approx(100.0)
+    assert summary["I1_pct"] + summary["I2_pct"] == pytest.approx(100.0)
+    for key in ("A1_pct", "I2_pct", "tau1_ns", "A1", "tau_int_ns"):
+        assert model.error_key(key) in summary
+    assert "A1_fit" in summary and "tau_amp_ns" not in summary
+    assert model.mean_text(result.fit).startswith("τ_int = ")
+
+    options = model.FitOptions(mean_lifetime="amplitude", decay_correction=False)
+    assert options.fit_kwargs(2)["mean_lifetime"] == "amplitude"
+    assert options.fit_kwargs(2)["decay_correction"] is False
+    assert "mean_lifetime" not in model.FitOptions().fit_kwargs(2)
+    other = model.compute_fit(handle, params, model.FitParams(n_exp=2), states,
+                              options=options)
+    summary = model.fit_summary(other.fit)
+    assert "tau_amp_ns" in summary and "tau_int_ns" not in summary
+    assert "A1_fit" not in summary            # nothing to compare without the correction
+    assert model.mean_text(other.fit).startswith("τ_amp = ")
+    with pytest.raises(ValueError, match="mean lifetime"):
+        model.FitOptions(mean_lifetime="median").validate()
+
+
+def test_lifetime_trace_uses_the_chosen_mean(handle):
+    options = model.FitOptions(mean_lifetime="amplitude")
+    signal = model.compute_lifetime_trace(handle, model.TraceParams(bintime=1.0),
+                                          model.FitParams(),
+                                          model.LifetimeTraceParams(bintime=60.0, n_exp=2),
+                                          options=options)
+    assert signal.meta["mean_lifetime"] == "amplitude"
+    from kpfm_pl import mean_lifetime
+    np.testing.assert_allclose(signal.y, mean_lifetime(signal.meta["amplitudes"],
+                                                       signal.meta["taus"], "amplitude"))
 
 
 @pytest.mark.parametrize("value,error,text", [

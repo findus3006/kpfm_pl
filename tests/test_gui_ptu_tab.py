@@ -212,12 +212,16 @@ def test_advanced_fit_settings_dialog_round_trip(window, qtbot, tab):
     assert "sum(A)" in describe_options(back)
     # fractions are entered in percent and come back as fractions
     tuned = model.FitOptions(bic_threshold=6.0, min_fraction=0.02, merge_rel=0.05,
-                             weighting="mle")
+                             weighting="mle", mean_lifetime="amplitude",
+                             decay_correction=False)
     tuned_dialog = FitOptionsDialog(tuned)
     qtbot.addWidget(tuned_dialog)
     assert tuned_dialog.form.value("min_fraction") == pytest.approx(2.0)
     again = tuned_dialog.options()
     assert again.bic_threshold == 6.0 and again.weighting == "mle"
+    assert again.mean_lifetime == "amplitude" and not again.decay_correction
+    assert "amplitude-weighted" in describe_options(again)
+    assert "no incomplete-decay correction" in describe_options(again)
     assert again.min_fraction == pytest.approx(0.02) and again.merge_rel == pytest.approx(0.05)
     assert "|ΔBIC| threshold 6" in describe_options(again)
     # an invalid entry keeps the dialog open with a message
@@ -282,6 +286,21 @@ def test_fit_table_and_title_show_tau_int_with_error(window, qtbot, tab):
     value = tab.fit_table.item(rows.index("τ_int (ns)"), 1).text()
     assert "±" in value
     assert "τ_int = " in tab.hist_plot.figure.axes[0].get_title()
+    # amplitude and intensity percentages with errors, counts for reference
+    for row in ("A1 (%)", "I2 (%)", "A1 (counts)", "A1 (fitted)", "τ1 (ns)"):
+        assert row in rows
+        assert "±" in tab.fit_table.item(rows.index(row), 1).text() or row == "A1 (fitted)"
+    assert not any("err" in r for r in rows)
+    assert "normalize" not in tab.fit_form.fields
+
+    # amplitude-weighted mean, no incomplete-decay correction
+    tab.set_fit_options(model.FitOptions(mean_lifetime="amplitude", decay_correction=False))
+    previous = tab.fit
+    tab.run_fit()
+    _wait(window, qtbot, lambda: tab.fit is not previous)
+    rows = [tab.fit_table.item(r, 0).text() for r in range(tab.fit_table.rowCount())]
+    assert "τ_amp (ns)" in rows and "τ_int (ns)" not in rows and "A1 (fitted)" not in rows
+    assert "τ_amp = " in tab.hist_plot.figure.axes[0].get_title()
 
 
 def test_flid_has_its_own_fit_window(window, qtbot, tab):

@@ -55,6 +55,8 @@ __all__ = [
     "compare_bic",
     "format_uncertainty",
     "tau_int_text",
+    "mean_text",
+    "error_key",
     "shifted_histogram_x",
     "trace_payload",
     "histogram_payload",
@@ -76,6 +78,11 @@ DIAGNOSTIC_DEFAULTS = {"amp_sigma": 2.0, "min_fraction": 0.01, "merge_sigma": 2.
 #: Default |ΔBIC| below which two fits count as equally good (Kass & Raftery:
 #: > 10 is "very strong" evidence).
 BIC_THRESHOLD = 10.0
+#: Mean lifetimes selectable in :class:`FitOptions` (``kpfm_pl.fitting.mean_lifetime``).
+MEAN_LIFETIMES = (("intensity", "Intensity-weighted τ_int = Σaτ² / Σaτ"),
+                  ("amplitude", "Amplitude-weighted τ_amp = Σaτ / Σa"))
+#: Table/title symbol of each mean lifetime.
+MEAN_SYMBOLS = {"intensity": "τ_int", "amplitude": "τ_amp"}
 LOSSES = (("linear", "Linear (standard)"), ("soft_l1", "Soft L1"), ("huber", "Huber"),
           ("cauchy", "Cauchy"), ("arctan", "Arctan"))
 #: Exponential components that can be fine-tuned in :class:`FitOptions`.
@@ -124,7 +131,6 @@ class FitParams:
     smoothing: float = 2.0
     start: float = 0.0
     end: float | None = None
-    normalize: bool = False
     roi: int = 0
 
     def window_kwargs(self) -> dict[str, Any]:
@@ -154,9 +160,14 @@ class FitOptions:
 
     ``constrain_sum_A`` enforces ``sum(A) <= 1``. It is only applied to
     normalised fits (``amplitude_scale == 1``), where the amplitudes are
-    fractions of the peak: the per-bin lifetime-trace/FLID fits, or the
-    lifetime fit with *Normalise*. Raw-count fits ignore it because their
-    amplitudes are counts, not fractions.
+    fractions of the peak: the per-bin lifetime-trace/FLID fits. The lifetime
+    fit works on raw counts and ignores it, because there the amplitudes are
+    counts, not fractions.
+
+    ``mean_lifetime`` (``"intensity"`` or ``"amplitude"``) selects the mean
+    lifetime of the fit table and title, the lifetime trace and the FLID
+    maps. ``decay_correction`` corrects the amplitudes for the incomplete
+    decay of earlier laser pulses (all fits).
 
     ``bic_threshold`` is the |ΔBIC| from which a lifetime fit counts as better
     or worse than the previous one (see :func:`compare_bic`). ``amp_sigma``,
@@ -175,6 +186,8 @@ class FitOptions:
     loss: str = "linear"
     f_scale: float = 1.0
     constrain_sum_A: bool = False
+    mean_lifetime: str = "intensity"
+    decay_correction: bool = True
     bic_threshold: float = BIC_THRESHOLD
     amp_sigma: float = DIAGNOSTIC_DEFAULTS["amp_sigma"]
     min_fraction: float = DIAGNOSTIC_DEFAULTS["min_fraction"]
@@ -208,6 +221,8 @@ class FitOptions:
         if self.weighting == "mle" and self.loss != "linear":
             raise ValueError("Poisson MLE needs the linear loss (a robust loss is a "
                              "least-squares concept).")
+        if self.mean_lifetime not in MEAN_SYMBOLS:
+            raise ValueError(f"Unknown mean lifetime {self.mean_lifetime!r}.")
         if self.bic_threshold < 0:
             raise ValueError("The BIC threshold must not be negative.")
         for key in DIAGNOSTIC_DEFAULTS:
@@ -251,6 +266,10 @@ class FitOptions:
                                                        else scale)
         if constrained:
             kwargs["constrain_sum_A"] = True
+        if self.mean_lifetime != "intensity":
+            kwargs["mean_lifetime"] = self.mean_lifetime
+        if not self.decay_correction:
+            kwargs["decay_correction"] = False
         return kwargs
 
 
@@ -525,8 +544,9 @@ def _fit_histogram(handle: LoadedFile, histogram: Signal, fit: FitParams,
         name = histogram.label.split(" (")[0] if histogram.label else fit.source
         raise ValueError(f"The {name!r} histogram contains no photons; adjust the "
                          "on/off thresholds or the ROI.")
-    scale = 1.0 if fit.normalize else float(np.max(y))
-    return handle.reader.fit_lifetime(histogram, n_exp=fit.n_exp, normalize=fit.normalize,
+    # Raw counts; amplitude options are fractions of the peak.
+    scale = float(np.max(y))
+    return handle.reader.fit_lifetime(histogram, n_exp=fit.n_exp,
                                       diagnostics=options.diagnostics(),
                                       **fit.window_kwargs(),
                                       **options.fit_kwargs(fit.n_exp, scale))
@@ -606,23 +626,45 @@ def compute_lifetime_trace(handle: LoadedFile, params: TraceParams, fit: FitPara
 
 
 # ------------------------------------------------------------------ summaries
-def fit_summary(fit: dict[str, Any]) -> dict[str, Any]:
-    """Scalar fit results: amplitudes, lifetimes (ns), offset, fit quality, window.
+def error_key(key: str) -> str:
+    """Summary key of the standard error of ``key`` (``tau1_ns`` -> ``tau1_err_ns``)."""
+    return f"{key[:-3]}_err_ns" if key.endswith("_ns") else f"{key}_err"
 
-    ``A{i}`` are the per-pulse amplitudes (corrected for the incomplete decay
-    of earlier laser pulses), ``A{i}_fit`` the fitted amplitudes of the curve.
+
+def fit_summary(fit: dict[str, Any]) -> dict[str, Any]:
+    """Scalar fit results: lifetimes (ns), amplitudes, mean lifetime, offset, quality, window.
+
+    Per component ``i``: ``tau{i}_ns``, the amplitude fraction ``A{i}_pct``
+    (``A_i / ΣA`` in %), the intensity fraction ``I{i}_pct``
+    (``A_i τ_i / ΣAτ`` in %), the per-pulse amplitude ``A{i}`` in counts
+    (corrected for the incomplete decay of earlier laser pulses when the fit
+    did so) and, with that correction, the fitted amplitude ``A{i}_fit``.
+    Standard errors are stored under :func:`error_key`. The mean lifetime is
+    ``tau_int_ns`` or ``tau_amp_ns``, as chosen by the fit's ``mean_lifetime``.
     """
     quality = fit.get("quality", {})
     summary: dict[str, Any] = {}
-    for i, (a, tau) in enumerate(zip(np.atleast_1d(fit["A"]), np.atleast_1d(fit["tau"])), 1):
-        summary[f"A{i}"] = float(a)
-        summary[f"tau{i}_ns"] = float(tau)
-    if "A_fit" in fit:
-        for i, a in enumerate(np.atleast_1d(fit["A_fit"]), 1):
-            summary[f"A{i}_fit"] = float(a)
-    if "tau_int" in fit:
-        summary["tau_int_ns"] = float(fit["tau_int"])
-        summary["tau_int_err_ns"] = float(fit.get("tau_int_err", np.nan))
+    A, tau = np.atleast_1d(fit["A"]), np.atleast_1d(fit["tau"])
+    columns = {"tau{}_ns": (tau, fit.get("tau_err")),
+               "A{}_pct": (fit.get("f_amp"), fit.get("f_amp_err"), 100.0),
+               "I{}_pct": (fit.get("f_int"), fit.get("f_int_err"), 100.0),
+               "A{}": (A, fit.get("A_err"))}
+    if fit.get("decay_correction", True) and "A_fit" in fit:
+        columns["A{}_fit"] = (fit["A_fit"], fit.get("A_fit_err"))
+    for i in range(A.size):
+        for pattern, (values, errors, *factor) in columns.items():
+            if values is None:
+                continue
+            scale = factor[0] if factor else 1.0
+            key = pattern.format(i + 1)
+            summary[key] = float(np.atleast_1d(values)[i]) * scale
+            if errors is not None:
+                summary[error_key(key)] = float(np.atleast_1d(errors)[i]) * scale
+    kind = fit.get("mean_lifetime", "intensity")
+    name = "tau_int" if kind == "intensity" else "tau_amp"
+    if name in fit:
+        summary[f"{name}_ns"] = float(fit[name])
+        summary[f"{name}_err_ns"] = float(fit.get(f"{name}_err", np.nan))
     summary["offset"] = float(fit.get("offset", 0.0))
     summary["reduced_chi_squared"] = float(quality.get("reduced_chi_squared", np.nan))
     if "bic" in quality:
@@ -665,6 +707,16 @@ def tau_int_text(fit: dict[str, Any]) -> str | None:
     if "tau_int" not in fit:
         return None
     return f"τ_int = {format_uncertainty(fit['tau_int'], fit.get('tau_int_err', np.nan))} ns"
+
+
+def mean_text(fit: dict[str, Any]) -> str | None:
+    """``"τ_int = 3.42 ± 0.05 ns"`` or ``"τ_amp = …"``: the fit's chosen mean lifetime."""
+    kind = fit.get("mean_lifetime", "intensity")
+    name = "tau_int" if kind == "intensity" else "tau_amp"
+    if name not in fit:
+        return None
+    value = format_uncertainty(fit[name], fit.get(f"{name}_err", np.nan))
+    return f"{MEAN_SYMBOLS[kind]} = {value} ns"
 
 
 def quality_text(fit: dict[str, Any]) -> str:
@@ -782,8 +834,7 @@ def _fit_signals(result: FitResult, prefix: str = "") -> list[Signal]:
     data = Signal(fit["shifted_histogram_x"], hist.y, label=name,
                   units={"x": "ns", "y": hist.units["y"]})
     curve = Signal(fit["t_fit"], fit["curve"], label=f"{prefix} fit".strip(),
-                   units={"x": "ns", "y": "normalised" if result.params.normalize
-                          else "counts"})
+                   units={"x": "ns", "y": "counts"})
     residuals = fit.get("quality", {}).get("weighted_residuals")
     signals = [data, curve]
     if residuals is not None:

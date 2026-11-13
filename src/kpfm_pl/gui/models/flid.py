@@ -427,8 +427,9 @@ def bin_fits_payload(result: FlidResult, entry: FlidEntry) -> ExportPayload:
         taus = np.asarray(m["taus"], dtype=float)
         amps = np.asarray(m["amplitudes"], dtype=float)
         if taus.shape[1] > 1:
+            name = "tau_amp" if m.get("mean_lifetime") == "amplitude" else "tau_int"
             columns.append(Signal(time, np.asarray(entry.traces["fit"].y, dtype=float),
-                                  label="tau_int", units={"x": "s", "y": "ns"}))
+                                  label=name, units={"x": "s", "y": "ns"}))
         for i in range(taus.shape[1]):
             columns.append(Signal(time, taus[:, i], label=f"tau{i + 1}", units={"x": "s", "y": "ns"}))
             columns.append(Signal(time, amps[:, i], label=f"A{i + 1}", units={"x": "s", "y": ""}))

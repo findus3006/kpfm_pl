@@ -25,6 +25,7 @@ from .models.ptu import (
     DIAGNOSTIC_DEFAULTS,
     LOSSES,
     MAX_COMPONENTS,
+    MEAN_LIFETIMES,
     WEIGHTINGS,
     FitOptions,
 )
@@ -67,7 +68,11 @@ def describe_options(options: FitOptions) -> str:
     if options.loss != "linear":
         parts.append(f"{options.loss} loss (scale {options.f_scale:g})")
     if options.constrain_sum_A:
-        parts.append("sum(A) ≤ 1 (normalised fits)")
+        parts.append("sum(A) ≤ 1 (per-bin fits)")
+    if options.mean_lifetime != "intensity":
+        parts.append("amplitude-weighted mean lifetime")
+    if not options.decay_correction:
+        parts.append("no incomplete-decay correction")
     if options.bic_threshold != BIC_THRESHOLD:
         parts.append(f"|ΔBIC| threshold {options.bic_threshold:g}")
     if any(getattr(options, k) != v for k, v in DIAGNOSTIC_DEFAULTS.items()):
@@ -130,10 +135,28 @@ class FitOptionsDialog(QDialog):
                             "weighting, otherwise as a fraction of the histogram peak.")
         f.add_bool("constrain_sum_A", "Constraint", False, text="sum(A) ≤ 1",
                    tooltip="Keep the amplitudes of all components below one peak in total, "
-                           "so they stay fractions of the decay. Applied only to "
-                           "normalised fits: the lifetime trace and FLID per-bin fits, "
-                           "and the lifetime fit with 'Normalise' ticked. Raw-count fits "
-                           "ignore it (their amplitudes are counts).")
+                           "so they stay fractions of the decay. Applied only to the "
+                           "normalised per-bin fits of the lifetime trace and the FLIDs. "
+                           "The lifetime fit works on raw counts and ignores it (its "
+                           "amplitudes are counts; see the % rows of the results table "
+                           "for fractions).")
+        f.add_heading("Amplitudes and mean lifetime")
+        f.add_choice("mean_lifetime", "Mean lifetime", MEAN_LIFETIMES, "intensity",
+                     tooltip="How several exponentials are averaged into one lifetime, in "
+                             "the fit table and title, the lifetime trace and the FLID "
+                             "maps.\nIntensity-weighted τ_int = Σaτ²/Σaτ: weighted by "
+                             "photons, equals the mean photon arrival time (comparable "
+                             "with the 'Mean arrival time' FLID).\nAmplitude-weighted "
+                             "τ_amp = Σaτ/Σa: weighted by the share of emitters, e.g. for "
+                             "quenching or FRET.")
+        f.add_bool("decay_correction", "Incomplete decay", True,
+                   text="correct amplitudes for earlier pulses",
+                   tooltip="If the decay has not reached the noise floor within one laser "
+                           "period, every bin also holds photons of earlier pulses and "
+                           "the fitted amplitudes are too large (long components most): "
+                           "A = A_fit·(1 − exp(−T/τ)). The lifetimes are not affected. "
+                           "Applies to the lifetime fit, the lifetime trace and the FLIDs.\n"
+                           "Untick to report the fitted amplitudes unchanged.")
         f.add_heading("Model selection (lifetime fit only)",
                       tooltip="How a lifetime fit is compared with the previous one and "
                               "when it warns about too many components.")
@@ -193,6 +216,8 @@ class FitOptionsDialog(QDialog):
             cell.set_value(getattr(options, attr)[i])
         values = {"weighting": options.weighting, "loss": options.loss,
                   "f_scale": options.f_scale, "constrain_sum_A": options.constrain_sum_A,
+                  "mean_lifetime": options.mean_lifetime,
+                  "decay_correction": options.decay_correction,
                   "bic_threshold": options.bic_threshold, "amp_sigma": options.amp_sigma,
                   "merge_sigma": options.merge_sigma}
         # Fractions are entered in percent.

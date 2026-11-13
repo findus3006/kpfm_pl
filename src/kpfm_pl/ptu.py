@@ -18,7 +18,7 @@ from typing import Any
 import numpy as np
 
 from .core import Image, Signal
-from .fitting import MultiExpFit, poisson_chi_squared
+from .fitting import MEAN_LIFETIMES, MultiExpFit, mean_lifetime, poisson_chi_squared
 from .utils import TriggerPoint, fit_window_mask, lifetime_from_truncated_mean, trigger_points
 
 __all__ = ["PTU", "flid_map"]
@@ -73,15 +73,20 @@ def _poisson_weights(weighting: str, counts: np.ndarray, scale: float,
     return {**fit_kwargs, "weights": weights}
 
 
-def _weighted_mean_lifetime(taus: np.ndarray, amps: np.ndarray) -> np.ndarray:
-    """Intensity-weighted mean lifetime ``sum(A tau^2) / sum(A tau)`` per row.
+def _weighted_mean_lifetime(taus: np.ndarray, amps: np.ndarray,
+                            kind: str = "intensity") -> np.ndarray:
+    """Mean lifetime per row (:func:`~kpfm_pl.fitting.mean_lifetime`).
 
-    Rows with a failed fit (NaN) or zero total weight (all ``A = 0``) give NaN.
+    ``kind="intensity"``: ``sum(A tau^2) / sum(A tau)``; ``"amplitude"``:
+    ``sum(A tau) / sum(A)``. Rows with a failed fit (NaN) or zero total
+    weight (all ``A = 0``) give NaN.
     """
-    with np.errstate(invalid="ignore", divide="ignore"):
-        mean = np.sum(amps * taus**2, axis=1) / np.sum(amps * taus, axis=1)
-    mean[~np.isfinite(mean)] = np.nan
-    return mean
+    return np.asarray(mean_lifetime(amps, taus, kind), dtype=float)
+
+
+def _check_mean_lifetime(kind: str) -> None:
+    if kind not in MEAN_LIFETIMES:
+        raise ValueError(f"mean_lifetime must be one of {MEAN_LIFETIMES}, not {kind!r}.")
 
 
 #: Extra attempts of ``auto_bintime`` after the first suggestion.
@@ -856,14 +861,16 @@ class PTU:
         mode: str = "fraction", fraction: float = 0.95,
         smoothing: float = 2.0, start: float = 0.0,
         end: float | None = None, weighting: str = "none",
+        decay_correction: bool = True,
         progress: Callable[[int, int], Any] | None = None,
         **fit_kwargs,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Fit lifetimes per selected time bin; ``(taus, amps, amps_fit)`` keep all bin positions.
 
         ``amps`` are the per-pulse amplitudes (corrected for the incomplete
-        decay of earlier pulses, see :class:`~kpfm_pl.fitting.MultiExpFit`'s
-        ``period``), ``amps_fit`` the fitted ones.
+        decay of earlier pulses when ``decay_correction``, see
+        :class:`~kpfm_pl.fitting.MultiExpFit`'s ``period``), ``amps_fit`` the
+        fitted ones.
         """
         time, matrix, selected = sel["time"], sel["matrix"], sel["selected"]
         bintime = sel["bintime"]
@@ -889,7 +896,7 @@ class PTU:
         amps = np.full((len(time), n_exp), np.nan, dtype=float)
         amps_fit = np.full((len(time), n_exp), np.nan, dtype=float)
         n_binned = len(mask)
-        period_ns = self._period_ns()
+        period_ns = self._period_ns() if decay_correction else None
         rows = np.flatnonzero(selected)
         for done, index in enumerate(rows):
             # Report before each fit so a raising callback aborts promptly.
@@ -923,9 +930,11 @@ class PTU:
         return taus, amps, amps_fit
 
     def _validate_fit_args(self, n_exp: int, bins: int, weighting: str,
-                           fit_kwargs: dict[str, Any]) -> None:
+                           fit_kwargs: dict[str, Any],
+                           mean_lifetime: str = "intensity") -> None:
         # Validate before the (slow) loop rather than at the first fit.
         _poisson_weights(weighting, np.ones(1), 1.0, fit_kwargs)
+        _check_mean_lifetime(mean_lifetime)
         if (isinstance(n_exp, (bool, np.bool_))
                 or not isinstance(n_exp, (int, np.integer)) or n_exp < 1):
             raise ValueError("n_exp must be a positive integer.")
@@ -950,22 +959,27 @@ class PTU:
                        weighting: str = "none",
                        min_counts: float | None = 100, coverage: float = 0.9,
                        auto_bintime: bool = False,
+                       mean_lifetime: str = "intensity",
+                       decay_correction: bool = True,
                        progress: Callable[[int, int], Any] | None = None,
                        **fit_kwargs) -> Signal:
         """Return mean fitted lifetime versus acquisition time.
 
         The returned ``Signal.x`` contains the time-bin positions and
-        ``Signal.y`` contains the intensity-weighted mean
-        ``sum(A_i * tau_i**2) / sum(A_i * tau_i)`` of the fitted exponential
-        lifetimes in ns (equal to ``tau`` for ``n_exp=1``). There is exactly
+        ``Signal.y`` contains the mean of the fitted exponential lifetimes in
+        ns (equal to ``tau`` for ``n_exp=1``): intensity-weighted
+        ``sum(A_i * tau_i**2) / sum(A_i * tau_i)`` with
+        ``mean_lifetime="intensity"`` (default), amplitude-weighted
+        ``sum(A_i * tau_i) / sum(A_i)`` with ``"amplitude"``. There is exactly
         one value per time bin. A value is ``NaN`` when the bin is outside the
         requested intensity ROI, contains no usable photons, its fit fails, or
         all its amplitudes are zero. Individual fitted components are
         available as ``signal.meta["taus"]`` and ``signal.meta["amplitudes"]``
-        with shape ``(time bins, n_exp)``. The amplitudes (and so the mean
-        lifetime) are per-pulse values, corrected for the incomplete decay of
-        earlier laser pulses as in :meth:`fit_lifetime`; the uncorrected ones
-        are in ``signal.meta["amplitudes_fit"]``.
+        with shape ``(time bins, n_exp)``. With ``decay_correction`` (default)
+        the amplitudes (and so the mean lifetime) are per-pulse values,
+        corrected for the incomplete decay of earlier laser pulses as in
+        :meth:`fit_lifetime`; the uncorrected ones are in
+        ``signal.meta["amplitudes_fit"]``.
         By default, the trace inherits the ``laser_pulse`` mode of the most
         recent :meth:`time_trace` call.  Pass the option explicitly when no
         time trace has been generated first.
@@ -977,7 +991,7 @@ class PTU:
         (see :meth:`flid`). ``min_counts``, ``coverage`` and ``auto_bintime``
         check the photons per time bin, see :meth:`flid`.
         """
-        self._validate_fit_args(n_exp, bins, weighting, fit_kwargs)
+        self._validate_fit_args(n_exp, bins, weighting, fit_kwargs, mean_lifetime)
         sel = self._select_time_bins(
             roi, x_min=x_min, x_max=x_max, y_min=y_min, y_max=y_max,
             bintime=bintime, laser_pulse=laser_pulse, min_counts=min_counts,
@@ -986,15 +1000,16 @@ class PTU:
         taus, amps, amps_fit = self._fit_time_bin_lifetimes(
             sel, n_exp=n_exp, bins=bins, mode=mode, fraction=fraction,
             smoothing=smoothing, start=start, end=end, weighting=weighting,
-            progress=progress, **fit_kwargs,
+            decay_correction=decay_correction, progress=progress, **fit_kwargs,
         )
         return Signal(
-            sel["time"], _weighted_mean_lifetime(taus, amps),
+            sel["time"], _weighted_mean_lifetime(taus, amps, mean_lifetime),
             label=f"{self.filepath.stem} mean lifetime",
             units={"x": "s", "y": "ns"},
             meta={**self._trace_meta(sel, "fit"), "n_exp": n_exp, "lt_bins": bins,
                   "taus": taus, "amplitudes": amps, "amplitudes_fit": amps_fit,
-                  "weighting": weighting},
+                  "weighting": weighting, "mean_lifetime": mean_lifetime,
+                  "decay_correction": bool(decay_correction)},
         )
 
     def arrival_time_trace(self, roi: dict[str, float] | None = None, *,
@@ -1101,6 +1116,7 @@ class PTU:
              method: str = "fit", truncation_correction: bool = True,
              min_counts: float | None = 100, coverage: float = 0.9,
              auto_bintime: bool = False,
+             mean_lifetime: str = "intensity", decay_correction: bool = True,
              progress: Callable[[int, int], Any] | None = None,
              **fit_kwargs) -> Image | list[Image]:
         """Compute a FLID (Fluorescence-Lifetime-Intensity-Distribution) map.
@@ -1108,9 +1124,10 @@ class PTU:
         Each time bin of the (optionally) ROI-restricted matrix is fitted with
         ``n_exp`` exponentials; the resulting ``(lifetime, counts)`` pairs are
         binned into a 2-D histogram (lifetime on x, counts on y). Unless
-        ``isolated``, the lifetime of a bin is the intensity-weighted mean
-        ``sum(A_i * tau_i**2) / sum(A_i * tau_i)`` of its fitted components
-        (equal to ``tau`` for ``n_exp=1``).
+        ``isolated``, the lifetime of a bin is the mean of its fitted
+        components (equal to ``tau`` for ``n_exp=1``): intensity-weighted
+        ``sum(A_i * tau_i**2) / sum(A_i * tau_i)`` by default, or
+        amplitude-weighted with ``mean_lifetime="amplitude"``.
 
         This is :meth:`lifetime_trace` (or :meth:`arrival_time_trace`)
         followed by :func:`flid_map`. Call those two yourself to redraw the
@@ -1138,8 +1155,7 @@ class PTU:
             Fit-window left-bound selection, as in :meth:`fit_lifetime`.
         isolated :
             When ``True`` return one :class:`Image` per exponential component;
-            otherwise return a single map of the per-bin intensity-weighted
-            mean lifetime.
+            otherwise return a single map of the per-bin mean lifetime.
         weighting :
             ``"none"`` (default), ``"poisson"`` weighting or ``"mle"``
             (Poisson maximum likelihood) for the per-bin fits, as in
@@ -1164,6 +1180,13 @@ class PTU:
             more slowly than the bin time). The ROI's count range is scaled by
             the bin-time ratio, because it was drawn at ``bintime``.
             ``meta["bintime"]`` and ``meta["roi"]`` hold the values used.
+        mean_lifetime :
+            ``"intensity"`` (default) or ``"amplitude"``: the mean lifetime of
+            a bin, see :meth:`lifetime_trace`. Only for ``method="fit"``; the
+            mean arrival time always corresponds to the intensity-weighted mean.
+        decay_correction :
+            Correct the per-bin amplitudes for the incomplete decay of earlier
+            laser pulses (default), see :meth:`fit_lifetime`.
         progress :
             Optional callback ``progress(done, total)``, called before each
             per-bin fit and once with ``done == total`` at the end (e.g. to
@@ -1189,6 +1212,8 @@ class PTU:
                   "auto_bintime": auto_bintime, "progress": progress, **window}
         if method == "fit":
             trace = self.lifetime_trace(roi, n_exp=n_exp, bins=bins, weighting=weighting,
+                                        mean_lifetime=mean_lifetime,
+                                        decay_correction=decay_correction,
                                         **common, **fit_kwargs)
             done = "fitted"
         elif method == "mean_arrival":
@@ -1250,6 +1275,7 @@ class PTU:
                      start: float = 0.0, end: float | None = None,
                      normalize: bool = False, weighting: str = "none",
                      diagnostics: dict[str, float] | None = None,
+                     mean_lifetime: str = "intensity", decay_correction: bool = True,
                      **fit_kwargs) -> dict[str, Any]:
         """Fit a lifetime ``histogram`` with ``n_exp`` exponentials.
 
@@ -1273,10 +1299,17 @@ class PTU:
         or from the deviance for ``"mle"``) for comparing fits of the same
         histogram and window with different ``n_exp``.
 
-        The amplitudes ``A`` (and ``tau_int``) are per-pulse values: the
-        fitted ``A_fit`` include the photons of all earlier laser pulses that
-        have not decayed yet, ``A = A_fit * (1 - exp(-T/tau))`` with the laser
-        period ``T``. The lifetimes need no correction.
+        With ``decay_correction`` (default) the amplitudes ``A`` (and every
+        quantity derived from them: ``tau_int``, ``tau_amp``, ``f_amp``,
+        ``f_int``) are per-pulse values: the fitted ``A_fit`` include the
+        photons of all earlier laser pulses that have not decayed yet,
+        ``A = A_fit * (1 - exp(-T/tau))`` with the laser period ``T``. The
+        lifetimes need no correction. ``decay_correction=False`` reports the
+        fitted amplitudes unchanged.
+
+        ``out["tau_mean"]``/``out["tau_mean_err"]`` repeat the mean lifetime
+        selected by ``mean_lifetime``: ``"intensity"`` (``tau_int``, default)
+        or ``"amplitude"`` (``tau_amp``); both are always returned as well.
 
         ``out["warnings"]`` lists signs of too many components (amplitude
         compatible with zero, merged lifetimes, parameter at a bound), see
@@ -1307,9 +1340,16 @@ class PTU:
         offset = self.dark_counts * float(duration or 0.0) / self.n_lt_bins / norm
 
         fit_kwargs = _poisson_weights(weighting, y[mask], norm, fit_kwargs)
-        fit = MultiExpFit(t_fit, y_fit, n_exp, offset, period=self._period_ns(),
+        _check_mean_lifetime(mean_lifetime)
+        fit = MultiExpFit(t_fit, y_fit, n_exp, offset,
+                          period=self._period_ns() if decay_correction else None,
                           **fit_kwargs)
         out = fit.to_dict()
+        key = "tau_int" if mean_lifetime == "intensity" else "tau_amp"
+        if key in out:
+            out["tau_mean"], out["tau_mean_err"] = out[key], out[f"{key}_err"]
+        out["mean_lifetime"] = mean_lifetime
+        out["decay_correction"] = bool(decay_correction)
         if "curve" in out:
             out.setdefault("quality", {}).update(
                 poisson_chi_squared(y[mask], np.asarray(out["curve"]) * norm, 2 * n_exp,

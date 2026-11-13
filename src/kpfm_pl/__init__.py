@@ -34,9 +34,12 @@ from .database import (
 )
 from .fitting import (
     MultiExpFit,
+    amplitude_fractions,
     fit_gaussian2d,
     fit_warnings,
     gaussian2d,
+    intensity_fractions,
+    mean_lifetime,
     peak_power_density,
     poisson_chi_squared,
     poisson_deviance,
@@ -78,6 +81,9 @@ __all__ = [
     "poisson_chi_squared",
     "poisson_deviance",
     "fit_warnings",
+    "amplitude_fractions",
+    "intensity_fractions",
+    "mean_lifetime",
     "gaussian2d",
     "fit_gaussian2d",
     "peak_power_density",

@@ -53,8 +53,19 @@ _SUMMARY_LABELS = {
     "lifetime_shift_ns": "Lifetime shift (ns)",
 }
 _TAU_INT_TOOLTIP = ("Intensity-weighted mean lifetime Σ Aᵢτᵢ² / Σ Aᵢτᵢ (equal to τ1 for one "
-                    "exponential), as used by the lifetime trace and the FLID maps.\n"
+                    "exponential): the mean photon arrival time, as used by the lifetime "
+                    "trace and the FLID maps. Switch to τ_amp in Advanced fit settings.\n"
                     "± standard error propagated from the fit covariance.")
+_TAU_AMP_TOOLTIP = ("Amplitude-weighted mean lifetime Σ Aᵢτᵢ / Σ Aᵢ (equal to τ1 for one "
+                    "exponential): weighted by the share of emitters, e.g. for quenching "
+                    "or FRET. Also used by the lifetime trace and the FLID maps. Switch "
+                    "to τ_int in Advanced fit settings.\n"
+                    "± standard error propagated from the fit covariance.")
+_A_PCT_TOOLTIP = ("Amplitude fraction Aᵢ / Σ Aⱼ in %: share of the emitters in this "
+                  "component at the excitation time. ± propagated standard error.")
+_I_PCT_TOOLTIP = ("Intensity fraction Aᵢτᵢ / Σ Aⱼτⱼ in %: share of the emitted photons in "
+                  "this component. ± propagated standard error.")
+_TAU_TOOLTIP = "Fitted lifetime. ± standard error from the fit covariance."
 _CHI_TOOLTIP = ("Reduced chi-squared with Poisson weights (counts - fit)² / counts.\n"
                 "≈ 1: the fit describes the data within photon noise.\n"
                 "Clearly > 1: systematic deviations (try more exponentials or another "
@@ -68,9 +79,11 @@ _BIC_TOOLTIP = ("Bayesian information criterion χ² + k·ln n (Poisson deviance
                 "and weighting. Green: better by more than the threshold (Advanced fit "
                 "settings), red: worse (e.g. an extra component that only fits noise), "
                 "gray: about the same or not comparable.")
-_A_TOOLTIP = ("Per-pulse amplitude: the fitted amplitude corrected for the photons of all "
-              "earlier laser pulses that had not decayed yet, A = A_fit·(1 − exp(−T/τ)) "
-              "with the laser period T. Used for τ_int.")
+_A_TOOLTIP = ("Amplitude in counts per bin. With the incomplete-decay correction (Advanced "
+              "fit settings) it is the per-pulse amplitude: the fitted amplitude corrected "
+              "for the photons of all earlier laser pulses that had not decayed yet, "
+              "A = A_fit·(1 − exp(−T/τ)) with the laser period T. The percentages and the "
+              "mean lifetime use it.")
 _A_FIT_TOOLTIP = ("Amplitude of the fitted curve, before the incomplete-decay correction "
                   "(includes the tails of earlier pulses).")
 #: Colours of the BIC verdicts (``BicComparison.colour``).
@@ -85,14 +98,41 @@ def _is_fitted_amplitude(key: str) -> bool:
     return key.startswith("A") and key.endswith("_fit") and key[1:-4].isdigit()
 
 
+def _is_fraction(key: str) -> bool:
+    """``A1_pct`` / ``I1_pct``: amplitude or intensity fraction in %."""
+    return key[:1] in "AI" and key.endswith("_pct") and key[1:-4].isdigit()
+
+
 def _summary_label(key: str) -> str:
     if key == "tau_int_ns":
         return "τ_int (ns)"
+    if key == "tau_amp_ns":
+        return "τ_amp (ns)"
     if key.startswith("tau") and key.endswith("_ns"):
         return f"τ{key[3:-3]} (ns)"
+    if _is_fraction(key):
+        return f"{key[:-4]} (%)"
+    if _is_amplitude(key):
+        return f"{key} (counts)"
     if _is_fitted_amplitude(key):
         return f"{key[:-4]} (fitted)"
     return _SUMMARY_LABELS.get(key, key)
+
+
+def _summary_tooltip(key: str) -> str:
+    fixed = {"reduced_chi_squared": _CHI_TOOLTIP, "tau_int_ns": _TAU_INT_TOOLTIP,
+             "tau_amp_ns": _TAU_AMP_TOOLTIP, "bic": _BIC_TOOLTIP}
+    if key in fixed:
+        return fixed[key]
+    if _is_fraction(key):
+        return _A_PCT_TOOLTIP if key.startswith("A") else _I_PCT_TOOLTIP
+    if _is_amplitude(key):
+        return _A_TOOLTIP
+    if _is_fitted_amplitude(key):
+        return _A_FIT_TOOLTIP
+    if key.startswith("tau") and key.endswith("_ns"):
+        return _TAU_TOOLTIP
+    return ""
 
 
 def _chi_colour(chi: float) -> QColor | None:
@@ -291,8 +331,6 @@ class PTUTab(BaseTab):
         f.add_optional_float("end", "End", None, maximum=1000, step=1, decimals=2,
                              suffix=" ns", auto_text="end of histogram",
                              tooltip="Fit window end, relative to the histogram maximum.")
-        f.add_bool("normalize", "Normalise", False, text="scale histogram to 1",
-                   tooltip="Divide the histogram by its maximum before fitting.")
         layout.addWidget(f)
         f.changed.connect(self._update_fit_fields)
         self._update_fit_fields()
@@ -350,14 +388,16 @@ class PTUTab(BaseTab):
                              "map of the displayed trace, all count levels.\nROI n: only "
                              "that ROI.")
         f.add_choice("method", "Lifetime from", flid_model.METHODS, "fit",
-                     tooltip="Fit: fit every time bin with exponentials (their intensity-"
-                             "weighted mean lifetime).\nMean arrival time: average delay "
+                     tooltip="Fit: fit every time bin with exponentials (their mean "
+                             "lifetime, intensity- or amplitude-weighted as chosen in "
+                             "Advanced fit settings).\nMean arrival time: average delay "
                              "of the photons in the fit window, no fitting (fast sanity "
                              "check; comparable to the fit's intensity-weighted mean).\n"
                              "Both: the two maps side by side on identical bins.")
         f.add_int("n_exp", "Exponentials", 1, minimum=1, maximum=model.MAX_COMPONENTS,
                   tooltip="Exponential components fitted per time bin. With more than "
-                          "one, the map uses their intensity-weighted mean lifetime.")
+                          "one, the map uses their mean lifetime (τ_int or τ_amp, see "
+                          "Advanced fit settings).")
         f.add_int("bins", "Lifetime binning", 1, minimum=1, maximum=64,
                   tooltip="Merge this many lifetime channels before fitting "
                           "(helps with few photons per bin).")
@@ -805,24 +845,22 @@ class PTUTab(BaseTab):
         table.clear()
         table.setColumnCount(1 + len(headers))
         table.setHorizontalHeaderLabels(["Parameter", *headers])
-        # The error of τ_int is shown in its own row ("value ± error").
-        keys = [k for k in dict.fromkeys(k for s in summaries for k in s)
-                if k != "tau_int_err_ns"]
+        # Errors are shown with their value ("value ± error"), not in rows of their own.
+        all_keys = list(dict.fromkeys(k for s in summaries for k in s))
+        errors = {model.error_key(k) for k in all_keys}
+        keys = [k for k in all_keys if k not in errors]
         table.setRowCount(len(keys))
-        tooltips = {"reduced_chi_squared": _CHI_TOOLTIP, "tau_int_ns": _TAU_INT_TOOLTIP,
-                    "bic": _BIC_TOOLTIP}
         for row, key in enumerate(keys):
             label = QTableWidgetItem(_summary_label(key))
-            tip = tooltips.get(key) or (_A_TOOLTIP if _is_amplitude(key) else
-                                        _A_FIT_TOOLTIP if _is_fitted_amplitude(key) else "")
+            tip = _summary_tooltip(key)
             if tip:
                 label.setToolTip(tip)
             table.setItem(row, 0, label)
             for col, (summary, result) in enumerate(zip(summaries, self.fits), 1):
                 value = summary.get(key)
                 colour = None
-                if key == "tau_int_ns" and value is not None:
-                    text = model.format_uncertainty(value, summary.get("tau_int_err_ns", np.nan))
+                if model.error_key(key) in summary and value is not None:
+                    text = model.format_uncertainty(value, summary[model.error_key(key)])
                 elif key == "bic" and value is not None:
                     comparison = result.extra.get("bic_comparison")
                     text = comparison.short_text() if comparison else f"{value:.1f}"
@@ -1055,11 +1093,11 @@ class PTUTab(BaseTab):
                 fit = self.fit.fit
                 taus = ", ".join(f"τ{i} = {t:.3g} ns"
                                  for i, t in enumerate(np.atleast_1d(fit["tau"]), 1))
-                tau_int = model.tau_int_text(fit)
-                if tau_int and np.size(fit["tau"]) > 1:
-                    taus += f" | {tau_int}"
-                elif tau_int:  # one exponential: τ_int is τ1, shown with its error
-                    taus = tau_int.replace("τ_int", "τ1")
+                mean = model.mean_text(fit)
+                if mean and np.size(fit["tau"]) > 1:
+                    taus += f" | {mean}"
+                elif mean:  # one exponential: the mean is τ1, shown with its error
+                    taus = "τ1 = " + mean.split(" = ", 1)[1]
                 comparison = self.fit.extra.get("bic_comparison")
                 ax.set_title(f"{self.fit.histogram.label}: {taus}\n"
                              f"{model.quality_text(fit)}{self._shift_note()}",
@@ -1092,14 +1130,11 @@ class PTUTab(BaseTab):
                     color=colour if multi else "0.3", alpha=0.5 if multi else 1.0,
                     label=None if multi else "Histogram")
         curve = np.asarray(fit["curve"], dtype=float)
-        if result.params.normalize:
-            # Undo the normalisation so the curve overlays the raw counts.
-            curve = curve * np.max(y[np.isin(x, fit["t_fit"])])
-        tau_int = model.tau_int_text(fit)
+        mean = model.mean_text(fit)
         comparison = result.extra.get("bic_comparison")
         bic = (f", BIC {comparison.short_text()}" if comparison is not None else "")
         label = (f"{name}: τ = " + ", ".join(f"{t:.3g}" for t in np.atleast_1d(fit["tau"]))
-                 + " ns" + (f", {tau_int}" if tau_int and np.size(fit["tau"]) > 1 else "")
+                 + " ns" + (f", {mean}" if mean and np.size(fit["tau"]) > 1 else "")
                  + f", {model.quality_text(fit)}{bic}") if multi else "Fit"
         ax.semilogy(fit["t_fit"], curve, "-", color=colour, linewidth=1.5, label=label)
         if not multi:
@@ -1150,7 +1185,8 @@ class PTUTab(BaseTab):
         colour = roi_colour(lt.roi) if lt.roi is not None else "tab:purple"
         ax.plot(signal.x, signal.y, ".", color=colour, markersize=3)
         ax.set_xlabel("Time (s)")
-        ax.set_ylabel("Mean lifetime (ns)")
+        kind = signal.meta.get("mean_lifetime", "intensity")
+        ax.set_ylabel(f"Mean lifetime {model.MEAN_SYMBOLS.get(kind, '')} (ns)")
         n_ok = int(np.count_nonzero(np.isfinite(signal.y)))
         ax.set_title(f"{signal.label} ({n_ok} of {len(signal)} bins fitted)")
         ax.grid(True, alpha=0.3)

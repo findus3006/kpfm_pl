@@ -99,10 +99,19 @@ title on the left to fold it away.
    the number of exponentials and how the fit window starts; in *Manual*
    mode you can drag across the histogram plot to set start and end.
    *Dark counts* are subtracted as an offset.
-   - **τ_int**: the intensity-weighted mean lifetime Σ Aᵢτᵢ² / Σ Aᵢτᵢ with
-     its standard error (from the fit covariance), rounded to the relevant
-     digits, in the table and the plot title. It is the lifetime the lifetime
-     trace and the FLID maps use for several exponentials.
+   The fit always works on the raw counts (there is no *Normalise* any more:
+   the percentages below show the relative amplitudes directly).
+   - **Mean lifetime**: **τ_int**, the intensity-weighted mean Σ Aᵢτᵢ² / Σ Aᵢτᵢ
+     (the mean photon arrival time), or **τ_amp**, the amplitude-weighted mean
+     Σ Aᵢτᵢ / Σ Aᵢ (share of emitters, e.g. for quenching/FRET), as chosen in
+     *Advanced fit settings*, with its standard error (from the fit
+     covariance), rounded to the relevant digits, in the table and the plot
+     title. The lifetime trace and the FLID maps use the same mean for
+     several exponentials.
+   - **Per component**: τ ± error, **A (%)** = Aᵢ / Σ Aⱼ (amplitude
+     fraction) and **I (%)** = Aᵢτᵢ / Σ Aⱼτⱼ (intensity fraction, share of the
+     photons), both with errors, and **A (counts)**, the amplitude in counts
+     per bin.
    - **Fit quality**: the table lists the lifetimes, amplitudes and
      **χ²ᵣ** (reduced chi-squared with Poisson weights), also shown in the
      plot title. χ²ᵣ ≈ 1 (green) means the fit describes the histogram within
@@ -123,11 +132,13 @@ title on the left to fold it away.
    - **Over-fitting warnings** in the log: an amplitude compatible with zero
      or carrying almost no intensity, two lifetimes that have merged, or a
      parameter that ended at one of its bounds.
-   - **Amplitudes**: *A1, A2, …* are per-pulse amplitudes, corrected for the
-     photons of earlier laser pulses when the decay has not reached the
-     noise floor within one period (A = A_fit·(1 − exp(−T/τ))); τ_int uses
-     them. *A1 (fitted), …* are the amplitudes of the plotted curve. The
-     lifetimes need no correction. See [ptu.md](ptu.md#lifetime-fitting).
+   - **Incomplete decay**: by default the amplitudes are per-pulse values,
+     corrected for the photons of earlier laser pulses when the decay has not
+     reached the noise floor within one period (A = A_fit·(1 − exp(−T/τ)));
+     the percentages and the mean lifetime use them. *A1 (fitted), …* are the
+     amplitudes of the plotted curve. The lifetimes need no correction.
+     Switch it off with *Incomplete decay* in *Advanced fit settings* (then
+     the *(fitted)* rows disappear). See [ptu.md](ptu.md#lifetime-fitting).
    - **Advanced fit settings…**: initial guesses and lower/upper bounds of
      every lifetime τ (ns) and amplitude A (fraction of the histogram peak),
      the **weighting** (*Poisson*, recommended for TCSPC data: the low-count
@@ -136,14 +147,15 @@ title on the left to fold it away.
      fits) and robust losses against outliers. Ticked fields are used,
      unticked ones are automatic. The settings apply to the lifetime fit,
      the lifetime trace and the FLID fits; the line under the button
-     summarises them. *Model selection* sets the |ΔBIC| threshold (default
-     10, "very strong" evidence after Kass & Raftery) and the thresholds of
-     the over-fitting warnings; these only affect the lifetime fit.
+     summarises them. *Amplitudes and mean lifetime* chooses τ_int or τ_amp
+     and switches the incomplete-decay correction (both for all fits).
+     *Model selection* sets the |ΔBIC| threshold (default 10, "very strong"
+     evidence after Kass & Raftery) and the thresholds of the over-fitting
+     warnings; these only affect the lifetime fit.
    - **Constraint** (*sum(A) ≤ 1*): caps the total amplitude at one peak, so
-     the components stay fractions of the decay. It is only applied to
-     normalised fits — the lifetime trace and FLID per-bin fits (always
-     normalised) and the lifetime fit with *Normalise* ticked. Raw-count
-     fits ignore it, because there the amplitudes are counts and the
+     the components stay fractions of the decay. It is only applied to the
+     lifetime trace and FLID per-bin fits, which are always normalised. The
+     lifetime fit ignores it, because its amplitudes are counts and the
      constraint would cap them at 1 count.
 5. **Lifetime trace**: fits every time bin separately and plots the mean
    lifetime against time (grey: counts). It uses the fit window of
