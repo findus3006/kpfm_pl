@@ -10,6 +10,7 @@ uses ROIs runs with the trace's bin time.
 from __future__ import annotations
 
 import dataclasses
+from pathlib import Path
 
 import numpy as np
 from matplotlib.patches import Rectangle
@@ -36,6 +37,10 @@ from .rois import RoiEditor, roi_colour
 
 __all__ = ["PTUTab"]
 
+#: Settings keys of the IRF file and its checkbox (remembered across sessions).
+_IRF_PATH_KEY = "ptu/irf_path"
+_IRF_USE_KEY = "ptu/irf_use"
+
 _START_KINDS = (("time", "Time"), ("trigger", "Trigger"))
 _SHIFT_KINDS = (("off", "Off"), ("auto", "Auto (peak at 5 ns)"), ("manual", "Manual"))
 _END_KINDS = (("end", "End of file"), ("time", "Time"), ("trigger", "Trigger"))
@@ -51,6 +56,9 @@ _SUMMARY_LABELS = {
     "fit_end_ns": "Fit end (ns)",
     "fit_points": "Fit points",
     "lifetime_shift_ns": "Lifetime shift (ns)",
+    "irf_shift_ns": "IRF shift δ (ns)",
+    "irf_fwhm_ns": "IRF FWHM (ns)",
+    "scatter": "Scatter s (counts)",
 }
 _TAU_INT_TOOLTIP = ("Intensity-weighted mean lifetime Σ Aᵢτᵢ² / Σ Aᵢτᵢ (equal to τ1 for one "
                     "exponential): the mean photon arrival time, as used by the lifetime "
@@ -160,6 +168,7 @@ class PTUTab(BaseTab):
         self._popouts: list[FlidWindow] = []   # open pop-out map windows
         self._flid_axes: dict = {}             # FLID map axes -> (entry, method)
         self.fit_options = model.FitOptions()
+        self.irf = None                        # LoadedFile of the IRF recording
         self._span = None
         self._hist_ax = None
         # Chosen window triggers survive a new file, whose list is still empty.
@@ -334,6 +343,7 @@ class PTUTab(BaseTab):
         layout.addWidget(f)
         f.changed.connect(self._update_fit_fields)
         self._update_fit_fields()
+        self._build_irf_controls(layout)
         self.options_button = self.add_button(
             layout, "Advanced fit settings…", self.edit_fit_options,
             tooltip="Initial guesses and bounds of lifetimes and amplitudes, Poisson "
@@ -492,6 +502,101 @@ class PTUTab(BaseTab):
         self._refresh_export_rois()
         self._update_flid_fields()
         self._update_flid_note()
+
+    # ------------------------------------------------------------------ IRF
+    def _build_irf_controls(self, layout) -> None:
+        self.irf_label = self._small("")
+        layout.addWidget(self.irf_label)
+        self.irf_choose_button = self.add_button(
+            layout, "Choose IRF file…", self.choose_irf,
+            tooltip="The .ptu file of the instrument response function (e.g. scattered "
+                    "laser light), recorded with the same detector, TCSPC resolution and "
+                    "laser period. It is remembered and loaded again at the next start.")
+        self.irf_clear_button = self.add_button(layout, "Clear IRF", self.clear_irf,
+                                                tooltip="Forget the IRF file.")
+        g = self.irf_form = ParamForm()
+        g.add_bool("use", "IRF", False, text="use IRF (reconvolution)",
+                   tooltip="Fit the decay convolved with the measured IRF over the whole "
+                           "laser period, including the rising edge, instead of a tail fit. "
+                           "The IRF shift δ is fitted. Needed for lifetimes comparable to "
+                           "the IRF width and for unbiased amplitudes.\nThe lifetime trace "
+                           "and the FLIDs then reuse δ, the background and the scatter of "
+                           "the last lifetime fit.")
+        g.add_bool("fit_background", "Background", False, text="fit background B",
+                   tooltip="Fit the constant background per bin instead of fixing it from "
+                           "the dark counts (ambient light, afterpulsing).")
+        g.add_bool("fit_scatter", "Scatter", False, text="fit scatter s",
+                   tooltip="Fit a contribution of scattered laser light, shaped like the "
+                           "IRF. Only if scatter is expected: it correlates strongly with "
+                           "very short lifetimes.")
+        layout.addWidget(g)
+        self.irf_note = self._small("")
+        layout.addWidget(self.irf_note)
+        use = str(self.ctx.settings.value(_IRF_USE_KEY, "false")).lower() == "true"
+        g.set_value("use", use)
+        g.changed.connect(self._update_irf_fields)
+        self._update_irf_fields()
+        saved = str(self.ctx.settings.value(_IRF_PATH_KEY, "") or "")
+        if saved and Path(saved).is_file():
+            self.load_irf(saved, use=use)
+
+    def irf_params(self) -> model.IRFParams:
+        return model.IRFParams(**self.irf_form.values())
+
+    def choose_irf(self) -> None:
+        path = self.ctx.open_file_dialog("Choose the IRF recording", "PicoQuant PTU (*.ptu)")
+        if path:
+            self.load_irf(path)
+
+    def load_irf(self, path, use: bool = True) -> None:
+        """Load the IRF ``.ptu`` in the background and remember it."""
+        path = Path(path)
+
+        def done(handle) -> None:
+            self.irf = handle
+            self.ctx.settings.setValue(_IRF_PATH_KEY, str(handle.path))
+            self.ctx.log.info(f"IRF loaded: {handle.name}")
+            self.irf_form.set_value("use", use)
+            self._update_irf_fields()
+
+        self.run_job(f"Loading IRF {path.name}", lambda progress: model.load_irf(path), done,
+                     disable=[self.irf_choose_button])
+
+    def clear_irf(self) -> None:
+        self.irf = None
+        self.ctx.settings.remove(_IRF_PATH_KEY)
+        self.irf_form.set_value("use", False)
+        self._update_irf_fields()
+
+    def _update_irf_fields(self) -> None:
+        has = self.irf is not None
+        form = self.irf_form
+        if not has and form.value("use"):
+            form.set_value("use", False)
+        use = bool(form.value("use"))
+        form.fields["use"].setEnabled(has)
+        self.irf_clear_button.setEnabled(has)
+        for key in ("fit_background", "fit_scatter"):
+            form.set_row_visible(key, use)
+        self.irf_label.setText(f"IRF file: {self.irf.name}" if has else
+                               "IRF file: none (optional, for reconvolution fits)")
+        self.irf_note.setText(
+            "Reconvolution: the whole laser period is fitted ('Manual' fit start: only "
+            "start…end). Lifetime trace and FLIDs reuse δ, B and s of the last lifetime "
+            "fit." if use else "")
+        self.irf_note.setVisible(use)
+        if has:
+            self.ctx.settings.setValue(_IRF_USE_KEY, "true" if use else "false")
+
+    def _irf_for_bins(self, handle):
+        """Per-bin IRF settings for the lifetime trace/FLIDs, or ``None`` (with a warning)."""
+        if not self.irf_form.value("use"):
+            return None
+        kwargs, reason = model.irf_trace_kwargs(self.fit, str(handle.path), self.irf)
+        if kwargs is None:
+            self.ctx.log.warning(f"IRF not used for the per-bin fits: {reason}. Run the "
+                                 "lifetime fit with the IRF first; using the tail fit now.")
+        return kwargs
 
     @staticmethod
     def _small(text: str) -> QLabel:
@@ -791,11 +896,14 @@ class PTUTab(BaseTab):
             return
         states, fit = self.state_params(), self.fit_params()
         rois, options = list(self.rois), self.fit_options
+        irf, irf_params = self.irf, self.irf_params()
 
         def job(progress):
             if fit.source == "each":
-                return model.compute_roi_fits(handle, params, fit, states, rois, options)
-            return [model.compute_fit(handle, params, fit, states, rois, options)], []
+                return model.compute_roi_fits(handle, params, fit, states, rois, options,
+                                              irf, irf_params)
+            return [model.compute_fit(handle, params, fit, states, rois, options,
+                                      irf, irf_params)], []
 
         self.run_job(f"Lifetime fit of {handle.name}", job, self._fit_done,
                      disable=[self.fit_button])
@@ -888,10 +996,12 @@ class PTUTab(BaseTab):
             return
         fit, lt = self.fit_params(), self.lt_params()
         rois, options = list(self.rois), self.fit_options
+        irf_kwargs = self._irf_for_bins(handle)
 
         def job(progress):
             signal = model.compute_lifetime_trace(handle, params, fit, lt, progress,
-                                                  rois=rois, options=options)
+                                                  rois=rois, options=options,
+                                                  irf_kwargs=irf_kwargs)
             return signal, str(handle.path), params, fit, lt, options, rois
 
         self.run_job(f"Lifetime trace of {handle.name}", job, self._lifetime_done,
@@ -919,9 +1029,11 @@ class PTUTab(BaseTab):
             self.ctx.log.warning(str(exc))
             return
         rois, options = list(self.rois), self.fit_options
+        irf_kwargs = self._irf_for_bins(handle) if flid.method != "mean_arrival" else None
         self.run_job(f"FLIDs of {handle.name}",
                      lambda progress: flid_model.compute_flids(handle, params, flid, rois,
-                                                               progress, options),
+                                                               progress, options,
+                                                               irf_kwargs),
                      self._flids_done, disable=[self.flid_button, self.trace_button],
                      cancellable=True)
 
@@ -1137,13 +1249,20 @@ class PTUTab(BaseTab):
                  + " ns" + (f", {mean}" if mean and np.size(fit["tau"]) > 1 else "")
                  + f", {model.quality_text(fit)}{bic}") if multi else "Fit"
         ax.semilogy(fit["t_fit"], curve, "-", color=colour, linewidth=1.5, label=label)
+        if not multi and fit.get("reconvolution") and fit.get("irf_shifted") is not None:
+            irf = np.asarray(fit["irf_shifted"], dtype=float)
+            if np.max(irf) > 0 and np.max(y) > 0:
+                scaled = irf / np.max(irf) * np.max(y)
+                ax.semilogy(fit["irf_t_ns"], np.where(scaled > 0, scaled, np.nan), "--",
+                            color="0.55", linewidth=1.0, label="IRF (shifted, scaled)")
         if not multi:
             ax.axvspan(fit["t_fit"][0], fit["t_fit"][-1], color=colour, alpha=0.08,
                        label="Fit window")
             if fit.get("seam_ns") is not None:
                 # Partial bin at the old window edge, left out of the fit.
                 ax.axvline(fit["seam_ns"], color="0.5", linestyle=":", linewidth=1,
-                           label="Shift seam (not fitted)")
+                           label="Shift seam (not fitted)" if fit.get("lifetime_shift_ns")
+                           else "Partial last bin (not fitted)")
         residuals = fit.get("quality", {}).get("weighted_residuals")
         if residuals is not None:
             ax_res.plot(fit["t_fit"], residuals, "-", color=colour, linewidth=0.7)

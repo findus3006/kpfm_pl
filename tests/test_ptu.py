@@ -661,6 +661,67 @@ def test_lifetime_trace_mean_lifetime_and_decay_correction(monkeypatch):
         p.lifetime_trace(mean_lifetime="median", **kw)
 
 
+def _irf_ptu(rows=4, n=500, dt=0.1, tau=3.0, shift=0.2):
+    """Synthetic file with one exact laser period of ``n`` bins and its IRF."""
+    from kpfm_pl import IRFReconvolutionFit
+
+    t = np.arange(n) * dt
+    irf = np.exp(-0.5 * ((t - 5.0) / 0.15) ** 2) * 1e4 + 5
+    model = IRFReconvolutionFit(irf, np.ones(n), 1, dt, shift=shift, background=50.0)
+    decay = model.full_model(np.array([4e4, tau]))       # high counts: rounding is negligible
+    matrix = np.round(np.tile(decay, (rows, 1))).astype(np.uint32)
+    p = _synthetic_ptu(matrix, bintime=1.0, acquisition_time=float(rows))
+    p.resolution, p.rep_time = dt * 1e-9, n * dt * 1e-9
+    p.lt_time = t * 1e-9
+    return p, irf
+
+
+def test_fit_lifetime_with_irf_reconvolution():
+    p, irf = _irf_ptu()
+    hist = p.lifetime_histogram(p._matrix, bintime=1.0)
+    fit = p.fit_lifetime(hist, n_exp=1, irf=irf, weighting="poisson", fit_background=True)
+    assert fit["success"] and fit["reconvolution"]
+    assert fit["tau"][0] == pytest.approx(3.0, rel=0.01)
+    assert fit["shift_ns"] == pytest.approx(0.2, abs=0.01)
+    assert fit["background"] == pytest.approx(4 * 50.0, rel=0.01)   # 4 rows of 50
+    assert fit["quality"]["n_params"] == 4                         # A, tau, shift, B
+    assert fit["t_fit"].size == 500                                # whole period
+    assert fit["period"] == pytest.approx(50.0) and fit["irf_t_ns"].size == 500
+    manual = p.fit_lifetime(hist, n_exp=1, irf=irf, mode="manual", start=-2.0, end=20.0)
+    assert manual["t_fit"].size < 500 and manual["t_fit"][0] >= -2.0
+    with pytest.raises(ValueError, match="normalize"):
+        p.fit_lifetime(hist, n_exp=1, irf=irf, normalize=True)
+    with pytest.raises(ValueError, match="lifetime bins"):
+        p.fit_lifetime(hist, n_exp=1, irf=irf[:-1])
+
+
+def test_irf_needs_a_whole_period():
+    p, irf = _irf_ptu()
+    p.rep_time = 80e-9                        # the 50 ns window is shorter than 80 ns
+    hist = p.lifetime_histogram(p._matrix, bintime=1.0)
+    with pytest.raises(ValueError, match="shorter than one laser period"):
+        p.fit_lifetime(hist, n_exp=1, irf=irf)
+
+
+@pytest.mark.skipif(not PULSE.exists(), reason="PTU test file missing")
+def test_irf_file_must_match_resolution_and_period(ptu):
+    other = PTU(PULSE)
+    assert not np.isclose(other.rep_time, ptu.rep_time, rtol=1e-4, atol=0)
+    with pytest.raises(ValueError, match="laser period"):
+        other.irf_histogram(ptu)
+    assert other.irf_histogram(other).sum() == other.events.shape[0]
+
+
+def test_lifetime_trace_with_irf_uses_fixed_shift():
+    p, irf = _irf_ptu(rows=3, tau=2.0)
+    trace = p.lifetime_trace(bintime=1.0, irf=irf, irf_shift=0.2, background_rate=50.0,
+                             min_counts=None)
+    assert trace.meta["reconvolution"] and trace.meta["irf_shift_ns"] == 0.2
+    np.testing.assert_allclose(trace.y, 2.0, rtol=0.01)
+    # per-bin amplitudes are normalised to the bin's peak, as for the tail fits
+    assert np.all(trace.meta["amplitudes"] > 0)
+
+
 def test_fit_lifetime_mle(ptu):
     hist = ptu.lifetime_histogram()
     neyman = ptu.fit_lifetime(hist, n_exp=2, weighting="poisson")

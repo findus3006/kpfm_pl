@@ -418,3 +418,47 @@ def test_lifetime_trace_uses_the_chosen_mean(handle):
 ])
 def test_format_uncertainty_rounds_to_the_error(value, error, text):
     assert model.format_uncertainty(value, error) == text
+
+
+# -------------------------------------------------------------- IRF reconvolution
+@pytest.fixture(scope="module")
+def irf_handle():
+    # The test data hold no IRF recording; the decay itself exercises the code paths.
+    return model.load_irf(PULSE)
+
+
+def test_irf_fit_through_the_model(handle, irf_handle):
+    params, states = model.TraceParams(bintime=1.0), model.StateParams()
+    irf_params = model.IRFParams(use=True, fit_background=True)
+    result = model.compute_fit(handle, params, model.FitParams(n_exp=1), states,
+                               irf=irf_handle, irf_params=irf_params)
+    assert result.fit["reconvolution"] and result.extra["irf"]["source"] == str(PULSE)
+    summary = model.fit_summary(result.fit)
+    assert {"irf_shift_ns", "irf_shift_err_ns", "irf_fwhm_ns", "offset_err"} <= set(summary)
+    payload = model.fit_payload(result)
+    assert payload.metadata["parameters"]["irf"]["fit_background"] is True
+    assert any("IRF" in s.label for s in payload.signals)
+    # unused unless ticked
+    plain = model.compute_fit(handle, params, model.FitParams(n_exp=1), states,
+                              irf=irf_handle, irf_params=model.IRFParams(use=False))
+    assert not plain.fit.get("reconvolution") and "irf" not in plain.extra
+
+
+def test_irf_trace_kwargs_come_from_the_last_irf_fit(handle, irf_handle):
+    params, states = model.TraceParams(bintime=1.0), model.StateParams()
+    source = str(handle.path)
+    assert model.irf_trace_kwargs(None, source, irf_handle) == (None, "no lifetime fit has "
+                                                                 "been run yet")
+    tail = model.compute_fit(handle, params, model.FitParams(n_exp=1), states)
+    assert "did not use the IRF" in model.irf_trace_kwargs(tail, source, irf_handle)[1]
+    irf_fit = model.compute_fit(handle, params, model.FitParams(n_exp=1), states,
+                                irf=irf_handle, irf_params=model.IRFParams(use=True))
+    assert "another file" in model.irf_trace_kwargs(irf_fit, "other.ptu", irf_handle)[1]
+    assert "no IRF" in model.irf_trace_kwargs(irf_fit, source, None)[1]
+    kwargs, reason = model.irf_trace_kwargs(irf_fit, source, irf_handle)
+    assert reason is None and kwargs["irf_shift"] == irf_fit.fit["shift_ns"]
+    assert kwargs["background_rate"] >= 0 and kwargs["scatter_fraction"] == 0.0
+    signal = model.compute_lifetime_trace(handle, params, model.FitParams(),
+                                          model.LifetimeTraceParams(bintime=60.0, n_exp=1),
+                                          irf_kwargs=kwargs)
+    assert signal.meta["reconvolution"] and signal.meta["irf_shift_ns"] == kwargs["irf_shift"]

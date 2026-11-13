@@ -366,3 +366,49 @@ def test_flid_maps_redraw_without_refit_square_and_pop_out(window, qtbot, tab, m
     MouseEvent("button_press_event", tab.flid_plot.canvas, x, y, button=1,
                dblclick=True)._process()
     assert len(tab._popouts) == 2
+
+
+def test_irf_file_reconvolution_and_per_bin_reuse(window, qtbot, tab, tmp_path, monkeypatch):
+    messages = []
+    window.ctx.log.message.connect(lambda text, level: messages.append((text, level)))
+    assert tab.irf is None and not tab.irf_form.fields["use"].isEnabled()
+    # The test data hold no IRF recording; the decay itself exercises the code paths.
+    monkeypatch.setattr(window.ctx, "open_file_dialog", lambda *a, **k: str(PULSE))
+    tab.choose_irf()
+    _wait(window, qtbot, lambda: tab.irf is not None)
+    assert tab.irf_form.value("use") and PULSE.name in tab.irf_label.text()
+    assert window.ctx.settings.value("ptu/irf_path") == str(PULSE)
+
+    # per-bin fits without an IRF lifetime fit fall back to the tail fit with a warning
+    tab.lt_form.set_values({"bintime": 60.0, "n_exp": 1})
+    tab.run_lifetime_trace()
+    _wait(window, qtbot, lambda: tab.lifetime is not None, timeout=120000)
+    assert not tab.lifetime[0].meta["reconvolution"]
+    assert any("IRF not used" in text and level == "warning" for text, level in messages)
+
+    tab.irf_form.set_value("fit_background", True)
+    tab.fit_form.set_value("n_exp", 1)
+    tab.run_fit()
+    _wait(window, qtbot, lambda: tab.fit is not None)
+    assert tab.fit.fit["reconvolution"] and tab.fit.fit["fit_background"]
+    rows = [tab.fit_table.item(r, 0).text() for r in range(tab.fit_table.rowCount())]
+    assert "IRF shift δ (ns)" in rows and "IRF FWHM (ns)" in rows
+    labels = [line.get_label() for line in tab.hist_plot.figure.axes[0].get_lines()]
+    assert "IRF (shifted, scaled)" in labels
+
+    previous = tab.lifetime
+    tab.run_lifetime_trace()
+    _wait(window, qtbot, lambda: tab.lifetime is not previous, timeout=120000)
+    assert tab.lifetime[0].meta["reconvolution"]
+    assert tab.lifetime[0].meta["irf_shift_ns"] == pytest.approx(tab.fit.fit["shift_ns"])
+
+    # remembered: a new window with the same settings loads the IRF again
+    second = MainWindow(settings=window.ctx.settings)
+    qtbot.addWidget(second)
+    other = second.tab_widgets[0]
+    qtbot.waitUntil(lambda: other.irf is not None and not second.runner.busy, timeout=60000)
+    assert other.irf_form.value("use")
+    other.clear_irf()
+    assert other.irf is None and not other.irf_form.value("use")
+    assert not window.ctx.settings.value("ptu/irf_path")
+    second.runner.wait(10000)

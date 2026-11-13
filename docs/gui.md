@@ -101,6 +101,22 @@ title on the left to fold it away.
    *Dark counts* are subtracted as an offset.
    The fit always works on the raw counts (there is no *Normalise* any more:
    the percentages below show the relative amplitudes directly).
+   - **IRF reconvolution** (optional): *Choose IRF file…* loads a `.ptu`
+     recording of the instrument response (e.g. scattered laser light, same
+     detector, TCSPC resolution and laser period). The file is remembered and
+     loaded again at the next start; *Clear IRF* forgets it. With *use IRF
+     (reconvolution)* the decay is convolved with the IRF and fitted over the
+     whole laser period, including the rising edge (*Manual* fit start: only
+     start…end); the IRF shift δ is fitted. *fit background B* frees the
+     constant background (otherwise fixed from the dark counts), *fit scatter
+     s* adds scattered laser light shaped like the IRF. The table adds *IRF
+     shift δ*, *IRF FWHM* (and *Scatter s*), the plot shows the shifted IRF
+     (grey, dashed). The lifetime trace and the FLIDs then reuse δ, B and s
+     of the **last lifetime fit** and fit only the amplitudes and lifetimes
+     per bin; without a lifetime fit with the IRF they fall back to the tail
+     fit and say so in the log. The *Incomplete decay* setting chooses the
+     periodic or the single-pulse model. Background and formulas:
+     [ptu.md](ptu.md#irf-reconvolution).
    - **Mean lifetime**: **τ_int**, the intensity-weighted mean Σ Aᵢτᵢ² / Σ Aᵢτᵢ
      (the mean photon arrival time), or **τ_amp**, the amplitude-weighted mean
      Σ Aᵢτᵢ / Σ Aᵢ (share of emitters, e.g. for quenching/FRET), as chosen in

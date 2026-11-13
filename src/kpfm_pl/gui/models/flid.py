@@ -195,6 +195,14 @@ class FlidResult:
         return self.intensity_range[0] * factor, self.intensity_range[1] * factor
 
 
+def irf_description(irf_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Export-friendly summary of per-bin IRF settings (the reader becomes its path)."""
+    out = {k: v for k, v in irf_kwargs.items() if k != "irf"}
+    reader = irf_kwargs.get("irf")
+    out["source"] = str(getattr(reader, "filepath", ""))
+    return out
+
+
 def window_roi(trace: TraceResult) -> dict[str, float]:
     """The whole time window of ``trace`` with all count levels, as an ROI."""
     s = trace.signal
@@ -282,7 +290,8 @@ def _build_maps(entry: FlidEntry, result: FlidResult) -> None:
 def compute_flids(handle: LoadedFile, trace_params: TraceParams, params: FlidParams,
                   rois: Sequence[dict[str, float]],
                   progress: Callable[[int, int], Any] | None = None,
-                  options: FitOptions | None = None) -> FlidResult:
+                  options: FitOptions | None = None,
+                  irf_kwargs: dict[str, Any] | None = None) -> FlidResult:
     """Compute the FLIDs of ``params.region`` with shared histogram ranges.
 
     ``"each"``: one FLID per ROI; without ROIs, :func:`default_roi` is used
@@ -295,7 +304,8 @@ def compute_flids(handle: LoadedFile, trace_params: TraceParams, params: FlidPar
     aborts the computation. ``options`` are the advanced fit settings of the
     per-bin fits. A failed photon-count check is not warned about by the
     backend; :func:`count_check_text` of ``entry.count_check`` gives the
-    advice per ROI.
+    advice per ROI. ``irf_kwargs`` (see ``models.ptu.irf_trace_kwargs``)
+    switches the per-bin fits to IRF reconvolution.
     """
     lifetime_range = params.lifetime_range()
     methods = params.methods()
@@ -328,6 +338,8 @@ def compute_flids(handle: LoadedFile, trace_params: TraceParams, params: FlidPar
                                        for _, roi in selected for _ in methods])
         result = FlidResult([], [], trace, params, lifetime_range, intensity_range,
                             str(handle.path), fallback, options=options)
+        if irf_kwargs:
+            result.extra["irf"] = irf_description(irf_kwargs)
         for k, (i, roi) in enumerate(selected):
             parts = range(k * len(methods), (k + 1) * len(methods))
             traces: dict[str, Signal] = {}
@@ -340,7 +352,8 @@ def compute_flids(handle: LoadedFile, trace_params: TraceParams, params: FlidPar
                         if method == "fit":
                             traces[method] = ptu.lifetime_trace(
                                 roi=roi, n_exp=params.n_exp, bins=params.bins,
-                                progress=tracker.part(part), **common, **fit_kwargs)
+                                progress=tracker.part(part), **common, **fit_kwargs,
+                                **(irf_kwargs or {}))
                         else:
                             traces[method] = ptu.arrival_time_trace(
                                 roi=roi, truncation_correction=params.truncation_correction,
@@ -383,7 +396,8 @@ def _metadata(result: FlidResult, entry: FlidEntry, analysis: str) -> dict[str, 
         analysis, sources=[result.source],
         parameters={"time_trace": asdict(result.trace.params),
                     "flid": asdict(result.params),
-                    "fit_options": asdict(result.options)},
+                    "fit_options": asdict(result.options),
+                    "irf": result.extra.get("irf")},
         results={"region": result.entry_name(entry),
                  "roi_number": (None if result.params.region == "window"
                                 else entry.index + 1),

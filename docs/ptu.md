@@ -282,6 +282,69 @@ ax.plot(fit["t_fit"], fit["curve"], "r-", label=fit["label"])
 ax.set_xlabel("Time (ns)"); ax.set_ylabel("Counts")
 ```
 
+### IRF reconvolution
+
+The tail fit above ignores the instrument response function (IRF): laser
+pulse width, timing jitter and above all the detector's transit-time spread.
+It is fine when every lifetime is much longer than the IRF width, but short
+components and the amplitudes are then biased. A reconvolution fit convolves
+the model with a **measured IRF** and fits the whole laser period, including
+the rising edge:
+
+```python
+irf = PTU("irf_scatter.ptu")          # scattered laser light, same detector and settings
+fit = ptu.fit_lifetime(hist, n_exp=2, irf=irf, weighting="mle",
+                       fit_background=True)          # optional: fit_scatter=True
+print(fit["tau"], fit["shift_ns"], fit["background"], fit["quality"]["bic"])
+```
+
+The model on one period of `N` bins is
+
+```
+m_j = Σ_i a_i [g_δ ⊛ k_τi]_j + s·g_δ,j + B
+```
+
+| Symbol | Meaning |
+|---|---|
+| `g` | the IRF histogram minus its background (`irf_background`, default `"auto"` = median), clipped at 0, normalised to unit area |
+| `g_δ` | the IRF shifted later by `δ` (sub-bin, Fourier shift theorem); `δ` is fitted (`irf_shift=` fixes it) and corrects drift and the wavelength-dependent detector response ("colour effect") |
+| `k_τ` | exponential kernel integrated over the bins; with `decay_correction=True` (default) it is periodic and includes the decay of all earlier pulses, otherwise a single pulse |
+| `⊛` | circular (periodic) or linear convolution, computed by FFT |
+| `a_i`, `τ_i` | amplitudes (counts per bin at the excitation time) and lifetimes of the IRF-free decay; `tau_int`, `tau_amp`, `f_amp`, `f_int` follow from them |
+| `B` | constant background per bin: fixed from the dark counts, or fitted with `fit_background=True` |
+| `s` | scattered laser light (counts, shaped like the IRF), with `fit_scatter=True` |
+
+Requirements: the IRF file must have the **same TCSPC resolution and laser
+period** (checked; a mismatch is an error) and the lifetime window must
+cover a **whole laser period** (otherwise an error; choose a coarser
+resolution). `mode="fraction"`/`"inflection"` fit the whole period except
+the partial last bin; `mode="manual"` fits `start ≤ t ≤ end`. `normalize`
+is not available. All `weighting`s work; `"mle"` is recommended.
+
+The result adds `shift_ns`/`shift_err_ns`, `background`/`background_err`,
+`scatter`/`scatter_err`, `irf_fwhm_ns`, `irf_background`, `irf_shifted`
+(unit-area IRF after the shift) and `full_curve` on `irf_t_ns` (the period's
+time axis), `reconvolution: True`; `quality["n_params"]` (and so the BIC)
+counts `δ`, `B` and `s`. `PTU.irf_histogram(irf)` returns the validated IRF
+histogram. The fit itself is
+[`IRFReconvolutionFit`](../src/kpfm_pl/fitting.py), usable on any pair of
+histograms (helpers `prepare_irf`, `exp_kernel`, `irf_fwhm`).
+
+**Per time bin** (`lifetime_trace`, `flid`): pass `irf=` too. Per-bin fits
+have few photons, so take the shared parameters from the fit of the summed
+histogram: `irf_shift=fit["shift_ns"]`, `background_rate=fit["background"] /
+hist.meta["acquisition_duration"]` (counts per second and lifetime bin) and
+`scatter_fraction=fit["scatter"] / hist.y.sum()`; then only `a_i` and `τ_i`
+are fitted per bin.
+
+Record the IRF with the same detector, filters, resolution, sync settings
+and cable delays as the sample, at a low count rate and with many counts;
+scattered laser light or, for SPADs with a strong colour effect, a quenched
+dye emitting near the sample's wavelength. Literature: J. R. Lakowicz,
+*Principles of Fluorescence Spectroscopy*, 3rd ed., ch. 4 (2006); W. Becker,
+*The bh TCSPC Handbook*; S. C. Warren et al., *PLoS ONE* 8, e70687 (2013)
+(FLIMfit's model); M. Maus et al., *Anal. Chem.* 73, 2078 (2001) (MLE).
+
 ## Lifetime trace
 
 ```python

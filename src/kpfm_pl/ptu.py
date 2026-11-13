@@ -18,7 +18,14 @@ from typing import Any
 import numpy as np
 
 from .core import Image, Signal
-from .fitting import MEAN_LIFETIMES, MultiExpFit, mean_lifetime, poisson_chi_squared
+from .fitting import (
+    MEAN_LIFETIMES,
+    IRFReconvolutionFit,
+    MultiExpFit,
+    mean_lifetime,
+    poisson_chi_squared,
+    prepare_irf,
+)
 from .utils import TriggerPoint, fit_window_mask, lifetime_from_truncated_mean, trigger_points
 
 __all__ = ["PTU", "flid_map"]
@@ -862,6 +869,7 @@ class PTU:
         smoothing: float = 2.0, start: float = 0.0,
         end: float | None = None, weighting: str = "none",
         decay_correction: bool = True,
+        irf: dict[str, Any] | None = None,
         progress: Callable[[int, int], Any] | None = None,
         **fit_kwargs,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -870,8 +878,14 @@ class PTU:
         ``amps`` are the per-pulse amplitudes (corrected for the incomplete
         decay of earlier pulses when ``decay_correction``, see
         :class:`~kpfm_pl.fitting.MultiExpFit`'s ``period``), ``amps_fit`` the
-        fitted ones.
+        fitted ones. ``irf`` (see :meth:`lifetime_trace`) switches to the
+        reconvolution fit.
         """
+        if irf is not None:
+            return self._fit_time_bin_lifetimes_irf(
+                sel, irf, n_exp=n_exp, bins=bins, mode=mode, start=start, end=end,
+                weighting=weighting, decay_correction=decay_correction, progress=progress,
+                **fit_kwargs)
         time, matrix, selected = sel["time"], sel["matrix"], sel["selected"]
         bintime = sel["bintime"]
 
@@ -929,6 +943,77 @@ class PTU:
             progress(rows.size, rows.size)
         return taus, amps, amps_fit
 
+    def _fit_time_bin_lifetimes_irf(
+        self, sel: dict[str, Any], irf: dict[str, Any], *, n_exp: int, bins: int,
+        mode: str, start: float, end: float | None, weighting: str,
+        decay_correction: bool, progress: Callable[[int, int], Any] | None = None,
+        **fit_kwargs,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Reconvolution fit of every selected time bin (see :meth:`lifetime_trace`)."""
+        time, matrix, selected = sel["time"], sel["matrix"], sel["selected"]
+        bintime = sel["bintime"]
+        wrap, seam = self._period_grid()
+        irf_full, _ = prepare_irf(self.irf_histogram(irf["irf"])[:wrap],
+                                  irf.get("background", "auto"))
+        # Group the lifetime bins of one period by ``bins``.
+        starts = np.arange(0, wrap, bins)
+        if starts.size < 2 * n_exp + 3:
+            raise ValueError("bins leaves too few lifetime groups for the reconvolution fit.")
+        sizes = np.minimum(bins, wrap - starts)
+        irf_binned = np.add.reduceat(irf_full, starts)
+        binned = np.add.reduceat(np.asarray(matrix[:, :wrap], dtype=float), starts, axis=1)
+        lt_ns = self.lt_time[:wrap] * 1e9
+        t_binned = np.add.reduceat(lt_ns, starts) / sizes
+        summed = binned[selected].sum(axis=0)
+        t_rel = t_binned - t_binned[int(np.argmax(summed))]
+        if mode == "manual":
+            mask = fit_window_mask(t_rel, summed, "manual", start=start, end=end)
+        else:
+            mask = np.ones(starts.size, dtype=bool)
+        if seam is not None and seam < wrap:
+            mask[seam // bins] = False
+        if mask.sum() < 2 * n_exp + 3:
+            raise ValueError("The fit window holds too few bins for the reconvolution fit.")
+        dt = self.resolution * 1e9 * bins
+        shift = irf.get("shift")
+        rate = irf.get("background_rate")
+        fraction = float(irf.get("scatter_fraction") or 0.0)
+
+        taus = np.full((len(time), n_exp), np.nan, dtype=float)
+        amps = np.full((len(time), n_exp), np.nan, dtype=float)
+        rows = np.flatnonzero(selected)
+        for done, index in enumerate(rows):
+            if progress is not None:
+                progress(done, rows.size)
+            counts = binned[index]
+            norm = float(np.max(counts))
+            if not np.isfinite(norm) or norm == 0:
+                continue
+            if rate is not None:
+                background = float(rate) * bintime * bins
+            else:
+                background = self.dark_counts * bintime / self.n_lt_bins * bins
+            bin_kwargs = _poisson_weights(weighting, counts[mask], norm, fit_kwargs)
+            try:
+                fit = IRFReconvolutionFit(
+                    irf_binned, counts / norm, n_exp, dt, fit_mask=mask,
+                    periodic=decay_correction, background=background / norm,
+                    scatter_counts=fraction * float(np.sum(counts)) / norm, shift=shift,
+                    irf_background=None, **bin_kwargs)
+            except ValueError:
+                continue
+            if fit.success:
+                params = fit.parameters()
+                fitted_taus = np.asarray(params["tau"], dtype=float)
+                fitted_amps = np.asarray(params["A"], dtype=float)
+                if np.all(np.isfinite(fitted_taus)) and np.all(np.isfinite(fitted_amps)):
+                    taus[index] = fitted_taus
+                    amps[index] = fitted_amps
+        if progress is not None:
+            progress(rows.size, rows.size)
+        # The periodic kernel already gives per-pulse amplitudes; nothing to undo.
+        return taus, amps, amps.copy()
+
     def _validate_fit_args(self, n_exp: int, bins: int, weighting: str,
                            fit_kwargs: dict[str, Any],
                            mean_lifetime: str = "intensity") -> None:
@@ -961,6 +1046,11 @@ class PTU:
                        auto_bintime: bool = False,
                        mean_lifetime: str = "intensity",
                        decay_correction: bool = True,
+                       irf: PTU | Signal | np.ndarray | None = None,
+                       irf_shift: float | None = None,
+                       background_rate: float | None = None,
+                       scatter_fraction: float | None = None,
+                       irf_background: float | str | None = "auto",
                        progress: Callable[[int, int], Any] | None = None,
                        **fit_kwargs) -> Signal:
         """Return mean fitted lifetime versus acquisition time.
@@ -990,8 +1080,25 @@ class PTU:
         once at the end; raise an exception from it to abort the computation
         (see :meth:`flid`). ``min_counts``, ``coverage`` and ``auto_bintime``
         check the photons per time bin, see :meth:`flid`.
+
+        With ``irf`` every bin is fitted by IRF reconvolution as in
+        :meth:`fit_lifetime` (whole period unless ``mode="manual"``;
+        ``decay_correction`` selects the periodic kernel). Per-bin fits have
+        few photons, so take the shared parameters from a fit of the summed
+        histogram: ``irf_shift`` fixes the IRF shift (ns; ``None`` fits it in
+        every bin), ``background_rate`` the background in counts per second
+        and lifetime bin (e.g. ``background / acquisition_duration`` of that
+        fit; default: the dark counts) and ``scatter_fraction`` the scattered
+        light as a fraction of each bin's photons (e.g. ``scatter /
+        total counts``; default 0).
         """
         self._validate_fit_args(n_exp, bins, weighting, fit_kwargs, mean_lifetime)
+        irf_options = None
+        if irf is not None:
+            irf_options = {"irf": irf, "shift": irf_shift, "background_rate": background_rate,
+                           "scatter_fraction": scatter_fraction, "background": irf_background}
+            self.irf_histogram(irf)        # validate before the (slow) selection and loop
+            self._period_grid()
         sel = self._select_time_bins(
             roi, x_min=x_min, x_max=x_max, y_min=y_min, y_max=y_max,
             bintime=bintime, laser_pulse=laser_pulse, min_counts=min_counts,
@@ -1000,7 +1107,8 @@ class PTU:
         taus, amps, amps_fit = self._fit_time_bin_lifetimes(
             sel, n_exp=n_exp, bins=bins, mode=mode, fraction=fraction,
             smoothing=smoothing, start=start, end=end, weighting=weighting,
-            decay_correction=decay_correction, progress=progress, **fit_kwargs,
+            decay_correction=decay_correction, irf=irf_options, progress=progress,
+            **fit_kwargs,
         )
         return Signal(
             sel["time"], _weighted_mean_lifetime(taus, amps, mean_lifetime),
@@ -1009,7 +1117,8 @@ class PTU:
             meta={**self._trace_meta(sel, "fit"), "n_exp": n_exp, "lt_bins": bins,
                   "taus": taus, "amplitudes": amps, "amplitudes_fit": amps_fit,
                   "weighting": weighting, "mean_lifetime": mean_lifetime,
-                  "decay_correction": bool(decay_correction)},
+                  "decay_correction": bool(decay_correction),
+                  "reconvolution": irf is not None, "irf_shift_ns": irf_shift},
         )
 
     def arrival_time_trace(self, roi: dict[str, float] | None = None, *,
@@ -1117,6 +1226,9 @@ class PTU:
              min_counts: float | None = 100, coverage: float = 0.9,
              auto_bintime: bool = False,
              mean_lifetime: str = "intensity", decay_correction: bool = True,
+             irf: PTU | Signal | np.ndarray | None = None,
+             irf_shift: float | None = None, background_rate: float | None = None,
+             scatter_fraction: float | None = None,
              progress: Callable[[int, int], Any] | None = None,
              **fit_kwargs) -> Image | list[Image]:
         """Compute a FLID (Fluorescence-Lifetime-Intensity-Distribution) map.
@@ -1187,6 +1299,9 @@ class PTU:
         decay_correction :
             Correct the per-bin amplitudes for the incomplete decay of earlier
             laser pulses (default), see :meth:`fit_lifetime`.
+        irf, irf_shift, background_rate, scatter_fraction :
+            Per-bin IRF reconvolution, see :meth:`lifetime_trace` (``method="fit"``
+            only).
         progress :
             Optional callback ``progress(done, total)``, called before each
             per-bin fit and once with ``done == total`` at the end (e.g. to
@@ -1214,6 +1329,9 @@ class PTU:
             trace = self.lifetime_trace(roi, n_exp=n_exp, bins=bins, weighting=weighting,
                                         mean_lifetime=mean_lifetime,
                                         decay_correction=decay_correction,
+                                        irf=irf, irf_shift=irf_shift,
+                                        background_rate=background_rate,
+                                        scatter_fraction=scatter_fraction,
                                         **common, **fit_kwargs)
             done = "fitted"
         elif method == "mean_arrival":
@@ -1276,6 +1394,10 @@ class PTU:
                      normalize: bool = False, weighting: str = "none",
                      diagnostics: dict[str, float] | None = None,
                      mean_lifetime: str = "intensity", decay_correction: bool = True,
+                     irf: PTU | Signal | np.ndarray | None = None,
+                     fit_background: bool = False, fit_scatter: bool = False,
+                     irf_shift: float | None = None,
+                     irf_background: float | str | None = "auto",
                      **fit_kwargs) -> dict[str, Any]:
         """Fit a lifetime ``histogram`` with ``n_exp`` exponentials.
 
@@ -1315,8 +1437,40 @@ class PTU:
         compatible with zero, merged lifetimes, parameter at a bound), see
         :func:`~kpfm_pl.fitting.fit_warnings`; ``diagnostics`` overrides its
         thresholds (e.g. ``{"min_fraction": 0.02}``).
+
+        **IRF reconvolution.** With ``irf`` (a :class:`PTU` of the recorded
+        instrument response, its lifetime histogram as :class:`Signal`, or an
+        array on the same lifetime bins) the model is convolved with the IRF
+        and fitted over the whole laser period, including the rising edge
+        (:class:`~kpfm_pl.fitting.IRFReconvolutionFit`). The IRF must have the
+        same TCSPC resolution and laser period, and the lifetime window must
+        cover a whole period. ``mode="fraction"``/``"inflection"`` then fit
+        the whole period (except the partial last bin), ``"manual"`` the
+        bins between ``start`` and ``end``. The IRF shift ``δ`` is fitted
+        (``irf_shift`` fixes it, in ns); ``fit_background`` also fits the
+        constant background ``B`` (otherwise fixed from the dark counts) and
+        ``fit_scatter`` a scattered-light contribution ``s`` (counts shaped
+        like the IRF). ``decay_correction`` selects the periodic kernel (decay
+        of all earlier pulses) or a single pulse; the amplitudes are per-pulse
+        values of the IRF-free decay. ``irf_background`` is subtracted from
+        the IRF (``"auto"``: its median). ``normalize`` is not available.
+        The result adds ``shift_ns``/``shift_err_ns``, ``background``,
+        ``scatter`` (with errors), ``irf_fwhm_ns``, ``irf_shifted`` and
+        ``full_curve`` (on ``irf_t_ns``, the period's time axis) and
+        ``reconvolution: True``; ``quality["n_params"]`` counts δ, B and s.
         """
         self._require_pulsed()
+        _check_mean_lifetime(mean_lifetime)
+        if irf is not None:
+            if normalize:
+                raise ValueError("normalize is not available with an IRF: the reconvolution "
+                                 "fits raw counts.")
+            return self._fit_lifetime_irf(
+                histogram, n_exp, irf, mode=mode, start=start, end=end,
+                weighting=weighting, diagnostics=diagnostics, mean_lifetime=mean_lifetime,
+                decay_correction=decay_correction, fit_background=fit_background,
+                fit_scatter=fit_scatter, irf_shift=irf_shift, irf_background=irf_background,
+                **fit_kwargs)
         y = np.asarray(histogram["y"], dtype=float)
         t0 = histogram["x"][np.argmax(y)]
         t_ns = (histogram["x"] - t0) * 1e9
@@ -1331,20 +1485,38 @@ class PTU:
         if normalize and np.max(y_fit) > 0:
             norm = np.max(y_fit)
             y_fit = y_fit / norm
+        offset = self._dark_offset(histogram) / norm
+
+        fit_kwargs = _poisson_weights(weighting, y[mask], norm, fit_kwargs)
+        fit = MultiExpFit(t_fit, y_fit, n_exp, offset,
+                          period=self._period_ns() if decay_correction else None,
+                          **fit_kwargs)
+        out = fit.to_dict()
+        self._finish_fit(out, fit, y[mask], norm, 2 * n_exp, weighting=weighting,
+                         diagnostics=diagnostics, mean_lifetime=mean_lifetime,
+                         decay_correction=decay_correction)
+        seam = self.lifetime_seam_bin if y.size == self.n_lt_bins else None
+        out.update({"shifted_histogram_x": t_ns, "t_fit": t_fit, "y_fit": y_fit,
+                    "left_bound_ns": float(t_fit[0]), "weighting": weighting,
+                    "lifetime_shift_ns": self.lifetime_shift_ns,
+                    "seam_ns": None if seam is None else float(t_ns[seam])})
+        return out
+
+    def _dark_offset(self, histogram: Signal) -> float:
+        """Dark counts per lifetime bin over the histogram's acquisition duration."""
         duration = histogram["meta"].get("acquisition_duration")
         if self.dark_counts and duration is None:
             raise ValueError(
                 "Histogram acquisition duration is required for dark-count correction. "
                 "Build it with lifetime_histogram(matrix, bintime=...)."
             )
-        offset = self.dark_counts * float(duration or 0.0) / self.n_lt_bins / norm
+        return self.dark_counts * float(duration or 0.0) / self.n_lt_bins
 
-        fit_kwargs = _poisson_weights(weighting, y[mask], norm, fit_kwargs)
-        _check_mean_lifetime(mean_lifetime)
-        fit = MultiExpFit(t_fit, y_fit, n_exp, offset,
-                          period=self._period_ns() if decay_correction else None,
-                          **fit_kwargs)
-        out = fit.to_dict()
+    @staticmethod
+    def _finish_fit(out: dict[str, Any], fit: MultiExpFit, counts: np.ndarray, norm: float,
+                    n_params: int, *, weighting: str, diagnostics: dict[str, float] | None,
+                    mean_lifetime: str, decay_correction: bool) -> None:
+        """Add the chosen mean lifetime, Poisson quality, BIC and warnings to ``out``."""
         key = "tau_int" if mean_lifetime == "intensity" else "tau_amp"
         if key in out:
             out["tau_mean"], out["tau_mean_err"] = out[key], out[f"{key}_err"]
@@ -1352,16 +1524,100 @@ class PTU:
         out["decay_correction"] = bool(decay_correction)
         if "curve" in out:
             out.setdefault("quality", {}).update(
-                poisson_chi_squared(y[mask], np.asarray(out["curve"]) * norm, 2 * n_exp,
+                poisson_chi_squared(counts, np.asarray(out["curve"]) * norm, n_params,
                                     bic_from="deviance" if weighting == "mle"
                                     else "chi_squared"))
         converged = out.get("success") and "curve" in out
         out["warnings"] = fit.diagnostics(**(diagnostics or {})) if converged else []
-        seam = self.lifetime_seam_bin if y.size == self.n_lt_bins else None
-        out.update({"shifted_histogram_x": t_ns, "t_fit": t_fit, "y_fit": y_fit,
-                    "left_bound_ns": float(t_fit[0]), "weighting": weighting,
-                    "lifetime_shift_ns": self.lifetime_shift_ns,
+
+    # ---------------------------------------------------------- IRF reconvolution
+    def irf_histogram(self, irf: PTU | Signal | np.ndarray) -> np.ndarray:
+        """Lifetime histogram of an IRF on this file's lifetime bins (validated).
+
+        ``irf`` is a :class:`PTU` of the recorded IRF (all its photons are
+        used), its lifetime histogram (:class:`Signal`) or an array. A
+        :class:`PTU` must have the same TCSPC resolution and laser period;
+        every input must have :attr:`n_lt_bins` entries.
+        """
+        self._require_pulsed()
+        if isinstance(irf, PTU):
+            irf._require_pulsed()
+            name = irf.filepath.name
+            if not np.isclose(irf.resolution, self.resolution, rtol=1e-6, atol=0.0):
+                raise ValueError(
+                    f"IRF {name}: TCSPC resolution {irf.resolution * 1e12:.4g} ps differs from "
+                    f"{self.resolution * 1e12:.4g} ps of {self.filepath.name}.")
+            if not np.isclose(irf.rep_time, self.rep_time, rtol=1e-4, atol=0.0):
+                raise ValueError(
+                    f"IRF {name}: laser period {irf.rep_time * 1e9:.4g} ns differs from "
+                    f"{self.rep_time * 1e9:.4g} ns of {self.filepath.name}.")
+            counts = np.bincount(irf.events[:, 1].astype(int),
+                                 minlength=irf.n_lt_bins)[:irf.n_lt_bins]
+        elif isinstance(irf, Signal):
+            counts = irf.y
+        else:
+            counts = irf
+        counts = np.asarray(counts, dtype=float)
+        if counts.shape != (self.n_lt_bins,):
+            raise ValueError(f"The IRF histogram has {counts.size} bins; "
+                             f"{self.filepath.name} has {self.n_lt_bins} lifetime bins.")
+        return counts
+
+    def _period_grid(self) -> tuple[int, int | None]:
+        """``(bins of one laser period, partial bin to leave out or None)``."""
+        period_bins = self.rep_time / self.resolution
+        wrap = int(np.ceil(period_bins - 1e-6))
+        if self.n_lt_bins < wrap:
+            raise ValueError(
+                f"{self.filepath.stem}: the lifetime window ({self.n_lt_bins} bins, "
+                f"{self.n_lt_bins * self.resolution * 1e9:.4g} ns) is shorter than one laser "
+                f"period ({self.rep_time * 1e9:.4g} ns). IRF reconvolution needs the whole "
+                "period; record with a coarser TCSPC resolution.")
+        seam = None
+        if period_bins - (wrap - 1) < 0.99:     # the last bin is only partly covered
+            seam = self.lifetime_seam_bin if self.lifetime_seam_bin is not None else wrap - 1
+        return wrap, seam
+
+    def _fit_lifetime_irf(self, histogram: Signal, n_exp: int, irf, *, mode: str,
+                          start: float, end: float | None, weighting: str,
+                          diagnostics: dict[str, float] | None, mean_lifetime: str,
+                          decay_correction: bool, fit_background: bool, fit_scatter: bool,
+                          irf_shift: float | None, irf_background: float | str | None,
+                          **fit_kwargs) -> dict[str, Any]:
+        y = np.asarray(histogram["y"], dtype=float)
+        if y.size != self.n_lt_bins:
+            raise ValueError("IRF reconvolution needs a lifetime histogram of this file "
+                             f"({self.n_lt_bins} bins).")
+        irf_counts = self.irf_histogram(irf)
+        wrap, seam = self._period_grid()
+        x = np.asarray(histogram["x"], dtype=float)
+        t_ns = (x - x[int(np.argmax(y))]) * 1e9
+        t_p, y_p = t_ns[:wrap], y[:wrap]
+        if mode == "manual":
+            mask = fit_window_mask(t_p, y_p, "manual", start=start, end=end)
+        else:
+            mask = np.ones(wrap, dtype=bool)
+        if seam is not None and seam < wrap:
+            mask[seam] = False
+        if mask.sum() < 2 * n_exp + 3:
+            raise ValueError("The fit window holds too few bins for the reconvolution fit.")
+        fit_kwargs = _poisson_weights(weighting, y_p[mask], 1.0, fit_kwargs)
+        fit = IRFReconvolutionFit(
+            irf_counts[:wrap], y_p, n_exp, self.resolution * 1e9, fit_mask=mask, t=t_p,
+            periodic=decay_correction, background=self._dark_offset(histogram),
+            fit_background=fit_background, scatter=fit_scatter, shift=irf_shift,
+            irf_background=irf_background, **fit_kwargs)
+        out = fit.to_dict()
+        self._finish_fit(out, fit, y_p[mask], 1.0, fit._n_params(), weighting=weighting,
+                         diagnostics=diagnostics, mean_lifetime=mean_lifetime,
+                         decay_correction=decay_correction)
+        out.update({"shifted_histogram_x": t_ns, "t_fit": t_p[mask], "y_fit": y_p[mask],
+                    "left_bound_ns": float(t_p[mask][0]), "weighting": weighting,
+                    "lifetime_shift_ns": self.lifetime_shift_ns, "irf_t_ns": t_p,
+                    "period": self.rep_time * 1e9 if decay_correction else None,
                     "seam_ns": None if seam is None else float(t_ns[seam])})
+        if isinstance(irf, PTU):
+            out["irf_source"] = str(irf.filepath)
         return out
 
     # -------------------------------------------------------------- triggers

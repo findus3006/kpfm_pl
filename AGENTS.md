@@ -31,7 +31,7 @@ src/kpfm_pl/
     zurich.py       Zurich – lock-in .txt loader (KPFM, triggers)
     jpk.py          JPK    – AFM image loader (calibrated channels)
     match.py        Match  – align a PL time trace with a KPFM signal
-    fitting.py      MultiExpFit + 2-D Gaussian helpers
+    fitting.py      MultiExpFit, IRFReconvolutionFit + 2-D Gaussian helpers
     database.py     build/query a searchable databank of measurement pairs
     utils.py        pure signal-processing helpers (smooth, resample, ...)
     io.py           file dialogs + measurement-pair sorting (lazy tkinter)
@@ -164,6 +164,10 @@ docs/               per-module manuals (ptu, zurich, jpk, match, database, plott
 - **JPK images** are flipped vertically on load; only the thumbnail page
   carries the scan factors `dx`/`dy`. Channel calibration is keyed by a private
   TIFF tag (see `_CHANNEL_CALIBRATION`).
+- **IRF reconvolution** needs the lifetime window to cover a whole laser
+  period and an IRF with the same resolution and period (`PTU.irf_histogram`
+  checks both). The per-bin fits take δ/B/s from a fit of the summed
+  histogram; the GUI refuses to guess them.
 - **PTU files can be untrusted input**: string/blob lengths are validated
   against the remaining file size (`_read_length_prefixed`). Preserve these
   bounds checks.

@@ -34,6 +34,9 @@ __all__ = [
     "FitParams",
     "FitOptions",
     "LifetimeTraceParams",
+    "IRFParams",
+    "load_irf",
+    "irf_trace_kwargs",
     "TraceResult",
     "FitResult",
     "apply_lifetime_shift",
@@ -271,6 +274,20 @@ class FitOptions:
         if not self.decay_correction:
             kwargs["decay_correction"] = False
         return kwargs
+
+
+@dataclass
+class IRFParams:
+    """IRF reconvolution settings of the lifetime fit (``PTU.fit_lifetime(irf=...)``).
+
+    ``use`` switches the reconvolution on (an IRF file must be loaded);
+    ``fit_background`` and ``fit_scatter`` free the constant background and
+    the scattered-light contribution.
+    """
+
+    use: bool = False
+    fit_background: bool = False
+    fit_scatter: bool = False
 
 
 @dataclass
@@ -537,8 +554,28 @@ def preview_histogram(handle: LoadedFile, params: TraceParams, fit: FitParams,
                                  states, rois)
 
 
+def load_irf(path: str | Path) -> LoadedFile:
+    """Read the IRF ``.ptu`` file (run it in a job; it can be large)."""
+    from .files import load_ptu
+    return load_ptu(path)
+
+
+def _irf_kwargs(irf: LoadedFile | None, irf_params: IRFParams | None) -> dict[str, Any]:
+    if irf is None or irf_params is None or not irf_params.use:
+        return {}
+    return {"irf": irf.reader, "fit_background": irf_params.fit_background,
+            "fit_scatter": irf_params.fit_scatter}
+
+
+def _irf_extra(irf: LoadedFile | None, irf_params: IRFParams | None) -> dict[str, Any]:
+    if not _irf_kwargs(irf, irf_params):
+        return {}
+    return {"irf": {"source": str(irf.path), **asdict(irf_params)}}
+
+
 def _fit_histogram(handle: LoadedFile, histogram: Signal, fit: FitParams,
-                   options: FitOptions) -> dict[str, Any]:
+                   options: FitOptions, irf: LoadedFile | None = None,
+                   irf_params: IRFParams | None = None) -> dict[str, Any]:
     y = np.asarray(histogram.y, dtype=float)
     if not np.any(y):
         name = histogram.label.split(" (")[0] if histogram.label else fit.source
@@ -549,26 +586,33 @@ def _fit_histogram(handle: LoadedFile, histogram: Signal, fit: FitParams,
     return handle.reader.fit_lifetime(histogram, n_exp=fit.n_exp,
                                       diagnostics=options.diagnostics(),
                                       **fit.window_kwargs(),
-                                      **options.fit_kwargs(fit.n_exp, scale))
+                                      **options.fit_kwargs(fit.n_exp, scale),
+                                      **_irf_kwargs(irf, irf_params))
 
 
 def compute_fit(handle: LoadedFile, params: TraceParams, fit: FitParams,
                 states: StateParams, rois: Sequence[dict[str, float]] = (),
-                options: FitOptions | None = None) -> FitResult:
-    """Fit the selected lifetime histogram with ``fit.n_exp`` exponentials."""
+                options: FitOptions | None = None, irf: LoadedFile | None = None,
+                irf_params: IRFParams | None = None) -> FitResult:
+    """Fit the selected lifetime histogram with ``fit.n_exp`` exponentials.
+
+    With ``irf`` and ``irf_params.use`` the fit is an IRF reconvolution.
+    """
     options = options or FitOptions()
     options.validate()
     with handle.lock:
         histogram = compute_histogram(handle, params, fit, states, rois)
-        result = _fit_histogram(handle, histogram, fit, options)
+        result = _fit_histogram(handle, histogram, fit, options, irf, irf_params)
     return FitResult(histogram, result, fit, states, params, str(handle.path),
+                     extra=_irf_extra(irf, irf_params),
                      roi_index=fit.roi if fit.source == "roi" else None,
                      rois=[dict(r) for r in rois], options=options)
 
 
 def compute_roi_fits(handle: LoadedFile, params: TraceParams, fit: FitParams,
                      states: StateParams, rois: Sequence[dict[str, float]],
-                     options: FitOptions | None = None,
+                     options: FitOptions | None = None, irf: LoadedFile | None = None,
+                     irf_params: IRFParams | None = None,
                      ) -> tuple[list[FitResult], list[tuple[int, str]]]:
     """One fit per ROI (``fit.source == "each"``).
 
@@ -586,13 +630,14 @@ def compute_roi_fits(handle: LoadedFile, params: TraceParams, fit: FitParams,
             roi_fit = FitParams(**{**asdict(fit), "source": "roi", "roi": i})
             try:
                 histogram = _roi_histogram(handle, signal, params, rois, [i])
-                result = _fit_histogram(handle, histogram, roi_fit, options)
+                result = _fit_histogram(handle, histogram, roi_fit, options, irf, irf_params)
             except ValueError as exc:
                 skipped.append((i, str(exc)))
                 continue
             results.append(FitResult(histogram, result, roi_fit, states, params,
-                                     str(handle.path), roi_index=i,
-                                     rois=[dict(r) for r in rois], options=options))
+                                     str(handle.path), extra=_irf_extra(irf, irf_params),
+                                     roi_index=i, rois=[dict(r) for r in rois],
+                                     options=options))
     return results, skipped
 
 
@@ -600,11 +645,16 @@ def compute_lifetime_trace(handle: LoadedFile, params: TraceParams, fit: FitPara
                            lt: LifetimeTraceParams,
                            progress: Callable[[int, int], Any] | None = None, *,
                            rois: Sequence[dict[str, float]] = (),
-                           options: FitOptions | None = None) -> Signal:
-    """Mean fitted lifetime per time bin within the trace's (or an ROI's) window."""
+                           options: FitOptions | None = None,
+                           irf_kwargs: dict[str, Any] | None = None) -> Signal:
+    """Mean fitted lifetime per time bin within the trace's (or an ROI's) window.
+
+    ``irf_kwargs`` (see :func:`irf_trace_kwargs`) switches the per-bin fits to
+    IRF reconvolution.
+    """
     options = options or FitOptions()
     options.validate()
-    kwargs = {**fit.window_kwargs(), **options.fit_kwargs(lt.n_exp)}
+    kwargs = {**fit.window_kwargs(), **options.fit_kwargs(lt.n_exp), **(irf_kwargs or {})}
     with handle.lock:
         ptu = handle.reader
         if lt.roi is None:
@@ -623,6 +673,35 @@ def compute_lifetime_trace(handle: LoadedFile, params: TraceParams, fit: FitPara
                                     progress=progress, **kwargs)
     signal.label = f"{signal.label} ROI {lt.roi + 1}"
     return signal
+
+
+def irf_trace_kwargs(fit: FitResult | None, source: str,
+                     irf: LoadedFile | None) -> tuple[dict[str, Any] | None, str | None]:
+    """Per-bin IRF settings for the lifetime trace/FLIDs from the last lifetime fit.
+
+    The per-bin fits have few photons, so they take the IRF shift, the
+    background (as a rate per second and lifetime bin) and the scatter (as a
+    fraction of the photons) from the reconvolution fit of the summed
+    histogram. Returns ``(kwargs, None)``, or ``(None, reason)`` when there is
+    no suitable lifetime fit (none, of another file, or without the IRF).
+    """
+    if irf is None:
+        return None, "no IRF file is loaded"
+    if fit is None:
+        return None, "no lifetime fit has been run yet"
+    if fit.source != source:
+        return None, "the last lifetime fit belongs to another file"
+    if not fit.fit.get("reconvolution"):
+        return None, "the last lifetime fit did not use the IRF"
+    if not fit.fit.get("success", False):
+        return None, "the last lifetime fit with the IRF did not converge"
+    duration = fit.histogram.meta.get("acquisition_duration")
+    rate = (float(fit.fit["background"]) / float(duration)
+            if duration else None)
+    total = float(np.sum(fit.histogram.y))
+    fraction = float(fit.fit.get("scatter", 0.0)) / total if total > 0 else 0.0
+    return ({"irf": irf.reader, "irf_shift": float(fit.fit["shift_ns"]),
+             "background_rate": rate, "scatter_fraction": fraction}, None)
 
 
 # ------------------------------------------------------------------ summaries
@@ -665,7 +744,19 @@ def fit_summary(fit: dict[str, Any]) -> dict[str, Any]:
     if name in fit:
         summary[f"{name}_ns"] = float(fit[name])
         summary[f"{name}_err_ns"] = float(fit.get(f"{name}_err", np.nan))
-    summary["offset"] = float(fit.get("offset", 0.0))
+    if fit.get("reconvolution"):
+        summary["irf_shift_ns"] = float(fit["shift_ns"])
+        if fit.get("fit_shift", True):
+            summary["irf_shift_err_ns"] = float(fit.get("shift_err_ns", np.nan))
+        if fit.get("fit_scatter"):
+            summary["scatter"] = float(fit["scatter"])
+            summary["scatter_err"] = float(fit.get("scatter_err", np.nan))
+        summary["irf_fwhm_ns"] = float(fit.get("irf_fwhm_ns", np.nan))
+    if fit.get("fit_background"):
+        summary["offset"] = float(fit["background"])
+        summary["offset_err"] = float(fit.get("background_err", np.nan))
+    else:
+        summary["offset"] = float(fit.get("offset", 0.0))
     summary["reduced_chi_squared"] = float(quality.get("reduced_chi_squared", np.nan))
     if "bic" in quality:
         summary["bic"] = float(quality["bic"])
@@ -837,6 +928,10 @@ def _fit_signals(result: FitResult, prefix: str = "") -> list[Signal]:
                    units={"x": "ns", "y": "counts"})
     residuals = fit.get("quality", {}).get("weighted_residuals")
     signals = [data, curve]
+    if fit.get("reconvolution") and fit.get("irf_shifted") is not None:
+        signals.append(Signal(fit["irf_t_ns"], np.asarray(fit["irf_shifted"], dtype=float),
+                              label=f"{prefix} IRF (shifted, unit area)".strip(),
+                              units={"x": "ns", "y": "fraction"}))
     if residuals is not None:
         signals.append(Signal(fit["t_fit"], np.asarray(residuals, dtype=float),
                               label=f"{prefix} weighted residuals".strip(),
@@ -849,6 +944,8 @@ def _fit_parameters(result: FitResult) -> dict[str, Any]:
                      ("fit", result.params), ("fit_options", result.options))
     if result.rois:
         params["rois"] = result.rois
+    if result.extra.get("irf"):
+        params["irf"] = result.extra["irf"]
     return params
 
 
@@ -897,6 +994,8 @@ def histogram_payload(histogram: Signal, source: str, params: TraceParams,
 def _result_summary(result: FitResult) -> dict[str, Any]:
     """:func:`fit_summary` plus the warnings and the BIC comparison of the GUI."""
     summary = {**fit_summary(result.fit), "histogram": describe_meta(result.histogram.meta)}
+    if result.fit.get("reconvolution"):
+        summary["irf_background_subtracted"] = float(result.fit.get("irf_background", 0.0))
     if result.fit.get("warnings"):
         summary["warnings"] = list(result.fit["warnings"])
     comparison = result.extra.get("bic_comparison")
@@ -957,6 +1056,8 @@ def lifetime_trace_payload(signal: Signal, source: str, params: TraceParams,
                                   label=f"A{i + 1}_fit", units={"x": "s", "y": ""}))
     parameters = _params(("time_trace", params), ("fit_window", fit), ("lifetime_trace", lt),
                          ("fit_options", options or FitOptions()))
+    if signal.meta.get("reconvolution"):
+        parameters["irf"] = {"shift_ns": signal.meta.get("irf_shift_ns")}
     if lt.roi is not None and 0 <= lt.roi < len(rois):
         parameters["roi"] = dict(rois[lt.roi])
     meta = build_metadata(

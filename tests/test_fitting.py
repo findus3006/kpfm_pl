@@ -380,3 +380,110 @@ def test_multiexpfit_fractions_and_tau_amp_with_errors():
     assert fit.mean_lifetime("intensity") == fit.intensity_weighted_lifetime()
     with pytest.raises(ValueError, match="kind"):
         fit.fractions("number")
+
+
+# ------------------------------------------------------------ IRF reconvolution
+def test_exp_kernel_matches_brute_force_integration():
+    from kpfm_pl.fitting import exp_kernel
+
+    dt, tau, n, sub = 0.1, 0.25, 30, 400
+    # IRF: one bin of unit area; decay exp(-t/tau) with amplitude 1 count per bin
+    src = (np.arange(sub) + 0.5) * dt / sub
+    t = (np.arange(n * sub) + 0.5) * dt / sub
+    lag = t[:, None] - src[None, :]
+    density = np.where(lag >= 0, np.exp(-np.clip(lag, 0, None) / tau), 0.0).mean(axis=1) / dt
+    brute = density.reshape(n, sub).sum(axis=1) * dt / sub
+    kernel = exp_kernel(tau, dt, n, periodic=False)
+    np.testing.assert_allclose(kernel, brute, atol=2e-3 * brute.max())
+    assert kernel.sum() == pytest.approx(tau / dt, rel=1e-4)   # tail beyond n bins
+    # periodic: the tails of all earlier pulses add up, the total stays tau/dt
+    assert exp_kernel(5.0, dt, n, periodic=True).sum() == pytest.approx(50.0)
+    assert exp_kernel(5.0, dt, n, periodic=True)[5] > exp_kernel(5.0, dt, n, periodic=False)[5]
+
+
+def test_prepare_irf_and_fwhm():
+    from kpfm_pl.fitting import irf_fwhm, prepare_irf
+
+    t = np.arange(200) * 0.05
+    irf = 1000 * np.exp(-0.5 * ((t - 3) / 0.2) ** 2) + 10
+    g, background = prepare_irf(irf)
+    assert background == pytest.approx(10.0) and g.sum() == pytest.approx(1.0)
+    assert np.all(g >= 0)
+    assert irf_fwhm(g) * 0.05 == pytest.approx(2.3548 * 0.2, rel=0.02)
+    with pytest.raises(ValueError, match="no counts"):
+        prepare_irf(np.full(20, 5.0))
+
+
+def _irf_setup(n=1000, dt=0.1, centre=5.0, sigma=0.15):
+    t = np.arange(n) * dt
+    return t, np.exp(-0.5 * ((t - centre) / sigma) ** 2) * 2e4 + 20
+
+
+def test_reconvolution_recovers_parameters_from_noise_free_data():
+    from kpfm_pl import IRFReconvolutionFit
+
+    t, irf = _irf_setup()
+    truth = IRFReconvolutionFit(irf, np.ones(t.size), 2, 0.1, shift=0.23, background=3.0,
+                                scatter_counts=2000.0)
+    counts = truth.full_model(np.array([3000.0, 800.0, 0.6, 4.0]))
+    fit = IRFReconvolutionFit(irf, counts, 2, 0.1, background=3.0, scatter=True)
+    out = fit.to_dict()
+    order = np.argsort(out["tau"])
+    np.testing.assert_allclose(out["tau"][order], [0.6, 4.0], rtol=1e-4)
+    np.testing.assert_allclose(out["A"][order], [3000.0, 800.0], rtol=1e-4)
+    assert out["shift_ns"] == pytest.approx(0.23, abs=1e-4)
+    assert out["scatter"] == pytest.approx(2000.0, rel=1e-3)
+    assert out["background"] == 3.0 and out["offset"] == 3.0 and out["reconvolution"]
+    assert out["n_params"] == 6 and out["full_curve"].shape == t.shape
+    assert out["irf_shifted"].sum() == pytest.approx(1.0)
+    # the mean lifetimes and fractions of MultiExpFit apply to the IRF-free decay
+    assert out["tau_int"] == pytest.approx((3000 * 0.36 + 800 * 16) / (3000 * 0.6 + 800 * 4),
+                                           rel=1e-4)
+
+
+def test_reconvolution_with_noise_mle_and_fitted_background():
+    from kpfm_pl import IRFReconvolutionFit
+
+    rng = np.random.default_rng(9)
+    t, irf = _irf_setup()
+    truth = IRFReconvolutionFit(irf, np.ones(t.size), 1, 0.1, shift=-0.12, background=4.0)
+    counts = rng.poisson(truth.full_model(np.array([2000.0, 2.5]))).astype(float)
+    fit = IRFReconvolutionFit(irf, counts, 1, 0.1, fit_background=True,
+                              statistic="poisson_mle")
+    out = fit.to_dict()
+    assert out["tau"][0] == pytest.approx(2.5, abs=4 * out["tau_err"][0])
+    assert out["shift_ns"] == pytest.approx(-0.12, abs=0.01)
+    assert out["background"] == pytest.approx(4.0, abs=4 * out["background_err"])
+    assert fit.diagnostics() == []
+
+
+def test_reconvolution_periodic_kernel_and_fixed_shift():
+    from kpfm_pl import IRFReconvolutionFit
+
+    t, irf = _irf_setup(n=500, dt=0.1)        # 50 ns period, tau 20 ns: incomplete decay
+    periodic = IRFReconvolutionFit(irf, np.ones(t.size), 1, 0.1, shift=0.0)
+    counts = periodic.full_model(np.array([100.0, 20.0]))
+    fit = IRFReconvolutionFit(irf, counts, 1, 0.1, shift=0.0)
+    assert fit.parameters()["tau"][0] == pytest.approx(20.0, rel=1e-4)
+    assert fit.parameters()["A"][0] == pytest.approx(100.0, rel=1e-4)
+    assert fit.to_dict()["fit_shift"] is False and fit._n_params() == 2
+    single = IRFReconvolutionFit(irf, np.ones(t.size), 1, 0.1, shift=0.0, periodic=False)
+    # without the earlier pulses the bins before the rise are empty
+    flat = single.full_model(np.array([100.0, 20.0]))
+    assert flat[:40].max() < 1e-6 < counts[:40].min()
+
+
+def test_reconvolution_accepts_amplitude_lifetime_only_guesses_and_bounds():
+    from kpfm_pl import IRFReconvolutionFit
+
+    t, irf = _irf_setup()
+    counts = IRFReconvolutionFit(irf, np.ones(t.size), 1, 0.1, shift=0.1).full_model(
+        np.array([1000.0, 3.0]))
+    fit = IRFReconvolutionFit(irf, counts, 1, 0.1, p0=[np.nan, 3.3],
+                              bounds=([0, 2.5], [np.inf, 3.5]))
+    assert fit.bounds[0].size == 3                       # shift bounds appended
+    assert fit.parameters()["tau"][0] == pytest.approx(3.0, rel=1e-4)
+    with pytest.raises(ValueError, match="same lifetime grid"):
+        IRFReconvolutionFit(irf[:-1], counts, 1, 0.1)
+    narrow = IRFReconvolutionFit(irf, counts, 1, 0.1, bounds=([0, 0.5], [np.inf, 2.0]))
+    assert any("τ1" in w and "upper bound" in w for w in narrow.diagnostics())

@@ -33,16 +33,20 @@ from .database import (
     save_json,
 )
 from .fitting import (
+    IRFReconvolutionFit,
     MultiExpFit,
     amplitude_fractions,
+    exp_kernel,
     fit_gaussian2d,
     fit_warnings,
     gaussian2d,
     intensity_fractions,
+    irf_fwhm,
     mean_lifetime,
     peak_power_density,
     poisson_chi_squared,
     poisson_deviance,
+    prepare_irf,
 )
 from .io import pick_files, pick_folder, sort_measurement_files
 from .jpk import JPK
@@ -78,6 +82,10 @@ __all__ = [
     "JPK",
     "Match",
     "MultiExpFit",
+    "IRFReconvolutionFit",
+    "prepare_irf",
+    "irf_fwhm",
+    "exp_kernel",
     "poisson_chi_squared",
     "poisson_deviance",
     "fit_warnings",
