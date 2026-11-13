@@ -407,11 +407,39 @@ def test_prepare_irf_and_fwhm():
     t = np.arange(200) * 0.05
     irf = 1000 * np.exp(-0.5 * ((t - 3) / 0.2) ** 2) + 10
     g, background = prepare_irf(irf)
-    assert background == pytest.approx(10.0) and g.sum() == pytest.approx(1.0)
-    assert np.all(g >= 0)
+    # the floor bins (below median + 5 sqrt(median)) include a few Gaussian wings
+    assert background == pytest.approx(10.0, abs=0.3) and g.sum() == pytest.approx(1.0)
     assert irf_fwhm(g) * 0.05 == pytest.approx(2.3548 * 0.2, rel=0.02)
+    assert prepare_irf(irf, None)[1] == 0.0 and prepare_irf(irf, 7.5)[1] == 7.5
     with pytest.raises(ValueError, match="no counts"):
         prepare_irf(np.full(20, 5.0))
+
+
+def test_prepare_irf_keeps_the_zero_mean_floor_noise():
+    # Clipping the floor at zero would keep only its positive noise (v1.7.2 fix).
+    from kpfm_pl.fitting import prepare_irf
+
+    rng = np.random.default_rng(10)
+    t = np.arange(2000) * 0.05
+    irf = rng.poisson(5000 * np.exp(-0.5 * ((t - 10) / 0.2) ** 2) + 3.0).astype(float)
+    g, background = prepare_irf(irf)
+    assert background == pytest.approx(3.0, abs=0.1)        # the median would give 3
+    floor = g[np.abs(t - 10) > 3] * irf.sum()
+    assert np.min(floor) < 0 and abs(np.mean(floor)) < 0.1   # noise kept, mean ~0
+
+
+def test_noisy_irf_floor_does_not_bias_the_fitted_background():
+    from kpfm_pl import IRFReconvolutionFit
+
+    rng = np.random.default_rng(11)
+    t, clean = _irf_setup()                                  # floor of 20 counts per bin
+    noisy = rng.poisson(clean).astype(float)
+    truth = IRFReconvolutionFit(clean, np.ones(t.size), 1, 0.1, shift=0.1, background=3.0)
+    counts = truth.full_model(np.array([3000.0, 4.0]))       # noise-free decay
+    fit = IRFReconvolutionFit(noisy, counts, 1, 0.1, fit_background=True)
+    # Clipping the IRF floor (before v1.7.2) gave B = 0.33 here instead of 3.
+    assert fit.to_dict()["background"] == pytest.approx(3.0, abs=0.15)
+    assert fit.parameters()["tau"][0] == pytest.approx(4.0, rel=0.01)
 
 
 def _irf_setup(n=1000, dt=0.1, centre=5.0, sigma=0.15):

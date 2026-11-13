@@ -306,7 +306,7 @@ m_j = Σ_i a_i [g_δ ⊛ k_τi]_j + s·g_δ,j + B
 
 | Symbol | Meaning |
 |---|---|
-| `g` | the IRF histogram minus its background (`irf_background`, default `"auto"` = median), clipped at 0, normalised to unit area |
+| `g` | the IRF histogram minus its background (`irf_background`, default `"auto"` = mean of the floor bins below `median + 5 sqrt(median)`), normalised to unit area. The floor keeps its zero-mean noise: clipping it at 0 would leave a positive floor that the fit takes from `B` |
 | `g_δ` | the IRF shifted later by `δ` (sub-bin, Fourier shift theorem); `δ` is fitted (`irf_shift=` fixes it) and corrects drift and the wavelength-dependent detector response ("colour effect") |
 | `k_τ` | exponential kernel integrated over the bins; with `decay_correction=True` (default) it is periodic and includes the decay of all earlier pulses, otherwise a single pulse |
 | `⊛` | circular (periodic) or linear convolution, computed by FFT |

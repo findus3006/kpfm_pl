@@ -595,15 +595,32 @@ class MultiExpFit:
 
 
 # ------------------------------------------------------------ IRF reconvolution
+def _irf_floor(counts: np.ndarray) -> float:
+    """Mean of the floor bins (below ``median + 5 sqrt(median)``) of an IRF histogram."""
+    median = float(np.median(counts))
+    floor = counts[counts < median + 5.0 * np.sqrt(max(median, 1.0))]
+    return float(np.mean(floor)) if floor.size else median
+
+
 def prepare_irf(counts: np.ndarray, background: float | str | None = "auto",
                 ) -> tuple[np.ndarray, float]:
     """Turn a recorded IRF histogram into a unit-area response.
 
-    Subtracts a constant ``background`` (``"auto"``: the median of the
-    histogram, i.e. the flat floor that fills most of a period for a narrow
-    IRF; ``None``: nothing; or a number), clips negative values to zero and
-    normalises to ``sum = 1``. Without the background subtraction a flat IRF
-    floor, convolved with the decay, would add a spurious slow component.
+    Subtracts a constant ``background`` and normalises to ``sum = 1``.
+    Without the background subtraction a flat IRF floor, convolved with the
+    decay, would add a spurious constant (or slow) component to the model.
+
+    ``background="auto"`` estimates the floor as the mean of the floor bins:
+    those below ``median + 5 sqrt(median)``, which excludes the IRF peak and
+    tail (for a narrow IRF the floor fills most of the period). The mean, not
+    the median, is used because the median of Poisson counts is biased.
+    ``None`` subtracts nothing, a number subtracts that level.
+
+    The result is **not clipped** at zero: the floor keeps its zero-mean
+    noise. Clipping would remove only the negative noise and leave a positive
+    floor (about ``0.4 sqrt(floor)`` counts per bin), which the convolution
+    turns into a flat level that the fit then takes from the background ``B``
+    (4 % of ``B`` on a synthetic test file).
 
     Returns
     -------
@@ -616,10 +633,10 @@ def prepare_irf(counts: np.ndarray, background: float | str | None = "auto",
     if isinstance(background, str):
         if background != "auto":
             raise ValueError(f"background must be 'auto', None or a number, not {background!r}.")
-        level = float(np.median(counts))
+        level = _irf_floor(counts)
     else:
         level = 0.0 if background is None else float(background)
-    irf = np.clip(counts - level, 0.0, None)
+    irf = counts - level
     total = float(np.sum(irf))
     if not np.isfinite(total) or total <= 0:
         raise ValueError("The IRF contains no counts above its background.")

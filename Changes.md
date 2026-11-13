@@ -24,6 +24,7 @@
 - [x] Advanced fit settings: *Constraint* (`sum(A) ≤ 1`). It is only applied to normalised fits — the lifetime trace and FLID per-bin fits, and the lifetime fit with *Normalise* ticked — so raw-count fits are unaffected (there the constraint would cap the amplitudes at 1 count). Unset amplitude bounds follow the constraint (`A ≤ 1`).
 
 ## Bugs:
+- [x] (v1.7.2) IRF reconvolution: `prepare_irf` clipped the background-subtracted IRF at zero, which keeps only the positive half of the floor noise; the convolution turned that residue into a flat level taken from the fitted background `B` (−4 % on a synthetic test file, −90 % with a noisier IRF floor; τ, fractions and δ were unaffected, but with `B` fixed from the dark counts the residue would bias the fit). The floor is no longer clipped and is estimated as the mean of the floor bins (median + 5 √median cut) instead of the biased median.
 - [x] (v1.7.1) Lifetime trace / FLID per-bin tail fits: the dark-count offset was divided by the row maximum but the fitted data by the maximum inside the fit window, so whenever the window excludes the peak (e.g. manual start after the maximum) the offset was too small by that ratio. It is now in the units of the fitted data.
 - [x] (v1.4.0) AFM tab: *Save figure* suggests `<file>_channels` (metadata lists all plotted channels) instead of the first channel's name.
 - [x] (v1.4.0) AFM tab: *Export data (CSV)* writes every plotted channel, one file each (`<name>_<channel>.csv`); the *Channel for CSV* drop-down is gone.
