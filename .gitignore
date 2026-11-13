@@ -6,4 +6,3 @@ __pycache__/
 .pytest_cache/
 build/
 gui_ptu_architecture.md
-irf_reconvolution.md

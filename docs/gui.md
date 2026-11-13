@@ -115,8 +115,9 @@ title on the left to fold it away.
      of the **last lifetime fit** and fit only the amplitudes and lifetimes
      per bin; without a lifetime fit with the IRF they fall back to the tail
      fit and say so in the log. The *Incomplete decay* setting chooses the
-     periodic or the single-pulse model. Background and formulas:
-     [ptu.md](ptu.md#irf-reconvolution).
+     periodic or the single-pulse model. Usage and parameters:
+     [ptu.md](ptu.md#irf-reconvolution); how it works, with literature:
+     [irf_reconvolution.md](irf_reconvolution.md).
    - **Mean lifetime**: **τ_int**, the intensity-weighted mean Σ Aᵢτᵢ² / Σ Aᵢτᵢ
      (the mean photon arrival time), or **τ_amp**, the amplitude-weighted mean
      Σ Aᵢτᵢ / Σ Aᵢ (share of emitters, e.g. for quenching/FRET), as chosen in

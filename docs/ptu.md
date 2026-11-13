@@ -265,7 +265,8 @@ lifetimes that differ by less than `merge_sigma`=2 combined errors or
 thresholds with `diagnostics={"min_fraction": 0.02, ...}`. References:
 G. Schwarz, *Ann. Statist.* 6, 461 (1978); R. E. Kass & A. E. Raftery,
 *J. Am. Stat. Assoc.* 90, 773 (1995); for MLE vs. least squares M. Maus et al.,
-*Anal. Chem.* 73, 2078 (2001).
+*Anal. Chem.* 73, 2078 (2001). Background on the fit statistics and the BIC:
+[irf_reconvolution.md, sections 3–4](irf_reconvolution.md#3-fitting-statistics).
 
 ```python
 fits = {n: ptu.fit_lifetime(hist, n_exp=n, weighting="mle") for n in (1, 2, 3)}
@@ -289,7 +290,9 @@ pulse width, timing jitter and above all the detector's transit-time spread.
 It is fine when every lifetime is much longer than the IRF width, but short
 components and the amplitudes are then biased. A reconvolution fit convolves
 the model with a **measured IRF** and fits the whole laser period, including
-the rising edge:
+the rising edge. How it works, which statistics to use, how to record a good
+IRF and the literature are explained in
+[irf_reconvolution.md](irf_reconvolution.md); this section covers the usage.
 
 ```python
 irf = PTU("irf_scatter.ptu")          # scattered laser light, same detector and settings
@@ -343,7 +346,9 @@ scattered laser light or, for SPADs with a strong colour effect, a quenched
 dye emitting near the sample's wavelength. Literature: J. R. Lakowicz,
 *Principles of Fluorescence Spectroscopy*, 3rd ed., ch. 4 (2006); W. Becker,
 *The bh TCSPC Handbook*; S. C. Warren et al., *PLoS ONE* 8, e70687 (2013)
-(FLIMfit's model); M. Maus et al., *Anal. Chem.* 73, 2078 (2001) (MLE).
+(FLIMfit's model); M. Maus et al., *Anal. Chem.* 73, 2078 (2001) (MLE). The
+full explanation with all references is in
+[irf_reconvolution.md](irf_reconvolution.md).
 
 ## Lifetime trace
 
