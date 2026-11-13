@@ -633,6 +633,28 @@ def test_fit_lifetime_mean_lifetime_and_decay_correction_switch(ptu):
         ptu.fit_lifetime(hist, n_exp=1, mean_lifetime="median")
 
 
+def test_lifetime_trace_dark_offset_is_in_fit_units(monkeypatch):
+    seen = []
+
+    class DummyFit:
+        def __init__(self, t, y, n_exp, offset, **kwargs):
+            seen.append((np.asarray(y, dtype=float), offset))
+            self.success = True
+
+        def parameters(self):
+            return {"A": np.ones(1), "tau": np.array([2.0]), "A_fit": np.ones(1)}
+
+    monkeypatch.setattr("kpfm_pl.ptu.MultiExpFit", DummyFit)
+    matrix = np.array([[16, 4, 2, 1, 0]], dtype=np.uint32)
+    p = _synthetic_ptu(matrix, bintime=1.0, acquisition_time=1.0)
+    p.dark_counts = 10.0                       # 10 counts/s over 5 lifetime bins: 2 per bin
+    # The window starts after the peak, so its maximum (4) is below the row's (16).
+    p.lifetime_trace(bintime=1.0, mode="manual", start=0.5, end=10, min_counts=None)
+    y, offset = seen[0]
+    np.testing.assert_allclose(y, [1.0, 0.5, 0.25, 0.0])        # counts / 4
+    assert offset == pytest.approx(2.0 / 4.0)                   # same units as y
+
+
 def test_lifetime_trace_mean_lifetime_and_decay_correction(monkeypatch):
     seen = []
 

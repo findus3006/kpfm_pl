@@ -925,8 +925,10 @@ class PTU:
             if not np.isfinite(ymax) or ymax == 0:
                 continue
             y_fit = y_fit / ymax
-            offset = self.dark_counts * bintime / n_binned / norm
-            bin_kwargs = _poisson_weights(weighting, lt_bin[mask], norm * ymax, fit_kwargs)
+            # The offset must be in the units of y_fit: counts / (norm * ymax).
+            scale = norm * ymax
+            offset = self.dark_counts * bintime / n_binned / scale
+            bin_kwargs = _poisson_weights(weighting, lt_bin[mask], scale, fit_kwargs)
             fit = MultiExpFit(t_fit, y_fit, n_exp, offset, period=period_ns, **bin_kwargs)
             if fit.success:
                 params = fit.parameters()
