@@ -50,6 +50,9 @@ __all__ = [
     "compute_roi_fits",
     "compute_lifetime_trace",
     "fit_summary",
+    "BicComparison",
+    "same_fit_data",
+    "compare_bic",
     "format_uncertainty",
     "tau_int_text",
     "shifted_histogram_x",
@@ -65,7 +68,14 @@ HISTOGRAM_SOURCES = (("all", "Whole time trace"), ("on", "On state"), ("off", "O
 ROI_SOURCES = (("rois", "All ROIs combined"), ("each", "Each ROI separately"))
 FIT_MODES = (("fraction", "Rising edge (fraction)"), ("inflection", "Inflection point"),
              ("manual", "Manual (start/end)"))
-WEIGHTINGS = (("none", "None (least squares)"), ("poisson", "Poisson (1/√counts)"))
+WEIGHTINGS = (("none", "None (least squares)"), ("poisson", "Poisson (1/√counts)"),
+              ("mle", "Poisson MLE (maximum likelihood)"))
+#: Defaults of the over-fitting warnings (``fitting.fit_warnings``).
+DIAGNOSTIC_DEFAULTS = {"amp_sigma": 2.0, "min_fraction": 0.01, "merge_sigma": 2.0,
+                       "merge_rel": 0.1, "bound_rel": 0.01}
+#: Default |ΔBIC| below which two fits count as equally good (Kass & Raftery:
+#: > 10 is "very strong" evidence).
+BIC_THRESHOLD = 10.0
 LOSSES = (("linear", "Linear (standard)"), ("soft_l1", "Soft L1"), ("huber", "Huber"),
           ("cauchy", "Cauchy"), ("arctan", "Arctan"))
 #: Exponential components that can be fine-tuned in :class:`FitOptions`.
@@ -147,6 +157,12 @@ class FitOptions:
     fractions of the peak: the per-bin lifetime-trace/FLID fits, or the
     lifetime fit with *Normalise*. Raw-count fits ignore it because their
     amplitudes are counts, not fractions.
+
+    ``bic_threshold`` is the |ΔBIC| from which a lifetime fit counts as better
+    or worse than the previous one (see :func:`compare_bic`). ``amp_sigma``,
+    ``min_fraction``, ``merge_sigma``, ``merge_rel`` and ``bound_rel`` are the
+    thresholds of the over-fitting warnings of the lifetime fit
+    (``kpfm_pl.fitting.fit_warnings``). These only affect the lifetime fit.
     """
 
     tau_guess: list[float | None] = field(default_factory=_components)
@@ -159,9 +175,19 @@ class FitOptions:
     loss: str = "linear"
     f_scale: float = 1.0
     constrain_sum_A: bool = False
+    bic_threshold: float = BIC_THRESHOLD
+    amp_sigma: float = DIAGNOSTIC_DEFAULTS["amp_sigma"]
+    min_fraction: float = DIAGNOSTIC_DEFAULTS["min_fraction"]
+    merge_sigma: float = DIAGNOSTIC_DEFAULTS["merge_sigma"]
+    merge_rel: float = DIAGNOSTIC_DEFAULTS["merge_rel"]
+    bound_rel: float = DIAGNOSTIC_DEFAULTS["bound_rel"]
 
     def is_default(self) -> bool:
         return not self.fit_kwargs(MAX_COMPONENTS)
+
+    def diagnostics(self) -> dict[str, float]:
+        """Thresholds for ``PTU.fit_lifetime(diagnostics=...)``."""
+        return {key: float(getattr(self, key)) for key in DIAGNOSTIC_DEFAULTS}
 
     def validate(self) -> None:
         """Raise ``ValueError`` for empty bounds or guesses outside their bounds."""
@@ -179,6 +205,14 @@ class FitOptions:
                                      "bounds.")
         if self.f_scale <= 0:
             raise ValueError("The robust-loss scale must be positive.")
+        if self.weighting == "mle" and self.loss != "linear":
+            raise ValueError("Poisson MLE needs the linear loss (a robust loss is a "
+                             "least-squares concept).")
+        if self.bic_threshold < 0:
+            raise ValueError("The BIC threshold must not be negative.")
+        for key in DIAGNOSTIC_DEFAULTS:
+            if getattr(self, key) < 0:
+                raise ValueError(f"The warning threshold {key} must not be negative.")
 
     def fit_kwargs(self, n_exp: int, amplitude_scale: float = 1.0) -> dict[str, Any]:
         """Keyword arguments for ``fit_lifetime``/``lifetime_trace``/``flid``.
@@ -493,6 +527,7 @@ def _fit_histogram(handle: LoadedFile, histogram: Signal, fit: FitParams,
                          "on/off thresholds or the ROI.")
     scale = 1.0 if fit.normalize else float(np.max(y))
     return handle.reader.fit_lifetime(histogram, n_exp=fit.n_exp, normalize=fit.normalize,
+                                      diagnostics=options.diagnostics(),
                                       **fit.window_kwargs(),
                                       **options.fit_kwargs(fit.n_exp, scale))
 
@@ -572,17 +607,26 @@ def compute_lifetime_trace(handle: LoadedFile, params: TraceParams, fit: FitPara
 
 # ------------------------------------------------------------------ summaries
 def fit_summary(fit: dict[str, Any]) -> dict[str, Any]:
-    """Scalar fit results: amplitudes, lifetimes (ns), offset, fit quality, window."""
+    """Scalar fit results: amplitudes, lifetimes (ns), offset, fit quality, window.
+
+    ``A{i}`` are the per-pulse amplitudes (corrected for the incomplete decay
+    of earlier laser pulses), ``A{i}_fit`` the fitted amplitudes of the curve.
+    """
     quality = fit.get("quality", {})
     summary: dict[str, Any] = {}
     for i, (a, tau) in enumerate(zip(np.atleast_1d(fit["A"]), np.atleast_1d(fit["tau"])), 1):
         summary[f"A{i}"] = float(a)
         summary[f"tau{i}_ns"] = float(tau)
+    if "A_fit" in fit:
+        for i, a in enumerate(np.atleast_1d(fit["A_fit"]), 1):
+            summary[f"A{i}_fit"] = float(a)
     if "tau_int" in fit:
         summary["tau_int_ns"] = float(fit["tau_int"])
         summary["tau_int_err_ns"] = float(fit.get("tau_int_err", np.nan))
     summary["offset"] = float(fit.get("offset", 0.0))
     summary["reduced_chi_squared"] = float(quality.get("reduced_chi_squared", np.nan))
+    if "bic" in quality:
+        summary["bic"] = float(quality["bic"])
     summary["r_squared"] = float(quality.get("r_squared", np.nan))
     summary["success"] = bool(fit.get("success", False))
     summary["fit_start_ns"] = float(fit.get("left_bound_ns", np.nan))
@@ -629,6 +673,83 @@ def quality_text(fit: dict[str, Any]) -> str:
     chi = quality.get("reduced_chi_squared", np.nan)
     r2 = quality.get("r_squared", np.nan)
     return f"χ²ᵣ = {chi:.3g}, R² = {r2:.4f}"
+
+
+# ------------------------------------------------------------ BIC comparison
+@dataclass
+class BicComparison:
+    """BIC of a lifetime fit relative to the previous fit (see :func:`compare_bic`).
+
+    ``verdict`` is ``"better"`` (ΔBIC < −threshold), ``"worse"`` (ΔBIC >
+    threshold, e.g. an added component that only fits noise), ``"same"``,
+    ``"not comparable"`` (the previous fit used other data, window or
+    statistic) or ``"first"`` (no previous fit). ``delta`` is
+    ``BIC(new) − BIC(previous)``; ``previous_n_exp`` the components of the
+    previous fit.
+    """
+
+    bic: float
+    verdict: str
+    delta: float = float("nan")
+    previous_n_exp: int | None = None
+    threshold: float = BIC_THRESHOLD
+
+    @property
+    def colour(self) -> str:
+        """Verdict colour key: ``"good"`` (green), ``"bad"`` (red) or ``"neutral"`` (gray)."""
+        return {"better": "good", "worse": "bad"}.get(self.verdict, "neutral")
+
+    def text(self) -> str:
+        """E.g. ``"BIC = 2131.6, ΔBIC = −45.2 vs. 1 exp: better"``."""
+        base = f"BIC = {self.bic:.1f}"
+        if self.verdict == "first":
+            return base
+        if self.verdict == "not comparable":
+            return f"{base} (previous fit not comparable: other data, window or weighting)"
+        verdicts = {"better": "better fit", "worse": "worse fit (overfitting?)",
+                    "same": "about the same"}
+        return (f"{base}, ΔBIC = {self.delta:+.1f} vs. {self.previous_n_exp} exp: "
+                f"{verdicts[self.verdict]} (threshold {self.threshold:g})")
+
+    def short_text(self) -> str:
+        """Compact form for the fit table, e.g. ``"2131.6 (Δ −45.2)"``."""
+        if self.verdict in ("first", "not comparable"):
+            return f"{self.bic:.1f}"
+        return f"{self.bic:.1f} (Δ {self.delta:+.1f})"
+
+
+def same_fit_data(a: FitResult, b: FitResult) -> bool:
+    """Whether two fits used the same counts, fit window and statistic (BIC comparable)."""
+    qa, qb = a.fit.get("quality", {}), b.fit.get("quality", {})
+    return (a.source == b.source
+            and a.fit.get("weighting") == b.fit.get("weighting")
+            and qa.get("bic_statistic") == qb.get("bic_statistic")
+            and np.array_equal(np.asarray(a.histogram.y), np.asarray(b.histogram.y))
+            and np.array_equal(np.asarray(a.fit.get("t_fit", [])),
+                               np.asarray(b.fit.get("t_fit", []))))
+
+
+def compare_bic(result: FitResult, previous: Sequence[FitResult],
+                threshold: float = BIC_THRESHOLD) -> BicComparison | None:
+    """Compare the BIC of ``result`` with the matching fit among ``previous``.
+
+    The match is the previous fit of the same ROI (or the first one) if it was
+    made on identical data (:func:`same_fit_data`); only then is ΔBIC
+    meaningful. ``None`` if ``result`` has no BIC (e.g. a failed fit).
+    """
+    bic = result.fit.get("quality", {}).get("bic")
+    if bic is None or not np.isfinite(bic):
+        return None
+    if not previous:
+        return BicComparison(float(bic), "first", threshold=threshold)
+    same_roi = [p for p in previous if p.roi_index == result.roi_index]
+    candidate = (same_roi or list(previous))[0]
+    old = candidate.fit.get("quality", {}).get("bic")
+    if old is None or not np.isfinite(old) or not same_fit_data(result, candidate):
+        return BicComparison(float(bic), "not comparable", threshold=threshold)
+    delta = float(bic) - float(old)
+    verdict = "better" if delta < -threshold else "worse" if delta > threshold else "same"
+    return BicComparison(float(bic), verdict, delta, int(candidate.params.n_exp), threshold)
 
 
 # ---------------------------------------------------------------- export
@@ -722,13 +843,23 @@ def histogram_payload(histogram: Signal, source: str, params: TraceParams,
                          default_name=f"{_histogram_name(histogram, source)}_lifetime")
 
 
+def _result_summary(result: FitResult) -> dict[str, Any]:
+    """:func:`fit_summary` plus the warnings and the BIC comparison of the GUI."""
+    summary = {**fit_summary(result.fit), "histogram": describe_meta(result.histogram.meta)}
+    if result.fit.get("warnings"):
+        summary["warnings"] = list(result.fit["warnings"])
+    comparison = result.extra.get("bic_comparison")
+    if comparison is not None:
+        summary["bic_comparison"] = asdict(comparison)
+    return summary
+
+
 def fit_payload(result: FitResult) -> ExportPayload:
-    fit = result.fit
     hist = result.histogram
     meta = build_metadata(
         "PTU lifetime fit", sources=[result.source],
         parameters=_fit_parameters(result),
-        results={**fit_summary(fit), "histogram": describe_meta(hist.meta)},
+        results=_result_summary(result),
         note=_FIT_NOTE,
     )
     stem = _histogram_name(hist, result.source)
@@ -745,8 +876,7 @@ def fits_payload(results: Sequence[FitResult]) -> ExportPayload:
     for result in results:
         name = f"ROI {result.roi_index + 1}"
         signals += _fit_signals(result, name)
-        summaries[name] = {**fit_summary(result.fit),
-                           "histogram": describe_meta(result.histogram.meta)}
+        summaries[name] = _result_summary(result)
     meta = build_metadata("PTU lifetime fits per ROI", sources=[first.source],
                           parameters=_fit_parameters(first), results=summaries,
                           note=_FIT_NOTE)
@@ -760,6 +890,7 @@ def lifetime_trace_payload(signal: Signal, source: str, params: TraceParams,
                            rois: Sequence[dict[str, float]] = ()) -> ExportPayload:
     taus = np.asarray(signal.meta.get("taus", np.empty((len(signal), 0))))
     amps = np.asarray(signal.meta.get("amplitudes", np.empty((len(signal), 0))))
+    amps_fit = signal.meta.get("amplitudes_fit")
     columns = [signal]
     counts = signal.meta.get("counts")
     if counts is not None and len(counts) == len(signal):
@@ -770,6 +901,9 @@ def lifetime_trace_payload(signal: Signal, source: str, params: TraceParams,
                               units={"x": "s", "y": "ns"}))
         columns.append(Signal(signal.x, amps[:, i], label=f"A{i + 1}",
                               units={"x": "s", "y": ""}))
+        if amps_fit is not None and np.shape(amps_fit) == amps.shape:
+            columns.append(Signal(signal.x, np.asarray(amps_fit)[:, i],
+                                  label=f"A{i + 1}_fit", units={"x": "s", "y": ""}))
     parameters = _params(("time_trace", params), ("fit_window", fit), ("lifetime_trace", lt),
                          ("fit_options", options or FitOptions()))
     if lt.roi is not None and 0 <= lt.roi < len(rois):

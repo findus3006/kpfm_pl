@@ -44,6 +44,7 @@ _END_KINDS = (("end", "End of file"), ("time", "Time"), ("trigger", "Trigger"))
 _SUMMARY_LABELS = {
     "offset": "Offset",
     "reduced_chi_squared": "χ²ᵣ (Poisson)",
+    "bic": "BIC",
     "r_squared": "R²",
     "success": "Converged",
     "fit_start_ns": "Fit start (ns)",
@@ -61,11 +62,36 @@ _CHI_TOOLTIP = ("Reduced chi-squared with Poisson weights (counts - fit)² / cou
                 "< 1: suspiciously good, e.g. overfitting or few photons.")
 
 
+_BIC_TOOLTIP = ("Bayesian information criterion χ² + k·ln n (Poisson deviance instead of χ² "
+                "for the MLE); k free parameters, n fitted bins. Lower is better.\n"
+                "In brackets: ΔBIC against the previous fit of the same histogram, window "
+                "and weighting. Green: better by more than the threshold (Advanced fit "
+                "settings), red: worse (e.g. an extra component that only fits noise), "
+                "gray: about the same or not comparable.")
+_A_TOOLTIP = ("Per-pulse amplitude: the fitted amplitude corrected for the photons of all "
+              "earlier laser pulses that had not decayed yet, A = A_fit·(1 − exp(−T/τ)) "
+              "with the laser period T. Used for τ_int.")
+_A_FIT_TOOLTIP = ("Amplitude of the fitted curve, before the incomplete-decay correction "
+                  "(includes the tails of earlier pulses).")
+#: Colours of the BIC verdicts (``BicComparison.colour``).
+_VERDICT_COLOURS = {"good": "#2e7d32", "bad": "#c00000", "neutral": "#707070"}
+
+
+def _is_amplitude(key: str) -> bool:
+    return key.startswith("A") and key[1:].isdigit()
+
+
+def _is_fitted_amplitude(key: str) -> bool:
+    return key.startswith("A") and key.endswith("_fit") and key[1:-4].isdigit()
+
+
 def _summary_label(key: str) -> str:
     if key == "tau_int_ns":
         return "τ_int (ns)"
     if key.startswith("tau") and key.endswith("_ns"):
         return f"τ{key[3:-3]} (ns)"
+    if _is_fitted_amplitude(key):
+        return f"{key[:-4]} (fitted)"
     return _SUMMARY_LABELS.get(key, key)
 
 
@@ -86,6 +112,9 @@ class PTUTab(BaseTab):
         self.preview_hist = None          # (x_ns, y, label) shown before a fit
         self.preview_payload = None       # CSV export of the histogram before a fit
         self.fits: list[model.FitResult] = []
+        # The fits of the previous Fit click, for the BIC comparison. Kept when a
+        # new trace clears self.fits; compare_bic checks that the data is the same.
+        self._previous_fits: list[model.FitResult] = []
         self.lifetime: tuple | None = None  # (signal, payload arguments...) of the last trace
         self.flid_result: flid_model.FlidResult | None = None
         self._popouts: list[FlidWindow] = []   # open pop-out map windows
@@ -738,6 +767,17 @@ class PTUTab(BaseTab):
         if not results:
             self.ctx.log.warning("No ROI could be fitted.")
             return
+        threshold = self.fit_options.bic_threshold
+        for result in results:
+            name = self._fit_name(result)
+            comparison = model.compare_bic(result, self._previous_fits, threshold)
+            if comparison is not None:
+                result.extra["bic_comparison"] = comparison
+                self.ctx.log.log(f"{name}, {result.params.n_exp} exp: {comparison.text()}",
+                                 comparison.colour)
+            for warning in result.fit.get("warnings", []):
+                self.ctx.log.warning(f"{name}, {result.params.n_exp} exp: {warning}")
+        self._previous_fits = list(results)
         self.fits = results
         first = results[0]
         self.preview_hist = (first.fit["shifted_histogram_x"],
@@ -749,6 +789,13 @@ class PTUTab(BaseTab):
             if not result.fit.get("success", False):
                 self.ctx.log.warning(f"The lifetime fit of {result.histogram.label} did not "
                                      "converge; check the fit window and settings.")
+
+    @staticmethod
+    def _fit_name(result: model.FitResult) -> str:
+        """``"ROI 2"`` for a per-ROI fit, else the histogram label (without details)."""
+        if result.roi_index is not None:
+            return f"ROI {result.roi_index + 1}"
+        return (result.histogram.label or "Lifetime fit").split(" (")[0]
 
     def _show_fit_table(self) -> None:
         table = self.fit_table
@@ -762,25 +809,37 @@ class PTUTab(BaseTab):
         keys = [k for k in dict.fromkeys(k for s in summaries for k in s)
                 if k != "tau_int_err_ns"]
         table.setRowCount(len(keys))
-        tooltips = {"reduced_chi_squared": _CHI_TOOLTIP, "tau_int_ns": _TAU_INT_TOOLTIP}
+        tooltips = {"reduced_chi_squared": _CHI_TOOLTIP, "tau_int_ns": _TAU_INT_TOOLTIP,
+                    "bic": _BIC_TOOLTIP}
         for row, key in enumerate(keys):
             label = QTableWidgetItem(_summary_label(key))
-            if key in tooltips:
-                label.setToolTip(tooltips[key])
+            tip = tooltips.get(key) or (_A_TOOLTIP if _is_amplitude(key) else
+                                        _A_FIT_TOOLTIP if _is_fitted_amplitude(key) else "")
+            if tip:
+                label.setToolTip(tip)
             table.setItem(row, 0, label)
-            for col, summary in enumerate(summaries, 1):
+            for col, (summary, result) in enumerate(zip(summaries, self.fits), 1):
                 value = summary.get(key)
+                colour = None
                 if key == "tau_int_ns" and value is not None:
                     text = model.format_uncertainty(value, summary.get("tau_int_err_ns", np.nan))
+                elif key == "bic" and value is not None:
+                    comparison = result.extra.get("bic_comparison")
+                    text = comparison.short_text() if comparison else f"{value:.1f}"
+                    if comparison is not None:
+                        colour = QColor(_VERDICT_COLOURS[comparison.colour])
                 else:
                     text = "" if value is None else (f"{value:.4g}" if isinstance(value, float)
                                                      else str(value))
-                item = QTableWidgetItem(text)
-                if key in tooltips:
-                    item.setToolTip(tooltips[key])
+                if key == "reduced_chi_squared":
                     colour = _chi_colour(value)
-                    if colour is not None:
-                        item.setForeground(QBrush(colour))
+                item = QTableWidgetItem(text)
+                if key == "bic" and result.extra.get("bic_comparison") is not None:
+                    item.setToolTip(result.extra["bic_comparison"].text())
+                elif tip:
+                    item.setToolTip(tip)
+                if colour is not None:
+                    item.setForeground(QBrush(colour))
                 table.setItem(row, col, item)
         table.resizeColumnsToContents()
 
@@ -1001,8 +1060,16 @@ class PTUTab(BaseTab):
                     taus += f" | {tau_int}"
                 elif tau_int:  # one exponential: τ_int is τ1, shown with its error
                     taus = tau_int.replace("τ_int", "τ1")
+                comparison = self.fit.extra.get("bic_comparison")
                 ax.set_title(f"{self.fit.histogram.label}: {taus}\n"
-                             f"{model.quality_text(fit)}{self._shift_note()}")
+                             f"{model.quality_text(fit)}{self._shift_note()}",
+                             pad=18 if comparison is not None else 6)
+                if comparison is not None:
+                    # Coloured third title line (a title has a single colour).
+                    ax.annotate(comparison.text(), xy=(0.5, 1.0), xycoords="axes fraction",
+                                xytext=(0, 4), textcoords="offset points", ha="center",
+                                va="bottom", fontsize="small",
+                                color=_VERDICT_COLOURS[comparison.colour])
         ax.set_ylabel("Counts")
         ax.grid(True, alpha=0.3)
         ax.legend(loc="upper right", fontsize="small")
@@ -1029,9 +1096,11 @@ class PTUTab(BaseTab):
             # Undo the normalisation so the curve overlays the raw counts.
             curve = curve * np.max(y[np.isin(x, fit["t_fit"])])
         tau_int = model.tau_int_text(fit)
+        comparison = result.extra.get("bic_comparison")
+        bic = (f", BIC {comparison.short_text()}" if comparison is not None else "")
         label = (f"{name}: τ = " + ", ".join(f"{t:.3g}" for t in np.atleast_1d(fit["tau"]))
                  + " ns" + (f", {tau_int}" if tau_int and np.size(fit["tau"]) > 1 else "")
-                 + f", {model.quality_text(fit)}") if multi else "Fit"
+                 + f", {model.quality_text(fit)}{bic}") if multi else "Fit"
         ax.semilogy(fit["t_fit"], curve, "-", color=colour, linewidth=1.5, label=label)
         if not multi:
             ax.axvspan(fit["t_fit"][0], fit["t_fit"][-1], color=colour, alpha=0.08,

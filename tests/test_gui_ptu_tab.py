@@ -121,6 +121,49 @@ def test_single_fit_shows_quality_in_title(window, qtbot, tab):
     assert len(tab.fit.fit["quality"]["weighted_residuals"]) == len(tab.fit.fit["t_fit"])
 
 
+def test_adding_a_component_is_judged_by_bic(window, qtbot, tab):
+    messages = []
+    window.ctx.log.message.connect(lambda text, level: messages.append((text, level)))
+    tab.fit_form.set_value("n_exp", 1)
+    tab.run_fit()
+    _wait(window, qtbot, lambda: tab.fit is not None)
+    first = tab.fit
+    assert first.extra["bic_comparison"].verdict in ("first", "not comparable")
+
+    tab.fit_form.set_value("n_exp", 2)
+    tab.run_fit()
+    _wait(window, qtbot, lambda: tab.fit is not first)
+    comparison = tab.fit.extra["bic_comparison"]
+    assert comparison.previous_n_exp == 1 and comparison.verdict == "better"
+    assert comparison.delta < -10
+    rows = {tab.fit_table.item(r, 0).text(): r for r in range(tab.fit_table.rowCount())}
+    assert "BIC" in rows and "A1 (fitted)" in rows
+    item = tab.fit_table.item(rows["BIC"], 1)
+    assert "Δ" in item.text() and item.foreground().color().name() == "#2e7d32"
+    assert any("ΔBIC" in text and level == "good" for text, level in messages)
+    # the coloured BIC line above the title
+    texts = [t.get_text() for t in tab.hist_plot.figure.axes[0].texts]
+    assert any("ΔBIC" in t for t in texts)
+
+    # a different fit window is not comparable
+    tab.fit_form.set_values({"mode": "manual", "start": 0.0, "end": 40.0})
+    tab.run_fit()
+    _wait(window, qtbot, lambda: tab.fit.params.mode == "manual")
+    assert tab.fit.extra["bic_comparison"].verdict == "not comparable"
+
+
+def test_fit_warnings_are_logged(window, qtbot, tab):
+    messages = []
+    window.ctx.log.message.connect(lambda text, level: messages.append((text, level)))
+    options = model.FitOptions(min_fraction=0.99)     # every component looks collapsed
+    tab.set_fit_options(options)
+    tab.fit_form.set_value("n_exp", 2)
+    tab.run_fit()
+    _wait(window, qtbot, lambda: tab.fit is not None)
+    assert tab.fit.fit["warnings"]
+    assert any("collapsed" in text and level == "warning" for text, level in messages)
+
+
 def test_flid_region_is_independent_of_the_lifetime_trace_region(window, qtbot, tab):
     tab.set_rois([ROI_A, ROI_B])
     assert _combo_texts(tab.flid_form, "region") == [
@@ -167,6 +210,16 @@ def test_advanced_fit_settings_dialog_round_trip(window, qtbot, tab):
     assert back.tau_min[0] == 2.0 and back.tau_max[0] == 2.5 and back.tau_min[1] is None
     assert back.weighting == "poisson" and back.constrain_sum_A
     assert "sum(A)" in describe_options(back)
+    # fractions are entered in percent and come back as fractions
+    tuned = model.FitOptions(bic_threshold=6.0, min_fraction=0.02, merge_rel=0.05,
+                             weighting="mle")
+    tuned_dialog = FitOptionsDialog(tuned)
+    qtbot.addWidget(tuned_dialog)
+    assert tuned_dialog.form.value("min_fraction") == pytest.approx(2.0)
+    again = tuned_dialog.options()
+    assert again.bic_threshold == 6.0 and again.weighting == "mle"
+    assert again.min_fraction == pytest.approx(0.02) and again.merge_rel == pytest.approx(0.05)
+    assert "|ΔBIC| threshold 6" in describe_options(again)
     # an invalid entry keeps the dialog open with a message
     dialog.cells[("tau_max", 0)].set_value(1.0)
     dialog._accept()

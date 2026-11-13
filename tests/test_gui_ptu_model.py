@@ -303,6 +303,68 @@ def test_fit_respects_lifetime_bounds(handle):
     assert payload.metadata["parameters"]["fit_options"]["tau_min"][0] == 2.0
 
 
+# ------------------------------------------------------- BIC and warnings
+def _fake_fit(bic, n_exp=1, y=(5.0, 3.0, 1.0), t_fit=(0.0, 1.0), weighting="poisson",
+              roi=None, source="a.ptu"):
+    fit = {"weighting": weighting, "t_fit": np.asarray(t_fit),
+           "quality": {"bic": bic, "bic_statistic": "chi_squared"}}
+    return model.FitResult(Signal(np.arange(len(y)), np.asarray(y)), fit,
+                           model.FitParams(n_exp=n_exp), model.StateParams(),
+                           model.TraceParams(), source=source, roi_index=roi)
+
+
+def test_compare_bic_verdicts():
+    one = _fake_fit(1000.0)
+    assert model.compare_bic(one, []).verdict == "first"
+    better = model.compare_bic(_fake_fit(950.0, n_exp=2), [one], threshold=10)
+    assert better.verdict == "better" and better.delta == pytest.approx(-50)
+    assert better.previous_n_exp == 1 and better.colour == "good"
+    assert "ΔBIC = -50.0 vs. 1 exp" in better.text() and "(Δ -50.0)" in better.short_text()
+    worse = model.compare_bic(_fake_fit(1015.0, n_exp=2), [one], threshold=10)
+    assert worse.verdict == "worse" and worse.colour == "bad"
+    same = model.compare_bic(_fake_fit(1004.0, n_exp=2), [one], threshold=10)
+    assert same.verdict == "same" and same.colour == "neutral"
+    assert model.compare_bic(_fake_fit(1004.0, n_exp=2), [one], threshold=2).verdict == "worse"
+    assert model.compare_bic(_fake_fit(float("nan")), [one]) is None
+
+
+def test_compare_bic_requires_the_same_data():
+    one = _fake_fit(1000.0)
+    for other in (_fake_fit(900.0, y=(5.0, 3.0, 2.0)), _fake_fit(900.0, t_fit=(0.0, 2.0)),
+                  _fake_fit(900.0, weighting="mle"), _fake_fit(900.0, source="b.ptu")):
+        comparison = model.compare_bic(other, [one])
+        assert comparison.verdict == "not comparable" and comparison.colour == "neutral"
+    # per ROI: the previous fit of the same ROI is used
+    previous = [_fake_fit(1000.0, roi=0), _fake_fit(500.0, roi=1, y=(9.0, 1.0, 0.0))]
+    assert model.compare_bic(_fake_fit(990.0, roi=0), previous).verdict == "same"
+    assert model.compare_bic(_fake_fit(400.0, roi=1, y=(9.0, 1.0, 0.0)),
+                             previous).verdict == "better"
+
+
+def test_fit_options_pass_warning_thresholds_and_validate(handle):
+    options = model.FitOptions(min_fraction=0.99)
+    assert options.diagnostics()["min_fraction"] == 0.99
+    assert "min_fraction" not in options.fit_kwargs(2)     # not for trace/FLID fits
+    result = model.compute_fit(handle, model.TraceParams(bintime=1.0),
+                               model.FitParams(n_exp=2), model.StateParams(), options=options)
+    assert any("collapsed" in w for w in result.fit["warnings"])
+    summary = model.fit_summary(result.fit)
+    assert {"bic", "A1_fit", "A2_fit"} <= set(summary)
+    with pytest.raises(ValueError, match="MLE"):
+        model.FitOptions(weighting="mle", loss="huber").validate()
+    with pytest.raises(ValueError, match="threshold"):
+        model.FitOptions(bic_threshold=-1).validate()
+
+
+def test_mle_fit_through_the_model(handle):
+    options = model.FitOptions(weighting="mle")
+    result = model.compute_fit(handle, model.TraceParams(bintime=1.0),
+                               model.FitParams(n_exp=1, normalize=True), model.StateParams(),
+                               options=options)
+    assert result.fit["success"] and result.fit["statistic"] == "poisson_mle"
+    assert result.fit["quality"]["bic_statistic"] == "deviance"
+
+
 @pytest.mark.parametrize("value,error,text", [
     (3.4167, 0.0512, "3.42 ± 0.05"),
     (3.4167, 0.0123, "3.417 ± 0.012"),

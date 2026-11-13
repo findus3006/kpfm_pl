@@ -1,8 +1,10 @@
 """Dialog for the advanced lifetime-fit settings (:class:`FitOptions`).
 
-Initial guesses and bounds per exponential component, Poisson weighting and
-a robust loss. The settings are shared by the lifetime fit, the lifetime
-trace and the FLIDs of the *PL lifetime* tab.
+Initial guesses and bounds per exponential component, Poisson weighting (or
+the Poisson MLE) and a robust loss. The settings are shared by the lifetime
+fit, the lifetime trace and the FLIDs of the *PL lifetime* tab. The BIC
+threshold and the over-fitting warning thresholds only apply to the lifetime
+fit.
 """
 
 from __future__ import annotations
@@ -18,7 +20,14 @@ from PySide6.QtWidgets import (
 )
 
 from .forms import OptionalFloat, ParamForm
-from .models.ptu import LOSSES, MAX_COMPONENTS, WEIGHTINGS, FitOptions
+from .models.ptu import (
+    BIC_THRESHOLD,
+    DIAGNOSTIC_DEFAULTS,
+    LOSSES,
+    MAX_COMPONENTS,
+    WEIGHTINGS,
+    FitOptions,
+)
 
 __all__ = ["FitOptionsDialog", "describe_options"]
 
@@ -42,6 +51,10 @@ _COLUMNS = (
 )
 
 
+#: FitOptions fractions that the dialog shows in percent.
+_PERCENT_FIELDS = ("min_fraction", "merge_rel", "bound_rel")
+
+
 def describe_options(options: FitOptions) -> str:
     """One-line summary of the non-default settings (``"defaults"`` if none)."""
     parts = []
@@ -55,6 +68,10 @@ def describe_options(options: FitOptions) -> str:
         parts.append(f"{options.loss} loss (scale {options.f_scale:g})")
     if options.constrain_sum_A:
         parts.append("sum(A) ≤ 1 (normalised fits)")
+    if options.bic_threshold != BIC_THRESHOLD:
+        parts.append(f"|ΔBIC| threshold {options.bic_threshold:g}")
+    if any(getattr(options, k) != v for k, v in DIAGNOSTIC_DEFAULTS.items()):
+        parts.append("custom warning thresholds")
     return ", ".join(parts) if parts else "defaults"
 
 
@@ -96,7 +113,12 @@ class FitOptionsDialog(QDialog):
                      tooltip="None: every histogram bin counts equally (standard least "
                              "squares).\nPoisson: bins are weighted by their photon "
                              "counting noise 1/√counts, so the low-count tail is not "
-                             "ignored. Usually the better choice for TCSPC data.")
+                             "ignored. Usually the better choice for TCSPC data.\n"
+                             "Poisson MLE: maximum-likelihood fit of the photon counts. "
+                             "Least squares underestimates lifetimes where a bin holds "
+                             "few photons (long tails, per-bin fits of the lifetime "
+                             "trace/FLID); the MLE does not. Needs the linear loss. The "
+                             "BIC then uses the Poisson deviance instead of χ².")
         f.add_choice("loss", "Loss", LOSSES, "linear",
                      tooltip="Linear: standard least squares. The others are robust "
                              "losses that reduce the influence of outliers (e.g. "
@@ -112,6 +134,38 @@ class FitOptionsDialog(QDialog):
                            "normalised fits: the lifetime trace and FLID per-bin fits, "
                            "and the lifetime fit with 'Normalise' ticked. Raw-count fits "
                            "ignore it (their amplitudes are counts).")
+        f.add_heading("Model selection (lifetime fit only)",
+                      tooltip="How a lifetime fit is compared with the previous one and "
+                              "when it warns about too many components.")
+        f.add_float("bic_threshold", "|ΔBIC| threshold", 10.0, minimum=0.0, maximum=1e4,
+                    step=1.0, decimals=1,
+                    tooltip="BIC = χ² + k·ln n (Poisson deviance instead of χ² for the "
+                            "MLE), k free parameters, n fitted bins. Each fit is compared "
+                            "with the previous fit of the same histogram, window and "
+                            "weighting: ΔBIC below −threshold is shown green (better), "
+                            "above +threshold red (worse, e.g. an extra component that "
+                            "only fits noise), otherwise gray.\nKass & Raftery (1995): "
+                            "2 positive, 6 strong, 10 very strong evidence.")
+        f.add_float("amp_sigma", "Amplitude ≈ 0 below", 2.0, minimum=0.0, maximum=100.0,
+                    step=0.5, decimals=1, suffix=" σ",
+                    tooltip="Warn when an amplitude is smaller than this many standard "
+                            "errors, i.e. compatible with zero.")
+        f.add_float("min_fraction", "Collapsed below", 1.0, minimum=0.0, maximum=100.0,
+                    step=0.5, decimals=2, suffix=" % intensity",
+                    tooltip="Warn when a component carries less than this fraction of "
+                            "the intensity Aᵢτᵢ / Σ Aⱼτⱼ.")
+        f.add_float("merge_sigma", "Lifetimes merged within", 2.0, minimum=0.0,
+                    maximum=100.0, step=0.5, decimals=1, suffix=" σ",
+                    tooltip="Warn when two lifetimes differ by less than this many "
+                            "combined standard errors …")
+        f.add_float("merge_rel", "… or within", 10.0, minimum=0.0, maximum=100.0, step=1.0,
+                    decimals=1, suffix=" %",
+                    tooltip="… or by less than this percentage of the larger lifetime.")
+        f.add_float("bound_rel", "At a bound within", 1.0, minimum=0.0, maximum=100.0,
+                    step=0.5, decimals=2, suffix=" %",
+                    tooltip="Warn when a fitted τ or A ends within this percentage of one "
+                            "of its bounds (Advanced bounds above): the fit wants to go "
+                            "beyond it.")
         f.changed.connect(self._update_fields)
         layout.addWidget(f)
 
@@ -137,15 +191,21 @@ class FitOptionsDialog(QDialog):
     def set_options(self, options: FitOptions) -> None:
         for (attr, i), cell in self.cells.items():
             cell.set_value(getattr(options, attr)[i])
-        self.form.set_values({"weighting": options.weighting, "loss": options.loss,
-                              "f_scale": options.f_scale,
-                              "constrain_sum_A": options.constrain_sum_A})
+        values = {"weighting": options.weighting, "loss": options.loss,
+                  "f_scale": options.f_scale, "constrain_sum_A": options.constrain_sum_A,
+                  "bic_threshold": options.bic_threshold, "amp_sigma": options.amp_sigma,
+                  "merge_sigma": options.merge_sigma}
+        # Fractions are entered in percent.
+        values.update({key: 100.0 * getattr(options, key) for key in _PERCENT_FIELDS})
+        self.form.set_values(values)
         self._update_fields()
 
     def options(self) -> FitOptions:
         values = {attr: [self.cells[(attr, i)].value() for i in range(MAX_COMPONENTS)]
                   for attr, *_ in _COLUMNS}
-        return FitOptions(**values, **self.form.values())
+        form = self.form.values()
+        form.update({key: form[key] / 100.0 for key in _PERCENT_FIELDS})
+        return FitOptions(**values, **form)
 
     def _accept(self) -> None:
         try:

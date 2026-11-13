@@ -36,7 +36,8 @@ __all__ = ["MainWindow", "run"]
 #: Tabs in display order.
 TAB_CLASSES = (PTUTab, CorrelateTab, JPKTab, JPKShiftTab, DatabaseTab)
 
-_LEVEL_COLOURS = {"info": None, "warning": "#b36b00", "error": "#c00000"}
+_LEVEL_COLOURS = {"info": None, "warning": "#b36b00", "error": "#c00000",
+                  "good": "#2e7d32", "bad": "#c00000", "neutral": "#707070"}
 
 _GUIDE = """<h3>kpfm_pl quick guide</h3>
 <p>Each tab is one workflow. Controls are on the left, plots on the right.

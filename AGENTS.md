@@ -175,6 +175,7 @@ docs/               per-module manuals (ptu, zurich, jpk, match, database, plott
 - You have free reign over the frontend, as long as the requested features and changes are implemented.
 - Read Changes.md to see what needs doing and update it afterwards.
 - Update the version when changes are made. Increment version number in a reasonable manner.
+- You can commit and push to main straigh away. 
 
 ## Scope & safety
 - Do not create scratch files, notebooks or scripts in the repo root. Keep the

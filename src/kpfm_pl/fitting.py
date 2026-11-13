@@ -8,6 +8,11 @@ The model is
 .. math::
 
     f(t) = \\sum_{i=1}^{n} A_i\\, e^{-t/\\tau_i} + C
+
+Besides (weighted) least squares, :class:`MultiExpFit` offers a Poisson
+maximum-likelihood fit (``statistic="poisson_mle"``) and, for periodic
+excitation, the correction of the amplitudes for the incomplete decay of
+earlier pulses (``period``).
 """
 
 from __future__ import annotations
@@ -18,8 +23,19 @@ from typing import Any
 import numpy as np
 from scipy.optimize import curve_fit, least_squares
 
-__all__ = ["MultiExpFit", "poisson_chi_squared", "gaussian2d", "fit_gaussian2d",
-           "peak_power_density"]
+__all__ = ["MultiExpFit", "poisson_chi_squared", "poisson_deviance", "fit_warnings",
+           "gaussian2d", "fit_gaussian2d", "peak_power_density"]
+
+#: Fit statistics of :class:`MultiExpFit`.
+STATISTICS = ("least_squares", "poisson_mle")
+#: Iterations of the iteratively reweighted least squares behind the Poisson MLE.
+_MLE_MAX_ITER = 30
+#: Relative parameter change below which the MLE iterations stop.
+_MLE_RTOL = 1e-7
+#: Smallest expected count used for the MLE weights 1/sqrt(model). Bins with
+#: fewer expected counts carry almost no information; the floor keeps their
+#: weight finite.
+_MLE_MODEL_FLOOR = 0.1
 
 
 class MultiExpFit:
@@ -45,6 +61,28 @@ class MultiExpFit:
         Optional per-sample weights for the residuals.
     constrain_sum_A :
         When ``True`` add a penalty enforcing ``sum(A) <= 1``.
+    statistic :
+        ``"least_squares"`` (default) minimises the (weighted) squared
+        residuals. ``"poisson_mle"`` maximises the Poisson likelihood of the
+        photon counts ``y * count_scale``, i.e. minimises the Poisson deviance
+        (:func:`poisson_deviance`). It is computed by iteratively reweighted
+        least squares with weights ``1 / sqrt(model)``, whose fixed point is
+        exactly the maximum-likelihood estimate. Least squares underestimates
+        lifetimes at low photon numbers; the MLE does not. Requires the linear
+        ``loss`` and no explicit ``weights``.
+    count_scale :
+        Factor converting ``y`` (and the model) into photon counts, e.g. the
+        normalisation peak of a normalised histogram. Only used by
+        ``statistic="poisson_mle"``.
+    period :
+        Laser repetition period in the units of ``t``. With periodic
+        excitation every bin also holds photons of all earlier pulses; for an
+        exponential they add up to ``exp(-t/tau) / (1 - exp(-period/tau))``,
+        so the fitted lifetimes are correct but the fitted amplitudes are too
+        large. When given, :meth:`parameters`, :meth:`to_dict` and
+        :meth:`intensity_weighted_lifetime` report the per-pulse amplitudes
+        ``A = A_fit * (1 - exp(-period/tau))``; the fitted ones stay
+        available as ``A_fit``. ``None`` (default) applies no correction.
     """
 
     def __init__(
@@ -60,6 +98,9 @@ class MultiExpFit:
         f_scale: float = 1.0,
         weights: np.ndarray | None = None,
         constrain_sum_A: bool = False,
+        statistic: str = "least_squares",
+        count_scale: float = 1.0,
+        period: float | None = None,
     ) -> None:
         self.t = np.asarray(t, dtype=float)
         self.y = np.asarray(y, dtype=float)
@@ -70,6 +111,22 @@ class MultiExpFit:
         self.weights = None if weights is None else np.asarray(weights, dtype=float)
         self.constrain_sum_A = bool(constrain_sum_A)
         self._penalty_weight = 1e5 * np.max(np.abs(self.y)) if self.constrain_sum_A else 0.0
+        if statistic not in STATISTICS:
+            raise ValueError(f"statistic must be one of {STATISTICS}, not {statistic!r}.")
+        if statistic == "poisson_mle":
+            if loss != "linear":
+                raise ValueError("statistic='poisson_mle' requires loss='linear'.")
+            if weights is not None:
+                raise ValueError("statistic='poisson_mle' sets its own weights; do not "
+                                 "pass weights.")
+        if not np.isfinite(count_scale) or count_scale <= 0:
+            raise ValueError("count_scale must be a positive finite number.")
+        if period is not None and (not np.isfinite(period) or period <= 0):
+            raise ValueError("period must be a positive finite number or None.")
+        self.statistic = statistic
+        self.count_scale = float(count_scale)
+        self.period = None if period is None else float(period)
+        self.bounds: tuple[np.ndarray, np.ndarray] | None = None
 
         self._error: Exception | None = None
         self.result = self._fit(p0=p0, bounds=bounds)
@@ -110,11 +167,13 @@ class MultiExpFit:
         if bounds is None:
             bounds = self._default_bounds()
         try:
+            self.bounds = tuple(
+                np.broadcast_to(np.asarray(b, dtype=float), (2 * self.n_exp,)).copy()
+                for b in bounds)
             p0 = self._initial_guess(p0, bounds)
-            return least_squares(
-                self._residuals, p0, jac=self._jacobian, args=(self.t, self.y),
-                bounds=bounds, loss=self.loss, f_scale=self.f_scale, max_nfev=20000,
-            )
+            if self.statistic == "poisson_mle":
+                return self._fit_poisson_mle(p0, bounds)
+            return self._least_squares(p0, bounds)
         except (ValueError, np.linalg.LinAlgError) as exc:
             self._error = exc
             warnings.warn(
@@ -123,6 +182,41 @@ class MultiExpFit:
                 stacklevel=2,
             )
             return None
+
+    def _least_squares(self, p0, bounds):
+        return least_squares(
+            self._residuals, p0, jac=self._jacobian, args=(self.t, self.y),
+            bounds=bounds, loss=self.loss, f_scale=self.f_scale, max_nfev=20000,
+        )
+
+    def _fit_poisson_mle(self, p0, bounds):
+        """Poisson MLE by iteratively reweighted least squares.
+
+        Each pass minimises ``sum((y - m)^2 / m_prev)`` with the model of the
+        previous pass fixed in the weights. At the fixed point ``m = m_prev``
+        the gradient equals that of the Poisson deviance, so the result is the
+        maximum-likelihood estimate (Dembinski, Schmelling & Waldi,
+        arXiv:1807.07911). The first pass uses the Neyman weights
+        ``1/sqrt(max(counts, 1))``.
+        """
+        scale = self.count_scale
+        self.weights = scale / np.sqrt(np.maximum(self.y * scale, 1.0))
+        result = self._least_squares(p0, bounds)
+        for _ in range(_MLE_MAX_ITER):
+            expected = self.model(self.t, result.x) * scale
+            self.weights = scale / np.sqrt(np.maximum(expected, _MLE_MODEL_FLOOR))
+            new = self._least_squares(result.x, bounds)
+            # Relative change per parameter; amplitudes at 0 are compared with
+            # the largest amplitude, lifetimes with the largest lifetime.
+            n = self.n_exp
+            size = np.abs(result.x)
+            floor = np.repeat([np.max(size[:n]), np.max(size[n:2 * n])], n)
+            tolerance = _MLE_RTOL * np.maximum(size, 1e-6 * floor)
+            converged = np.all(np.abs(new.x - result.x) <= tolerance)
+            result = new
+            if converged:
+                break
+        return result
 
     def _require_result(self):
         """Return the optimizer result or raise a clear error if the fit failed.
@@ -175,11 +269,24 @@ class MultiExpFit:
     def success(self) -> bool:
         return bool(self.result is not None and self.result.success)
 
+    def _period_factor(self, tau: np.ndarray) -> np.ndarray:
+        """``1 - exp(-period/tau)`` (ones without ``period``): per-pulse / fitted amplitude."""
+        tau = np.asarray(tau, dtype=float)
+        if self.period is None:
+            return np.ones_like(tau)
+        return -np.expm1(-self.period / tau)
+
     def parameters(self) -> dict[str, np.ndarray]:
-        """Return fitted amplitudes and lifetimes as ``{"A": ..., "tau": ...}``."""
+        """Return amplitudes and lifetimes as ``{"A": ..., "tau": ..., "A_fit": ...}``.
+
+        ``A_fit`` are the fitted amplitudes of the model curve. ``A`` are the
+        per-pulse amplitudes, corrected for the incomplete decay of earlier
+        pulses when ``period`` is set (otherwise equal to ``A_fit``).
+        """
         params = self._require_result().x
         n = len(params) // 2
-        return {"A": params[:n], "tau": params[n:2 * n]}
+        A_fit, tau = params[:n], params[n:2 * n]
+        return {"A": A_fit * self._period_factor(tau), "tau": tau, "A_fit": A_fit}
 
     def curve(self, t: np.ndarray | None = None) -> np.ndarray:
         """Evaluate the fitted model (defaults to the fitting grid)."""
@@ -228,27 +335,71 @@ class MultiExpFit:
         variance = float(np.sum(residuals ** 2)) / dof
         return np.linalg.pinv(jac.T @ jac) * variance
 
-    def intensity_weighted_lifetime(self) -> tuple[float, float]:
-        """Intensity-weighted mean lifetime ``sum(A tau^2) / sum(A tau)`` and its error.
+    def corrected_covariance(self) -> np.ndarray:
+        """Covariance of the per-pulse parameters ``[A_1..A_n, tau_1..tau_n]``.
 
-        Equal to ``tau`` for one exponential. The standard error is propagated
-        from :meth:`covariance`; both are ``NaN`` when all amplitudes are zero.
+        :meth:`covariance` propagated through ``A = A_fit * (1 - exp(-T/tau))``
+        (identical to it without ``period``).
         """
+        cov = self.covariance()
+        if self.period is None:
+            return cov
         p = self.parameters()
-        A, tau = np.asarray(p["A"], dtype=float), np.asarray(p["tau"], dtype=float)
+        tau, A_fit = np.asarray(p["tau"], dtype=float), np.asarray(p["A_fit"], dtype=float)
+        n = self.n_exp
+        jac = np.eye(2 * n)
+        jac[:n, :n] = np.diag(self._period_factor(tau))
+        # d/dtau of (1 - exp(-T/tau)) = -exp(-T/tau) * T / tau^2
+        jac[:n, n:] = np.diag(-A_fit * np.exp(-self.period / tau) * self.period / tau ** 2)
+        return jac @ cov @ jac.T
+
+    @staticmethod
+    def _tau_int(A: np.ndarray, tau: np.ndarray, cov: np.ndarray) -> tuple[float, float]:
+        A, tau = np.asarray(A, dtype=float), np.asarray(tau, dtype=float)
         denominator = float(np.sum(A * tau))
         if denominator == 0 or not np.isfinite(denominator):
             return float("nan"), float("nan")
         mean = float(np.sum(A * tau ** 2)) / denominator
         gradient = np.concatenate([tau * (tau - mean), A * (2 * tau - mean)]) / denominator
-        variance = float(gradient @ self.covariance() @ gradient)
+        variance = float(gradient @ cov @ gradient)
         return mean, float(np.sqrt(variance)) if variance >= 0 else float("nan")
 
+    def intensity_weighted_lifetime(self, corrected: bool = True) -> tuple[float, float]:
+        """Intensity-weighted mean lifetime ``sum(A tau^2) / sum(A tau)`` and its error.
+
+        Equal to ``tau`` for one exponential. Uses the per-pulse amplitudes
+        ``A`` (see ``period``); ``corrected=False`` uses the fitted ``A_fit``
+        instead. The standard error is propagated from the covariance; both
+        are ``NaN`` when all amplitudes are zero.
+        """
+        p = self.parameters()
+        if corrected:
+            return self._tau_int(p["A"], p["tau"], self.corrected_covariance())
+        return self._tau_int(p["A_fit"], p["tau"], self.covariance())
+
+    def diagnostics(self, **thresholds: float) -> list[str]:
+        """Warnings about a probably over-parameterised fit, see :func:`fit_warnings`.
+
+        Checks the per-pulse amplitudes and lifetimes (with their errors) and
+        whether a fitted parameter ended at one of the fit's bounds.
+        ``thresholds`` are forwarded to :func:`fit_warnings`.
+        """
+        p = self.parameters()
+        errors = np.sqrt(np.clip(np.diag(self.corrected_covariance()), 0.0, None))
+        n = self.n_exp
+        return fit_warnings(p["A"], p["tau"], errors[:n], errors[n:2 * n],
+                            fitted=self._require_result().x, bounds=self.bounds,
+                            **thresholds)
+
     def legend_label(self, precision: int = 2) -> str:
-        """Return a LaTeX string describing the fitted model for legends."""
+        """Return a LaTeX string describing the fitted model curve for legends.
+
+        Uses the fitted amplitudes ``A_fit``, so the formula reproduces the
+        plotted curve.
+        """
         p = self.parameters()
         terms = [rf"{a:.{precision}f} e^{{-t/{tau:.{precision}f}\,\mathrm{{ns}}}}"
-                 for a, tau in zip(p["A"], p["tau"])]
+                 for a, tau in zip(p["A_fit"], p["tau"])]
         label = " + ".join(terms)
         if abs(self.offset) > 1e-12:
             label += rf" + {self.offset:.{precision}f}"
@@ -258,20 +409,30 @@ class MultiExpFit:
         """Bundle parameters, curve and quality into a single dict.
 
         Includes the standard errors ``A_err``/``tau_err`` (from
-        :meth:`covariance`) and the intensity-weighted mean lifetime
+        :meth:`corrected_covariance`) and the intensity-weighted mean lifetime
         ``tau_int`` with its error ``tau_int_err``
-        (:meth:`intensity_weighted_lifetime`).
+        (:meth:`intensity_weighted_lifetime`). ``A``/``A_err``/``tau_int`` are
+        per-pulse values (see ``period``); ``A_fit``/``A_fit_err``/
+        ``tau_int_fit`` are the uncorrected values of the fitted curve.
         """
         params = self.parameters()
-        errors = np.sqrt(np.clip(np.diag(self.covariance()), 0.0, None))
+        n = self.n_exp
+        errors = np.sqrt(np.clip(np.diag(self.corrected_covariance()), 0.0, None))
+        fit_errors = np.sqrt(np.clip(np.diag(self.covariance()), 0.0, None))
         tau_int, tau_int_err = self.intensity_weighted_lifetime()
+        tau_int_fit, _ = self.intensity_weighted_lifetime(corrected=False)
         return {
             "A": params["A"],
             "tau": params["tau"],
-            "A_err": errors[:self.n_exp],
-            "tau_err": errors[self.n_exp:2 * self.n_exp],
+            "A_err": errors[:n],
+            "tau_err": errors[n:2 * n],
             "tau_int": tau_int,
             "tau_int_err": tau_int_err,
+            "A_fit": params["A_fit"],
+            "A_fit_err": fit_errors[:n],
+            "tau_int_fit": tau_int_fit,
+            "period": self.period,
+            "statistic": self.statistic,
             "offset": self.offset,
             "curve": self.curve(),
             "quality": self.quality(),
@@ -280,8 +441,110 @@ class MultiExpFit:
         }
 
 
+def fit_warnings(A: np.ndarray, tau: np.ndarray, A_err: np.ndarray | None = None,
+                 tau_err: np.ndarray | None = None, *,
+                 fitted: np.ndarray | None = None,
+                 bounds: tuple[np.ndarray, np.ndarray] | None = None,
+                 amp_sigma: float = 2.0, min_fraction: float = 0.01,
+                 merge_sigma: float = 2.0, merge_rel: float = 0.1,
+                 bound_rel: float = 0.01) -> list[str]:
+    """Signs that a multi-exponential fit has more components than the data support.
+
+    Complements a model comparison by BIC: an extra component that the data
+    do not need often ends with a vanishing amplitude, a lifetime equal to
+    another one, or a parameter stuck at a bound.
+
+    Parameters
+    ----------
+    A, tau :
+        Amplitudes and lifetimes, one entry per component.
+    A_err, tau_err :
+        Their standard errors (``NaN`` entries skip the error-based checks).
+    fitted, bounds :
+        The fitted parameter vector ``[A_fit_1..A_fit_n, tau_1..tau_n]`` and
+        the fit's ``(lower, upper)`` bounds for the bound check (skipped when
+        either is ``None``). Amplitude lower bounds of 0 are skipped: a zero
+        amplitude is reported as a collapsed component instead.
+    amp_sigma :
+        An amplitude below ``amp_sigma`` times its error is "compatible with
+        zero".
+    min_fraction :
+        A component with an intensity fraction ``A tau / sum(A tau)`` below
+        this collapsed.
+    merge_sigma, merge_rel :
+        Two lifetimes merged if they differ by less than ``merge_sigma``
+        combined standard errors or by less than ``merge_rel`` relative to the
+        larger one.
+    bound_rel :
+        A parameter lies at a bound if it is within ``bound_rel`` (relative to
+        the bound) of it.
+
+    Returns
+    -------
+    list of str
+        Human-readable warnings, empty when nothing suspicious was found.
+    """
+    A = np.atleast_1d(np.asarray(A, dtype=float))
+    tau = np.atleast_1d(np.asarray(tau, dtype=float))
+    n = A.size
+    A_err = np.full(n, np.nan) if A_err is None else np.atleast_1d(np.asarray(A_err, float))
+    tau_err = (np.full(n, np.nan) if tau_err is None
+               else np.atleast_1d(np.asarray(tau_err, float)))
+    out: list[str] = []
+
+    weight = A * tau
+    total = float(np.sum(weight))
+    for i in range(n):
+        name = f"component {i + 1}"
+        if np.isfinite(A_err[i]) and A_err[i] > 0 and abs(A[i]) < amp_sigma * A_err[i]:
+            out.append(f"Amplitude A{i + 1} = {A[i]:.3g} ± {A_err[i]:.2g} is compatible with "
+                       f"zero (< {amp_sigma:g} σ): {name} is probably not needed.")
+        elif total > 0 and np.isfinite(total) and weight[i] / total < min_fraction:
+            out.append(f"Component {i + 1} carries only {100 * weight[i] / total:.2g} % of "
+                       f"the intensity (< {100 * min_fraction:g} %): it has collapsed.")
+    for i in range(n):
+        for j in range(i + 1, n):
+            diff = abs(tau[i] - tau[j])
+            sigma = float(np.hypot(tau_err[i], tau_err[j]))
+            larger = max(abs(tau[i]), abs(tau[j]))
+            if (np.isfinite(sigma) and sigma > 0 and diff < merge_sigma * sigma) or \
+                    (larger > 0 and diff / larger < merge_rel):
+                out.append(f"Lifetimes τ{i + 1} = {tau[i]:.3g} ns and τ{j + 1} = "
+                           f"{tau[j]:.3g} ns have merged: they describe the same decay.")
+    if fitted is not None and bounds is not None:
+        fitted = np.asarray(fitted, dtype=float)
+        names = [f"A{i + 1}" for i in range(n)] + [f"τ{i + 1}" for i in range(n)]
+        for k, (value, lo, hi) in enumerate(zip(fitted, *bounds)):
+            for bound, side in ((lo, "lower"), (hi, "upper")):
+                if not np.isfinite(bound) or (k < n and side == "lower" and bound == 0):
+                    continue
+                if abs(value - bound) <= bound_rel * max(abs(bound), 1e-300):
+                    out.append(f"{names[k]} = {value:.4g} lies at its {side} bound "
+                               f"({bound:.4g}): the fit wants to go beyond it.")
+    return out
+
+
+def poisson_deviance(counts: np.ndarray, model: np.ndarray) -> float:
+    """Poisson deviance ``2 sum(model - counts + counts ln(counts/model))``.
+
+    ``-2 ln`` of the likelihood ratio between the model and a perfect fit
+    (Baker & Cousins 1984). Minimised by the Poisson maximum-likelihood fit
+    and approximately chi-squared distributed with ``n - k`` degrees of
+    freedom. Model values are floored at a tiny positive number.
+    """
+    counts = np.asarray(counts, dtype=float)
+    model = np.clip(np.asarray(model, dtype=float), 1e-12, None)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        log_term = np.where(counts > 0, counts * np.log(counts / model), 0.0)
+    return float(2.0 * np.sum(model - counts + log_term))
+
+
+#: Statistics the BIC of :func:`poisson_chi_squared` can be based on.
+BIC_STATISTICS = ("chi_squared", "deviance")
+
+
 def poisson_chi_squared(counts: np.ndarray, model: np.ndarray,
-                        n_params: int) -> dict[str, Any]:
+                        n_params: int, *, bic_from: str = "chi_squared") -> dict[str, Any]:
     """Goodness of fit of a model to photon counts (Poisson statistics).
 
     Uses the usual TCSPC weighting ``sigma_i = sqrt(max(counts_i, 1))``, so
@@ -289,6 +552,14 @@ def poisson_chi_squared(counts: np.ndarray, model: np.ndarray,
     variance for a correct model. A reduced chi-squared close to 1 indicates a
     good fit; clearly larger values mean systematic deviations (e.g. too few
     exponentials or a badly placed fit window).
+
+    Also returns the Bayesian information criterion
+    ``BIC = statistic + n_params * ln(n_points)`` (Schwarz 1978), where the
+    statistic is the chi-squared (``bic_from="chi_squared"``, for least-squares
+    fits) or the Poisson deviance (``"deviance"``, for maximum-likelihood
+    fits); both equal ``-2 ln L`` up to a constant that depends on the data
+    only. BIC values are therefore only comparable between fits of the
+    *same* counts with the same statistic; the lower BIC is preferred.
 
     Parameters
     ----------
@@ -298,26 +569,39 @@ def poisson_chi_squared(counts: np.ndarray, model: np.ndarray,
         Fitted model on the same bins, in counts.
     n_params :
         Number of free fit parameters (``2 * n_exp`` for :class:`MultiExpFit`).
+    bic_from :
+        ``"chi_squared"`` (default) or ``"deviance"``.
 
     Returns
     -------
     dict
         ``weighted_residuals`` (array), ``chi_squared``, ``dof`` (degrees of
-        freedom ``len(counts) - n_params``) and ``reduced_chi_squared``
-        (``NaN`` without degrees of freedom).
+        freedom ``len(counts) - n_params``), ``reduced_chi_squared`` (``NaN``
+        without degrees of freedom), ``deviance``, ``bic``, ``bic_statistic``,
+        ``n_points`` and ``n_params``.
     """
+    if bic_from not in BIC_STATISTICS:
+        raise ValueError(f"bic_from must be one of {BIC_STATISTICS}, not {bic_from!r}.")
     counts = np.asarray(counts, dtype=float)
     model = np.asarray(model, dtype=float)
     if counts.shape != model.shape:
         raise ValueError("counts and model must have the same shape.")
     residuals = (counts - model) / np.sqrt(np.maximum(counts, 1.0))
     chi2 = float(np.sum(residuals ** 2))
+    deviance = poisson_deviance(counts, model)
     dof = int(counts.size - n_params)
+    statistic = chi2 if bic_from == "chi_squared" else deviance
+    bic = statistic + n_params * np.log(counts.size) if counts.size else float("nan")
     return {
         "weighted_residuals": residuals,
         "chi_squared": chi2,
         "dof": dof,
         "reduced_chi_squared": chi2 / dof if dof > 0 else float("nan"),
+        "deviance": deviance,
+        "bic": float(bic),
+        "bic_statistic": bic_from,
+        "n_points": int(counts.size),
+        "n_params": int(n_params),
     }
 
 

@@ -44,21 +44,31 @@ _TAG_TYPES = {
 _TAG_TYPES = {k: struct.unpack(">i", v.to_bytes(4, "big"))[0] for k, v in _TAG_TYPES.items()}
 
 
+#: Accepted ``weighting`` values of the lifetime fits.
+WEIGHTINGS = ("none", "poisson", "mle")
+
+
 def _poisson_weights(weighting: str, counts: np.ndarray, scale: float,
                      fit_kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Add Poisson ``weights`` for :class:`MultiExpFit` when ``weighting="poisson"``.
+    """Add the :class:`MultiExpFit` arguments of a ``weighting``.
 
-    ``counts`` are the raw photon counts of the fitted bins and ``scale`` the
-    factor the fitted data was divided by (1 without normalisation). The
-    weighted residuals are then in units of the Poisson standard deviation,
-    which also gives a robust ``loss``'s ``f_scale`` a fixed meaning.
+    ``"poisson"`` adds Poisson ``weights``: ``counts`` are the raw photon
+    counts of the fitted bins and ``scale`` the factor the fitted data was
+    divided by (1 without normalisation). The weighted residuals are then in
+    units of the Poisson standard deviation, which also gives a robust
+    ``loss``'s ``f_scale`` a fixed meaning. ``"mle"`` selects the Poisson
+    maximum-likelihood fit, with ``scale`` converting the data back to counts.
     """
+    if weighting not in WEIGHTINGS:
+        raise ValueError(f"weighting must be one of {WEIGHTINGS}, not {weighting!r}.")
     if weighting == "none":
         return fit_kwargs
-    if weighting != "poisson":
-        raise ValueError(f"weighting must be 'none' or 'poisson', not {weighting!r}.")
     if "weights" in fit_kwargs:
-        raise ValueError("Pass either weighting='poisson' or explicit weights, not both.")
+        raise ValueError(f"Pass either weighting={weighting!r} or explicit weights, not both.")
+    if weighting == "mle":
+        if fit_kwargs.get("loss", "linear") != "linear":
+            raise ValueError("weighting='mle' requires loss='linear'.")
+        return {**fit_kwargs, "statistic": "poisson_mle", "count_scale": float(scale)}
     weights = scale / np.sqrt(np.maximum(np.asarray(counts, dtype=float), 1.0))
     return {**fit_kwargs, "weights": weights}
 
@@ -516,6 +526,13 @@ class PTU:
         mask[seam // bins] = False
         return mask
 
+    def _period_ns(self) -> float | None:
+        """Laser period in ns for the incomplete-decay correction (``None`` if unknown)."""
+        rep_time = getattr(self, "rep_time", None)
+        if rep_time is None or not np.isfinite(rep_time) or rep_time <= 0:
+            return None
+        return float(rep_time) * 1e9
+
     def _require_pulsed(self) -> None:
         """Reject time-binned/lifetime analysis on continuous-wave files."""
         if self.is_cw:
@@ -841,8 +858,13 @@ class PTU:
         end: float | None = None, weighting: str = "none",
         progress: Callable[[int, int], Any] | None = None,
         **fit_kwargs,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Fit lifetimes per selected time bin; ``(taus, amps)`` keep all bin positions."""
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Fit lifetimes per selected time bin; ``(taus, amps, amps_fit)`` keep all bin positions.
+
+        ``amps`` are the per-pulse amplitudes (corrected for the incomplete
+        decay of earlier pulses, see :class:`~kpfm_pl.fitting.MultiExpFit`'s
+        ``period``), ``amps_fit`` the fitted ones.
+        """
         time, matrix, selected = sel["time"], sel["matrix"], sel["selected"]
         bintime = sel["bintime"]
 
@@ -865,7 +887,9 @@ class PTU:
 
         taus = np.full((len(time), n_exp), np.nan, dtype=float)
         amps = np.full((len(time), n_exp), np.nan, dtype=float)
+        amps_fit = np.full((len(time), n_exp), np.nan, dtype=float)
         n_binned = len(mask)
+        period_ns = self._period_ns()
         rows = np.flatnonzero(selected)
         for done, index in enumerate(rows):
             # Report before each fit so a raising callback aborts promptly.
@@ -882,19 +906,21 @@ class PTU:
             y_fit = y_fit / ymax
             offset = self.dark_counts * bintime / n_binned / norm
             bin_kwargs = _poisson_weights(weighting, lt_bin[mask], norm * ymax, fit_kwargs)
-            fit = MultiExpFit(t_fit, y_fit, n_exp, offset, **bin_kwargs)
+            fit = MultiExpFit(t_fit, y_fit, n_exp, offset, period=period_ns, **bin_kwargs)
             if fit.success:
                 params = fit.parameters()
                 fitted_taus = np.asarray(params["tau"], dtype=float)
                 fitted_amps = np.asarray(params["A"], dtype=float)
+                raw_amps = np.asarray(params.get("A_fit", fitted_amps), dtype=float)
                 if (fitted_taus.shape == fitted_amps.shape == (n_exp,)
                         and np.all(np.isfinite(fitted_taus))
                         and np.all(np.isfinite(fitted_amps))):
                     taus[index] = fitted_taus
                     amps[index] = fitted_amps
+                    amps_fit[index] = raw_amps
         if progress is not None:
             progress(rows.size, rows.size)
-        return taus, amps
+        return taus, amps, amps_fit
 
     def _validate_fit_args(self, n_exp: int, bins: int, weighting: str,
                            fit_kwargs: dict[str, Any]) -> None:
@@ -936,13 +962,16 @@ class PTU:
         requested intensity ROI, contains no usable photons, its fit fails, or
         all its amplitudes are zero. Individual fitted components are
         available as ``signal.meta["taus"]`` and ``signal.meta["amplitudes"]``
-        with shape ``(time bins, n_exp)``.
+        with shape ``(time bins, n_exp)``. The amplitudes (and so the mean
+        lifetime) are per-pulse values, corrected for the incomplete decay of
+        earlier laser pulses as in :meth:`fit_lifetime`; the uncorrected ones
+        are in ``signal.meta["amplitudes_fit"]``.
         By default, the trace inherits the ``laser_pulse`` mode of the most
         recent :meth:`time_trace` call.  Pass the option explicitly when no
         time trace has been generated first.
 
-        ``weighting`` (``"none"`` or ``"poisson"``) is applied to every
-        per-bin fit as in :meth:`fit_lifetime`. ``progress`` is an optional
+        ``weighting`` (``"none"``, ``"poisson"`` or ``"mle"``) is applied to
+        every per-bin fit as in :meth:`fit_lifetime`. ``progress`` is an optional
         callback ``progress(done, total)`` called before each per-bin fit and
         once at the end; raise an exception from it to abort the computation
         (see :meth:`flid`). ``min_counts``, ``coverage`` and ``auto_bintime``
@@ -954,7 +983,7 @@ class PTU:
             bintime=bintime, laser_pulse=laser_pulse, min_counts=min_counts,
             coverage=coverage, auto_bintime=auto_bintime,
         )
-        taus, amps = self._fit_time_bin_lifetimes(
+        taus, amps, amps_fit = self._fit_time_bin_lifetimes(
             sel, n_exp=n_exp, bins=bins, mode=mode, fraction=fraction,
             smoothing=smoothing, start=start, end=end, weighting=weighting,
             progress=progress, **fit_kwargs,
@@ -964,7 +993,8 @@ class PTU:
             label=f"{self.filepath.stem} mean lifetime",
             units={"x": "s", "y": "ns"},
             meta={**self._trace_meta(sel, "fit"), "n_exp": n_exp, "lt_bins": bins,
-                  "taus": taus, "amplitudes": amps},
+                  "taus": taus, "amplitudes": amps, "amplitudes_fit": amps_fit,
+                  "weighting": weighting},
         )
 
     def arrival_time_trace(self, roi: dict[str, float] | None = None, *,
@@ -1111,8 +1141,9 @@ class PTU:
             otherwise return a single map of the per-bin intensity-weighted
             mean lifetime.
         weighting :
-            ``"none"`` (default) or ``"poisson"`` weighting of the per-bin
-            fits, as in :meth:`fit_lifetime`.
+            ``"none"`` (default), ``"poisson"`` weighting or ``"mle"``
+            (Poisson maximum likelihood) for the per-bin fits, as in
+            :meth:`fit_lifetime`.
         method :
             ``"fit"`` (default) fits every bin; ``"mean_arrival"`` uses the
             mean photon arrival time instead (:meth:`arrival_time_trace`, no
@@ -1218,6 +1249,7 @@ class PTU:
                      fraction: float = 0.95, smoothing: float = 2.0,
                      start: float = 0.0, end: float | None = None,
                      normalize: bool = False, weighting: str = "none",
+                     diagnostics: dict[str, float] | None = None,
                      **fit_kwargs) -> dict[str, Any]:
         """Fit a lifetime ``histogram`` with ``n_exp`` exponentials.
 
@@ -1229,11 +1261,27 @@ class PTU:
         ``weighting="poisson"`` weights every histogram bin by its photon
         counting noise ``1 / sqrt(max(counts, 1))`` instead of the default
         unweighted least squares (``"none"``); a robust ``loss``'s
-        ``f_scale`` is then in units of that standard deviation. Either way,
-        ``out["quality"]`` additionally holds the Poisson goodness of fit from
+        ``f_scale`` is then in units of that standard deviation.
+        ``weighting="mle"`` fits by Poisson maximum likelihood instead, which
+        stays unbiased at low photon numbers (works with ``normalize`` too;
+        requires the linear ``loss``). Either way, ``out["quality"]``
+        additionally holds the Poisson goodness of fit from
         :func:`~kpfm_pl.fitting.poisson_chi_squared` (``reduced_chi_squared``,
-        ``chi_squared``, ``dof``, ``weighted_residuals`` on ``t_fit``), computed
-        on the raw counts even when ``normalize`` is set.
+        ``chi_squared``, ``dof``, ``deviance``, ``weighted_residuals`` on
+        ``t_fit``), computed on the raw counts even when ``normalize`` is set,
+        and the Bayesian information criterion ``bic`` (from the chi-squared,
+        or from the deviance for ``"mle"``) for comparing fits of the same
+        histogram and window with different ``n_exp``.
+
+        The amplitudes ``A`` (and ``tau_int``) are per-pulse values: the
+        fitted ``A_fit`` include the photons of all earlier laser pulses that
+        have not decayed yet, ``A = A_fit * (1 - exp(-T/tau))`` with the laser
+        period ``T``. The lifetimes need no correction.
+
+        ``out["warnings"]`` lists signs of too many components (amplitude
+        compatible with zero, merged lifetimes, parameter at a bound), see
+        :func:`~kpfm_pl.fitting.fit_warnings`; ``diagnostics`` overrides its
+        thresholds (e.g. ``{"min_fraction": 0.02}``).
         """
         self._require_pulsed()
         y = np.asarray(histogram["y"], dtype=float)
@@ -1259,11 +1307,16 @@ class PTU:
         offset = self.dark_counts * float(duration or 0.0) / self.n_lt_bins / norm
 
         fit_kwargs = _poisson_weights(weighting, y[mask], norm, fit_kwargs)
-        fit = MultiExpFit(t_fit, y_fit, n_exp, offset, **fit_kwargs)
+        fit = MultiExpFit(t_fit, y_fit, n_exp, offset, period=self._period_ns(),
+                          **fit_kwargs)
         out = fit.to_dict()
         if "curve" in out:
             out.setdefault("quality", {}).update(
-                poisson_chi_squared(y[mask], np.asarray(out["curve"]) * norm, 2 * n_exp))
+                poisson_chi_squared(y[mask], np.asarray(out["curve"]) * norm, 2 * n_exp,
+                                    bic_from="deviance" if weighting == "mle"
+                                    else "chi_squared"))
+        converged = out.get("success") and "curve" in out
+        out["warnings"] = fit.diagnostics(**(diagnostics or {})) if converged else []
         seam = self.lifetime_seam_bin if y.size == self.n_lt_bins else None
         out.update({"shifted_histogram_x": t_ns, "t_fit": t_fit, "y_fit": y_fit,
                     "left_bound_ns": float(t_fit[0]), "weighting": weighting,

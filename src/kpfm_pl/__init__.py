@@ -35,9 +35,11 @@ from .database import (
 from .fitting import (
     MultiExpFit,
     fit_gaussian2d,
+    fit_warnings,
     gaussian2d,
     peak_power_density,
     poisson_chi_squared,
+    poisson_deviance,
 )
 from .io import pick_files, pick_folder, sort_measurement_files
 from .jpk import JPK
@@ -74,6 +76,8 @@ __all__ = [
     "Match",
     "MultiExpFit",
     "poisson_chi_squared",
+    "poisson_deviance",
+    "fit_warnings",
     "gaussian2d",
     "fit_gaussian2d",
     "peak_power_density",

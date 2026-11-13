@@ -111,13 +111,34 @@ title on the left to fold it away.
      almost any decay. The panel below the histogram shows the **weighted
      residuals** (counts − fit) / √counts, which should scatter around 0
      without structure.
+   - **BIC**: every fit is compared with the previous *Fit* click by the
+     Bayesian information criterion (χ² + k·ln n, the Poisson deviance
+     instead of χ² for the MLE). If the previous fit used the same histogram,
+     window and weighting, the table, the plot title (coloured line) and the
+     log show ΔBIC: **green** when the new fit is better by more than the
+     threshold, **red** when it is worse (typically an added component that
+     only fits noise), **gray** when both are about equally good. Otherwise
+     only the BIC is shown, in gray, as "not comparable". Fit 1, then 2, then
+     3 exponentials and keep the last green one.
+   - **Over-fitting warnings** in the log: an amplitude compatible with zero
+     or carrying almost no intensity, two lifetimes that have merged, or a
+     parameter that ended at one of its bounds.
+   - **Amplitudes**: *A1, A2, …* are per-pulse amplitudes, corrected for the
+     photons of earlier laser pulses when the decay has not reached the
+     noise floor within one period (A = A_fit·(1 − exp(−T/τ))); τ_int uses
+     them. *A1 (fitted), …* are the amplitudes of the plotted curve. The
+     lifetimes need no correction. See [ptu.md](ptu.md#lifetime-fitting).
    - **Advanced fit settings…**: initial guesses and lower/upper bounds of
      every lifetime τ (ns) and amplitude A (fraction of the histogram peak),
-     **Poisson weighting** (recommended for TCSPC data: the low-count tail
-     is no longer ignored) and robust losses against outliers. Ticked fields
-     are used, unticked ones are automatic. The settings apply to the
-     lifetime fit, the lifetime trace and the FLID fits; the line under the
-     button summarises them.
+     the **weighting** (*Poisson*, recommended for TCSPC data: the low-count
+     tail is no longer ignored; *Poisson MLE*, maximum likelihood, unbiased
+     even with few photons per bin, best for the lifetime trace and FLID
+     fits) and robust losses against outliers. Ticked fields are used,
+     unticked ones are automatic. The settings apply to the lifetime fit,
+     the lifetime trace and the FLID fits; the line under the button
+     summarises them. *Model selection* sets the |ΔBIC| threshold (default
+     10, "very strong" evidence after Kass & Raftery) and the thresholds of
+     the over-fitting warnings; these only affect the lifetime fit.
    - **Constraint** (*sum(A) ≤ 1*): caps the total amplitude at one peak, so
      the components stay fractions of the decay. It is only applied to
      normalised fits — the lifetime trace and FLID per-bin fits (always

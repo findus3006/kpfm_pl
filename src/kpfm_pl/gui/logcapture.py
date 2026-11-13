@@ -19,9 +19,16 @@ __all__ = ["LogBus", "install"]
 
 
 class LogBus(QObject):
-    """Carries log lines to the GUI; ``level`` is info, warning or error."""
+    """Carries log lines to the GUI.
+
+    ``level`` is info, warning or error, or one of the verdict colours good
+    (green), bad (red) and neutral (gray), e.g. for a BIC comparison.
+    """
 
     message = QtSignal(str, str)
+
+    def log(self, text: str, level: str = "info") -> None:
+        self.message.emit(text, level)
 
     def info(self, text: str) -> None:
         self.message.emit(text, "info")

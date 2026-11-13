@@ -161,14 +161,23 @@ window's left bound is chosen by `mode`:
 | `"manual"` | keep `start <= t <= end` (ns), `end=None` = last sample |
 
 Additional keywords: `smoothing` (Gaussian sigma for edge finding),
-`normalize` (scale the fitted curve peak to 1), `weighting` (`"none"`, the
-default unweighted least squares, or `"poisson"`, which weights every bin by
-its photon-counting noise `1/sqrt(max(counts, 1))`), plus any
+`normalize` (scale the fitted curve peak to 1), `weighting` (see below),
+`diagnostics` (thresholds of the over-fitting warnings, see below), plus any
 [`MultiExpFit`](../src/kpfm_pl/fitting.py) keyword (`p0`, `bounds`, `loss`,
 `f_scale`, `weights`, `constrain_sum_A`, ...). `NaN` entries of `p0` are
 filled with the automatic guess, which is also clipped into `bounds`. With
 `weighting="poisson"` a robust loss's `f_scale` is in Poisson standard
 deviations.
+
+| `weighting` | Fit statistic |
+|---|---|
+| `"none"` (default) | unweighted least squares |
+| `"poisson"` | least squares with every bin weighted by its photon-counting noise `1/sqrt(max(counts, 1))` (Neyman χ²) |
+| `"mle"` | Poisson maximum likelihood (minimises the Poisson deviance). Least squares underestimates lifetimes where bins hold few photons (long tails, per-bin fits); the MLE does not. Works with `normalize`; needs the linear `loss` |
+
+On the test file `ptu_test1_…` the tail holds about 10 counts per bin; a
+simulation with its decay gives a long lifetime of 28.6 ns with `"poisson"`
+but 30.3 ns with `"mle"` (true: 30.2 ns).
 
 ```python
 # tau_1 between 0.5 and 3 ns, everything else automatic, Poisson weights
@@ -180,13 +189,16 @@ The returned dict contains:
 
 | Key | Meaning |
 |-----|---------|
-| `A`, `tau` | fitted amplitudes and lifetimes (ns) |
-| `A_err`, `tau_err` | their standard errors (from `MultiExpFit.covariance()`) |
-| `tau_int`, `tau_int_err` | intensity-weighted mean lifetime `sum(A_i tau_i^2) / sum(A_i tau_i)` (ns, equal to `tau` for `n_exp=1`) and its propagated standard error |
+| `A`, `tau` | per-pulse amplitudes (corrected for the incomplete decay, see below) and lifetimes (ns) |
+| `A_err`, `tau_err` | their standard errors (from `MultiExpFit.corrected_covariance()`) |
+| `A_fit`, `A_fit_err` | the fitted amplitudes of the curve (uncorrected) and their errors |
+| `tau_int`, `tau_int_err` | intensity-weighted mean lifetime `sum(A_i tau_i^2) / sum(A_i tau_i)` of the per-pulse amplitudes (ns, equal to `tau` for `n_exp=1`) and its propagated standard error; `tau_int_fit` is the uncorrected value |
+| `period` | laser period `T` (ns) used for the correction |
 | `offset` | constant offset used |
 | `curve` | model evaluated on the fitted grid |
-| `quality` | `{residuals, cost, success, message, r_squared}` plus the Poisson goodness of fit `{reduced_chi_squared, chi_squared, dof, weighted_residuals}` |
-| `weighting` | the `weighting` used |
+| `quality` | `{residuals, cost, success, message, r_squared}` plus the Poisson goodness of fit `{reduced_chi_squared, chi_squared, dof, deviance, weighted_residuals}` and the model selection `{bic, bic_statistic, n_points, n_params}` |
+| `warnings` | list of over-fitting warnings (empty if none) |
+| `weighting`, `statistic` | the `weighting` used and the resulting `MultiExpFit` statistic |
 | `label` | LaTeX legend string of the fitted model |
 | `success` | whether the optimiser converged |
 | `shifted_histogram_x` | full lifetime axis shifted so the peak is at 0 ns |
@@ -210,6 +222,40 @@ amplitudes and lifetimes. Amplitudes and lifetimes of a multi-exponential fit
 are strongly correlated, so `tau_int` is usually much better defined than the
 individual `tau_i`.
 
+**Incomplete decay.** The laser fires every `T` (the sync period). If the
+decay has not reached the noise floor within one period, every bin also
+holds photons of all earlier pulses. For an exponential they add up to
+`exp(-t/tau) / (1 - exp(-T/tau))`, so the fitted **lifetimes are correct**
+but the fitted amplitudes are too large, the long components most (at
+`T = 100 ns`: 0.7 % for `tau = 20 ns`, 16 % for `tau = 50 ns`). That would
+push `tau_int` towards the long components. `fit_lifetime` (and the per-bin
+fits of `lifetime_trace`/`flid`) therefore always report per-pulse amplitudes
+`A = A_fit * (1 - exp(-T/tau))` and compute `tau_int` from them; the errors
+are propagated. The curve (`curve`, `label`) uses the fitted `A_fit`.
+
+**How many exponentials? (BIC and warnings)** Adding an exponential always
+lowers χ², even if it only fits noise. `quality["bic"]` is the Bayesian
+information criterion `BIC = χ² + k ln n` (Poisson deviance instead of χ²
+for `weighting="mle"`), with `k = 2 n_exp` free parameters and `n` fitted
+bins. The lower BIC is preferred; compare only fits of the **same histogram,
+window and weighting**. Kass & Raftery (1995) grade a difference of 2–6 as
+positive, 6–10 as strong and > 10 as very strong evidence. `out["warnings"]`
+([`fit_warnings`](../src/kpfm_pl/fitting.py)) flags typical signs of too many
+components: an amplitude compatible with zero (below `amp_sigma`=2 standard
+errors) or carrying less than `min_fraction`=1 % of the intensity, two
+lifetimes that differ by less than `merge_sigma`=2 combined errors or
+`merge_rel`=10 %, and a parameter within `bound_rel`=1 % of a bound. Change the
+thresholds with `diagnostics={"min_fraction": 0.02, ...}`. References:
+G. Schwarz, *Ann. Statist.* 6, 461 (1978); R. E. Kass & A. E. Raftery,
+*J. Am. Stat. Assoc.* 90, 773 (1995); for MLE vs. least squares M. Maus et al.,
+*Anal. Chem.* 73, 2078 (2001).
+
+```python
+fits = {n: ptu.fit_lifetime(hist, n_exp=n, weighting="mle") for n in (1, 2, 3)}
+for n, fit in fits.items():
+    print(n, fit["quality"]["bic"], fit["warnings"])
+```
+
 Plotting the fit (from `example_ptu.py`):
 
 ```python
@@ -232,7 +278,10 @@ the fitted lifetime in ns: for `n_exp > 1`, the intensity-weighted mean
 and `y` arrays have exactly one entry per selected time bin. Bins outside an
 intensity ROI, empty bins, failed fits and bins whose amplitudes are all zero
 remain `NaN` at their original positions; the individual fitted components
-are available in `Signal.meta["taus"]` and `Signal.meta["amplitudes"]`.
+are available in `Signal.meta["taus"]` and `Signal.meta["amplitudes"]`
+(per-pulse amplitudes, corrected for the incomplete decay as in
+[`fit_lifetime`](#lifetime-fitting); the uncorrected ones are in
+`Signal.meta["amplitudes_fit"]`).
 
 When `laser_pulse` is omitted, `lifetime_trace` inherits the mode used by the
 most recent `time_trace` call. This keeps legacy `laser_pulse=False` traces on
@@ -347,7 +396,7 @@ Key parameters:
 | `mode`/`fraction`/`smoothing`/`start`/`end` | – | fit-window selection, as in `fit_lifetime` |
 | `sigma` | `1.5` | Gaussian smoothing of the 2-D histogram (`0` disables) |
 | `isolated` | `False` | when `True`, return one `Image` per exponential; otherwise a single map of the intensity-weighted mean lifetime |
-| `weighting` | `"none"` | `"poisson"` weights every per-bin fit by photon noise, as in `fit_lifetime` (also for `lifetime_trace`) |
+| `weighting` | `"none"` | `"poisson"` weights every per-bin fit by photon noise, `"mle"` fits each bin by Poisson maximum likelihood (recommended for few photons per bin), as in `fit_lifetime` (also for `lifetime_trace`) |
 | `method` | `"fit"` | `"mean_arrival"`: map the mean photon arrival time instead of fitting |
 | `truncation_correction` | `True` | for `method="mean_arrival"`, see [Mean arrival time](#mean-arrival-time-no-fit) |
 | `min_counts`/`coverage`/`auto_bintime` | `100`/`0.9`/`False` | photon-count check, see [Photons per time bin](#photons-per-time-bin) |

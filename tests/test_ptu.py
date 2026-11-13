@@ -590,6 +590,68 @@ def test_weighting_is_validated(ptu):
         ptu.fit_lifetime(hist, n_exp=1, weighting="poisson", weights=np.ones(3))
     with pytest.raises(ValueError, match="weighting"):
         ptu.lifetime_trace(bintime=50.0, weighting="sqrt")
+    with pytest.raises(ValueError, match="loss"):
+        ptu.fit_lifetime(hist, n_exp=1, weighting="mle", loss="soft_l1")
+
+
+def test_fit_lifetime_reports_bic_warnings_and_period_correction(ptu):
+    hist = ptu.lifetime_histogram()
+    one = ptu.fit_lifetime(hist, n_exp=1, weighting="poisson")
+    two = ptu.fit_lifetime(hist, n_exp=2, weighting="poisson")
+    for fit, n in ((one, 1), (two, 2)):
+        q = fit["quality"]
+        assert q["bic_statistic"] == "chi_squared" and q["n_params"] == 2 * n
+        assert q["bic"] == pytest.approx(q["chi_squared"] + 2 * n * np.log(q["n_points"]))
+        assert isinstance(fit["warnings"], list)
+        # per-pulse amplitudes: A = A_fit * (1 - exp(-T/tau))
+        period_ns = ptu.rep_time * 1e9
+        np.testing.assert_allclose(fit["A"],
+                                   fit["A_fit"] * (1 - np.exp(-period_ns / fit["tau"])))
+        assert fit["period"] == pytest.approx(period_ns)
+    # the second component is needed (see the chi-squared note in Changes.md)
+    assert two["quality"]["bic"] < one["quality"]["bic"]
+    strict = ptu.fit_lifetime(hist, n_exp=2, weighting="poisson",
+                              diagnostics={"min_fraction": 0.99})
+    assert any("collapsed" in w for w in strict["warnings"])
+
+
+def test_fit_lifetime_mle(ptu):
+    hist = ptu.lifetime_histogram()
+    neyman = ptu.fit_lifetime(hist, n_exp=2, weighting="poisson")
+    mle = ptu.fit_lifetime(hist, n_exp=2, weighting="mle")
+    assert mle["success"] and mle["statistic"] == "poisson_mle"
+    assert mle["quality"]["bic_statistic"] == "deviance"
+    assert mle["quality"]["deviance"] <= neyman["quality"]["deviance"] * (1 + 1e-6)
+    # The tail holds ~10 counts per bin, where Neyman weighting is biased low
+    # (simulated with this decay: 28.6 ns instead of 30.2 ns; MLE 30.3 ns).
+    assert np.max(mle["tau"]) > np.max(neyman["tau"])
+    np.testing.assert_allclose(np.sort(mle["tau"]), np.sort(neyman["tau"]), rtol=0.25)
+    # MLE on normalised data uses the peak to get back to counts
+    norm = ptu.fit_lifetime(hist, n_exp=2, weighting="mle", normalize=True)
+    np.testing.assert_allclose(np.sort(norm["tau"]), np.sort(mle["tau"]), rtol=1e-3)
+
+
+def test_lifetime_trace_passes_mle_and_period_per_bin(monkeypatch):
+    seen = []
+
+    class DummyFit:
+        def __init__(self, t, y, n_exp, offset, **kwargs):
+            seen.append(kwargs)
+            self.success = True
+
+        def parameters(self):
+            return {"A": np.ones(1), "tau": np.array([2.0]), "A_fit": np.full(1, 2.0)}
+
+    monkeypatch.setattr("kpfm_pl.ptu.MultiExpFit", DummyFit)
+    matrix = np.array([[16, 4, 1, 0, 0], [64, 16, 4, 1, 0]], dtype=np.uint32)
+    p = _synthetic_ptu(matrix, bintime=1.0, acquisition_time=2.0)
+    p.rep_time = 50e-9
+    trace = p.lifetime_trace(bintime=1.0, mode="manual", start=-1, end=10, weighting="mle")
+    assert all(k["statistic"] == "poisson_mle" and k["period"] == pytest.approx(50.0)
+               for k in seen)
+    assert seen[0]["count_scale"] == pytest.approx(16.0)
+    np.testing.assert_allclose(trace.meta["amplitudes_fit"], 2.0)
+    np.testing.assert_allclose(trace.meta["amplitudes"], 1.0)
 
 
 def test_lifetime_trace_passes_poisson_weights_per_bin(monkeypatch):

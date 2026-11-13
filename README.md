@@ -97,6 +97,8 @@ states = ptu.threshold(off=0.1, on=0.6)        # {"on": Signal, "off": Signal} l
 fit = ptu.fit_lifetime(states["on"], n_exp=2)  # dict: A, tau (ns), curve, quality, ...
 print(fit["tau"], fit["quality"]["reduced_chi_squared"])  # ≈ 1 for a good fit
 print(fit["tau_int"], fit["tau_int_err"])     # intensity-weighted mean lifetime ± error
+print(fit["quality"]["bic"], fit["warnings"])  # compare n_exp by BIC; over-fitting warnings
+mle = ptu.fit_lifetime(states["on"], n_exp=2, weighting="mle")  # Poisson maximum likelihood
 
 lt = ptu.lifetime_trace(bintime=0.5, n_exp=1)  # Signal: fitted lifetime (ns) per time bin
 arrival = ptu.arrival_time_trace(bintime=0.5)  # Signal: lifetime from the mean arrival time (no fit)
@@ -218,7 +220,7 @@ jpks = pick_folder(r"D:\Measurements")               # all .jpk files below a ch
 | [`database`](src/kpfm_pl/database.py) | `build_database`, `filter_entries`, `add_entry`/`remove_entry`, JSON/CSV export | [database.md](docs/database.md) |
 | [`plotting`](src/kpfm_pl/plotting.py) | colormaps, `set_scaled_rcparams`, `plot_image`, `enable_zoom_pan`, `make_circle`, `crop_roi` | [plotting.md](docs/plotting.md) |
 | [`selector`](src/kpfm_pl/selector.py) | `InteractiveBoxSelector`, `SingleBoxSelector`, `DraggableCircle` | [plotting.md](docs/plotting.md) |
-| [`fitting`](src/kpfm_pl/fitting.py) | `MultiExpFit` (used by `PTU`), `poisson_chi_squared` (fit quality of photon counts); `gaussian2d`, `fit_gaussian2d`, `peak_power_density` for laser spot profiles | docstrings |
+| [`fitting`](src/kpfm_pl/fitting.py) | `MultiExpFit` (used by `PTU`; least squares or Poisson MLE, incomplete-decay correction), `poisson_chi_squared` (fit quality and BIC of photon counts), `poisson_deviance`, `fit_warnings` (signs of over-fitting); `gaussian2d`, `fit_gaussian2d`, `peak_power_density` for laser spot profiles | docstrings |
 | [`io`](src/kpfm_pl/io.py) | `pick_files`, `pick_folder` (tkinter dialogs), `sort_measurement_files` | docstrings |
 | [`utils`](src/kpfm_pl/utils.py) | smoothing, resampling, fit-window selection, AFM levelling, image shift, trigger points | docstrings |
 | [`core`](src/kpfm_pl/core.py) | `Signal`, `Image` | – |
