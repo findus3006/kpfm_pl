@@ -515,3 +515,101 @@ def test_reconvolution_accepts_amplitude_lifetime_only_guesses_and_bounds():
         IRFReconvolutionFit(irf[:-1], counts, 1, 0.1)
     narrow = IRFReconvolutionFit(irf, counts, 1, 0.1, bounds=([0, 0.5], [np.inf, 2.0]))
     assert any("τ1" in w and "upper bound" in w for w in narrow.diagnostics())
+
+
+# ---------------------------------------------------------------- fitted offset
+def test_fit_offset_recovers_a_constant_background():
+    t = np.linspace(0, 80, 801)
+    y = 1000 * np.exp(-t / 4) + 200 * np.exp(-t / 15) + 12.0
+    fit = MultiExpFit(t, y, 2, fit_offset=True)
+    np.testing.assert_allclose(np.sort(fit.parameters()["tau"]), [4.0, 15.0], rtol=1e-4)
+    assert fit.offset_value()[0] == pytest.approx(12.0, rel=1e-4)
+    assert fit._n_params() == 5 and fit.bounds[0].size == 5
+    out = fit.to_dict()
+    assert out["fit_offset"] is True and out["offset"] == pytest.approx(12.0, rel=1e-4)
+    assert "12.00" in fit.legend_label()
+    # a fixed offset is unchanged: no extra parameter, error 0
+    fixed = MultiExpFit(t, y, 2, 12.0)
+    assert fixed.offset_value() == (12.0, 0.0) and fixed._n_params() == 4
+    assert fixed.to_dict()["fit_offset"] is False and fixed.to_dict()["offset_err"] == 0.0
+    # guesses and bounds may cover the amplitudes and lifetimes only
+    partial = MultiExpFit(t, y, 2, fit_offset=True, p0=[np.nan, np.nan, 3.0, 20.0],
+                          bounds=([0, 0, 1.0, 1.0], [np.inf, np.inf, 50.0, 50.0]))
+    assert partial.offset_value()[0] == pytest.approx(12.0, rel=1e-4)
+
+
+def test_fit_offset_jacobian_matches_finite_differences():
+    t = np.linspace(0, 40, 201)
+    y = 500 * np.exp(-t / 3) + 80 * np.exp(-t / 12) + 5.0
+    fit = MultiExpFit(t, y, 2, fit_offset=True, weights=1.0 / np.sqrt(np.maximum(y, 1.0)))
+    params = np.array([450.0, 100.0, 2.5, 14.0, 7.0])
+    analytic = fit._jacobian(params, fit.t, fit.y)
+    numeric = np.empty_like(analytic)
+    for k in range(params.size):
+        step = np.zeros(params.size)
+        step[k] = 1e-6 * max(abs(params[k]), 1.0)
+        numeric[:, k] = (fit._residuals(params + step, fit.t, fit.y)
+                         - fit._residuals(params - step, fit.t, fit.y)) / (2 * step[k])
+    np.testing.assert_allclose(analytic, numeric, rtol=1e-5, atol=1e-7)
+
+
+def test_fit_offset_with_poisson_mle_and_period():
+    rng = np.random.default_rng(3)
+    period = 100.0
+    t = np.arange(0.0, 85.0, 0.1)
+    model = _periodic(t, [6000.0, 1600.0], [3.0, 20.0], period) + 60.0
+    counts = rng.poisson(model).astype(float)
+    fit = MultiExpFit(t, counts, 2, statistic="poisson_mle", period=period, fit_offset=True)
+    value, error = fit.offset_value()
+    assert error > 0 and abs(value - 60.0) < 5 * error
+    np.testing.assert_allclose(np.sort(fit.parameters()["tau"]), [3.0, 20.0], rtol=0.05)
+    # the offset passes through the incomplete-decay correction unchanged
+    cov, corrected = fit.covariance(), fit.corrected_covariance()
+    assert corrected.shape == (5, 5) and corrected[4, 4] == pytest.approx(cov[4, 4])
+    out = fit.to_dict()
+    assert np.isfinite(out["tau_int_err"]) and out["offset_err"] == pytest.approx(error)
+    # forcing the offset to 0 pushes the background into the long lifetime
+    fixed = MultiExpFit(t, counts, 2, statistic="poisson_mle", period=period)
+    assert np.max(fixed.parameters()["tau"]) > np.max(fit.parameters()["tau"]) * 1.1
+
+
+def test_unsorted_time_axis_gives_the_same_fit():
+    rng = np.random.default_rng(0)
+    t = np.linspace(0, 60, 601)
+    y = 800 * np.exp(-t / 2.5) + 150 * np.exp(-t / 14)
+    order = rng.permutation(t.size)
+    sorted_fit, shuffled = MultiExpFit(t, y, 2), MultiExpFit(t[order], y[order], 2)
+    np.testing.assert_allclose(shuffled._default_p0(), sorted_fit._default_p0())
+    np.testing.assert_allclose(np.sort(shuffled.parameters()["tau"]), [2.5, 14.0], rtol=1e-4)
+
+
+def test_fit_warnings_flags_a_long_lifetime_next_to_a_fitted_background():
+    from kpfm_pl.fitting import fit_warnings
+
+    A, tau = [1.0, 1.0], [5.0, 60.0]
+    flagged = fit_warnings(A, tau, period=100.0, free_offset=True)
+    assert len(flagged) == 1 and "τ2 = 60" in flagged[0] and "laser period" in flagged[0]
+    assert fit_warnings(A, tau, period=100.0, free_offset=False) == []
+    assert fit_warnings(A, tau, period=None, free_offset=True) == []
+    assert fit_warnings(A, tau, period=100.0, free_offset=True, period_fraction=0.7) == []
+    # MultiExpFit.diagnostics uses its own period and offset state
+    t = np.arange(0.0, 90.0, 0.1)
+    y = _periodic(t, [100.0], [70.0], 100.0) + 3.0
+    free = MultiExpFit(t, y, 1, period=100.0, fit_offset=True, p0=[100.0, 70.0, 3.0])
+    assert any("laser period" in w for w in free.diagnostics())
+    assert not any("laser period" in w for w in free.diagnostics(period_fraction=0.9))
+    fixed = MultiExpFit(t, y, 1, 3.0, period=100.0)
+    assert not any("laser period" in w for w in fixed.diagnostics())
+
+
+def test_reconvolution_warns_about_a_long_lifetime_with_fitted_background():
+    from kpfm_pl import IRFReconvolutionFit
+
+    t, irf = _irf_setup(n=500, dt=0.1)        # 50 ns period
+    reference = IRFReconvolutionFit(irf, np.ones(t.size), 1, 0.1, shift=0.0)
+    counts = reference.full_model(np.array([100.0, 30.0])) + 4.0
+    free = IRFReconvolutionFit(irf, counts, 1, 0.1, shift=0.0, fit_background=True)
+    assert free.offset_value()[0] == pytest.approx(free.extras()["background"][0])
+    assert any("laser period" in w for w in free.diagnostics())
+    fixed = IRFReconvolutionFit(irf, counts, 1, 0.1, shift=0.0, background=4.0)
+    assert not any("laser period" in w for w in fixed.diagnostics())

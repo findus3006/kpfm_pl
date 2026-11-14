@@ -55,6 +55,7 @@ _SUMMARY_LABELS = {
     "fit_start_ns": "Fit start (ns)",
     "fit_end_ns": "Fit end (ns)",
     "fit_points": "Fit points",
+    "prerise_bins": "Bins before the rise",
     "lifetime_shift_ns": "Lifetime shift (ns)",
     "irf_shift_ns": "IRF shift δ (ns)",
     "irf_fwhm_ns": "IRF FWHM (ns)",
@@ -92,6 +93,13 @@ _A_TOOLTIP = ("Amplitude in counts per bin. With the incomplete-decay correction
               "for the photons of all earlier laser pulses that had not decayed yet, "
               "A = A_fit·(1 − exp(−T/τ)) with the laser period T. The percentages and the "
               "mean lifetime use it.")
+_PRERISE_TOOLTIP = ("Tail fit: also fit the bins before the rising edge. With periodic "
+                    "excitation they hold the tail of the previous laser pulse, so they "
+                    "enter the fit at their time since that pulse (t + laser period) and "
+                    "extend the observed decay to the whole period. Useful for decays "
+                    "that have not reached the background within one period.")
+_PRERISE_GAP_TOOLTIP = ("The fitted bins before the rise end this far before the histogram "
+                        "maximum, which keeps the rising edge itself out of the fit.")
 _A_FIT_TOOLTIP = ("Amplitude of the fitted curve, before the incomplete-decay correction "
                   "(includes the tails of earlier pulses).")
 #: Colours of the BIC verdicts (``BicComparison.colour``).
@@ -340,6 +348,12 @@ class PTUTab(BaseTab):
         f.add_optional_float("end", "End", None, maximum=1000, step=1, decimals=2,
                              suffix=" ns", auto_text="end of histogram",
                              tooltip="Fit window end, relative to the histogram maximum.")
+        f.add_bool("prerise", "Before the rise", False, text="also fit these bins",
+                   tooltip=_PRERISE_TOOLTIP + "\nAlso used by the lifetime trace (the FLID "
+                                              "has its own setting). Not used with the "
+                                              "IRF, which fits the whole period anyway.")
+        f.add_float("prerise_gap", "Gap before maximum", 2.0, maximum=1000, step=0.5,
+                    decimals=2, suffix=" ns", tooltip=_PRERISE_GAP_TOOLTIP)
         layout.addWidget(f)
         f.changed.connect(self._update_fit_fields)
         self._update_fit_fields()
@@ -435,6 +449,11 @@ class PTUTab(BaseTab):
         f.add_optional_float("end", "End", None, maximum=1000, step=1, decimals=2,
                              suffix=" ns", auto_text="end of histogram",
                              tooltip="Window end, relative to the histogram maximum.")
+        f.add_bool("prerise", "Before the rise", False, text="also fit these bins",
+                   tooltip=_PRERISE_TOOLTIP + "\nOnly for 'Fit' (not the mean arrival "
+                                              "time) and not used with the IRF.")
+        f.add_float("prerise_gap", "Gap before maximum", 2.0, maximum=1000, step=0.5,
+                    decimals=2, suffix=" ns", tooltip=_PRERISE_GAP_TOOLTIP)
 
         f.add_heading("Photons per time bin")
         f.add_float("min_counts", "At least", 100.0, maximum=1e7, step=10, decimals=0,
@@ -477,8 +496,9 @@ class PTUTab(BaseTab):
         f.changed.connect(self._flid_form_changed)
         layout.addWidget(f)
         self.add_button(layout, "Copy fit window from 'Lifetime fit'", self.copy_fit_window,
-                        tooltip="Use the fit start, edge fraction, smoothing and start/end "
-                                "of the 'Lifetime fit' group for the FLIDs.")
+                        tooltip="Use the fit start, edge fraction, smoothing, start/end and "
+                                "the 'before the rise' setting of the 'Lifetime fit' group "
+                                "for the FLIDs.")
         self.flid_button = self.add_button(
             layout, "Compute FLIDs", self.run_flids, primary=True,
             tooltip="Compute the lifetime of every time bin of every ROI and build the "
@@ -524,7 +544,12 @@ class PTUTab(BaseTab):
                            "the last lifetime fit.")
         g.add_bool("fit_background", "Background", False, text="fit background B",
                    tooltip="Fit the constant background per bin instead of fixing it from "
-                           "the dark counts (ambient light, afterpulsing).")
+                           "the dark counts (ambient light, afterpulsing, emission much "
+                           "slower than the laser period). Works with and without the "
+                           "IRF.\nThe lifetime trace and the FLIDs cannot fit it per time "
+                           "bin (too few photons): they reuse the background of the last "
+                           "lifetime fit.\nA fitted background and a lifetime above half "
+                           "the laser period are barely separable; the log warns then.")
         g.add_bool("fit_scatter", "Scatter", False, text="fit scatter s",
                    tooltip="Fit a contribution of scattered laser light, shaped like the "
                            "IRF. Only if scatter is expected: it correlates strongly with "
@@ -576,26 +601,45 @@ class PTUTab(BaseTab):
         use = bool(form.value("use"))
         form.fields["use"].setEnabled(has)
         self.irf_clear_button.setEnabled(has)
-        for key in ("fit_background", "fit_scatter"):
-            form.set_row_visible(key, use)
+        # The background can be fitted with and without the IRF.
+        form.set_row_visible("fit_scatter", use)
         self.irf_label.setText(f"IRF file: {self.irf.name}" if has else
                                "IRF file: none (optional, for reconvolution fits)")
-        self.irf_note.setText(
-            "Reconvolution: the whole laser period is fitted ('Manual' fit start: only "
-            "start…end). Lifetime trace and FLIDs reuse δ, B and s of the last lifetime "
-            "fit." if use else "")
-        self.irf_note.setVisible(use)
+        if use:
+            note = ("Reconvolution: the whole laser period is fitted ('Manual' fit start: "
+                    "only start…end). Lifetime trace and FLIDs reuse δ, B and s of the "
+                    "last lifetime fit.")
+        elif form.value("fit_background"):
+            note = ("Fitted background: the lifetime trace and the FLIDs reuse the "
+                    "background of the last lifetime fit.")
+        else:
+            note = ""
+        self.irf_note.setText(note)
+        self.irf_note.setVisible(bool(note))
         if has:
             self.ctx.settings.setValue(_IRF_USE_KEY, "true" if use else "false")
 
     def _irf_for_bins(self, handle):
-        """Per-bin IRF settings for the lifetime trace/FLIDs, or ``None`` (with a warning)."""
-        if not self.irf_form.value("use"):
+        """Per-bin settings from the last lifetime fit, or ``None`` (with a warning).
+
+        With *use IRF*: the IRF shift, background and scatter for per-bin
+        reconvolution fits. Otherwise, with *fit background*: the background
+        rate of the per-bin tail fits.
+        """
+        if self.irf_form.value("use"):
+            kwargs, reason = model.irf_trace_kwargs(self.fit, str(handle.path), self.irf)
+            if kwargs is None:
+                self.ctx.log.warning(f"IRF not used for the per-bin fits: {reason}. Run the "
+                                     "lifetime fit with the IRF first; using the tail fit "
+                                     "now.")
+            return kwargs
+        if not self.irf_form.value("fit_background"):
             return None
-        kwargs, reason = model.irf_trace_kwargs(self.fit, str(handle.path), self.irf)
+        kwargs, reason = model.background_trace_kwargs(self.fit, str(handle.path))
         if kwargs is None:
-            self.ctx.log.warning(f"IRF not used for the per-bin fits: {reason}. Run the "
-                                 "lifetime fit with the IRF first; using the tail fit now.")
+            self.ctx.log.warning(f"Fitted background not used for the per-bin fits: "
+                                 f"{reason}. Run the lifetime fit with 'fit background B' "
+                                 "first; using the dark counts now.")
         return kwargs
 
     @staticmethod
@@ -633,6 +677,7 @@ class PTUTab(BaseTab):
         self.fit_form.set_row_visible("smoothing", mode in ("fraction", "inflection"))
         self.fit_form.set_row_visible("start", mode == "manual")
         self.fit_form.set_row_visible("end", mode == "manual")
+        self.fit_form.set_row_visible("prerise_gap", bool(self.fit_form.value("prerise")))
         self._install_span()
 
     def _update_lt_fields(self) -> None:
@@ -663,6 +708,8 @@ class PTUTab(BaseTab):
         f.set_row_visible("smoothing", mode in ("fraction", "inflection"))
         f.set_row_visible("start", mode == "manual")
         f.set_row_visible("end", mode == "manual")
+        f.set_row_visible("prerise", method != "mean_arrival")
+        f.set_row_visible("prerise_gap", method != "mean_arrival" and bool(f.value("prerise")))
 
     def _flid_form_changed(self) -> None:
         """Map settings redraw the FLIDs at once; other settings need 'Compute FLIDs'."""
@@ -680,7 +727,7 @@ class PTUTab(BaseTab):
             self._draw_flids()
 
     def copy_fit_window(self) -> None:
-        self.flid_form.set_values(self.fit_params().window_kwargs())
+        self.flid_form.set_values(self.fit_params().window_values())
 
     def _trace_bintime(self) -> float:
         return self.trace.params.bintime if self.trace else self.trace_form.value("bintime")
@@ -1248,7 +1295,16 @@ class PTUTab(BaseTab):
         label = (f"{name}: τ = " + ", ".join(f"{t:.3g}" for t in np.atleast_1d(fit["tau"]))
                  + " ns" + (f", {mean}" if mean and np.size(fit["tau"]) > 1 else "")
                  + f", {model.quality_text(fit)}{bic}") if multi else "Fit"
-        ax.semilogy(fit["t_fit"], curve, "-", color=colour, linewidth=1.5, label=label)
+        # Bins before the rise are fitted points too: break the line at the rising edge.
+        t_fit = np.asarray(fit["t_fit"], dtype=float)
+        n_pre = int(fit.get("prerise_points", 0) or 0)
+
+        def broken(values) -> np.ndarray:
+            values = np.asarray(values, dtype=float)
+            return np.insert(values, n_pre, np.nan) if n_pre else values
+
+        ax.semilogy(broken(t_fit), broken(curve), "-", color=colour, linewidth=1.5,
+                    label=label)
         if not multi and fit.get("reconvolution") and fit.get("irf_shifted") is not None:
             irf = np.asarray(fit["irf_shifted"], dtype=float)
             if np.max(irf) > 0 and np.max(y) > 0:
@@ -1256,8 +1312,11 @@ class PTUTab(BaseTab):
                 ax.semilogy(fit["irf_t_ns"], np.where(scaled > 0, scaled, np.nan), "--",
                             color="0.55", linewidth=1.0, label="IRF (shifted, scaled)")
         if not multi:
-            ax.axvspan(fit["t_fit"][0], fit["t_fit"][-1], color=colour, alpha=0.08,
+            ax.axvspan(t_fit[n_pre], t_fit[-1], color=colour, alpha=0.08,
                        label="Fit window")
+            if n_pre:
+                ax.axvspan(t_fit[0], t_fit[n_pre - 1], color=colour, alpha=0.08, hatch="//",
+                           label="Before the rise (fitted)")
             if fit.get("seam_ns") is not None:
                 # Partial bin at the old window edge, left out of the fit.
                 ax.axvline(fit["seam_ns"], color="0.5", linestyle=":", linewidth=1,
@@ -1265,7 +1324,7 @@ class PTUTab(BaseTab):
                            else "Partial last bin (not fitted)")
         residuals = fit.get("quality", {}).get("weighted_residuals")
         if residuals is not None:
-            ax_res.plot(fit["t_fit"], residuals, "-", color=colour, linewidth=0.7)
+            ax_res.plot(broken(t_fit), broken(residuals), "-", color=colour, linewidth=0.7)
 
     def _install_span(self) -> None:
         """In manual fit mode, dragging on the histogram sets start/end."""

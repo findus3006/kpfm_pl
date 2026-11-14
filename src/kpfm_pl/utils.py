@@ -22,6 +22,7 @@ __all__ = [
     "left_bound_fraction",
     "inflection_left_bound",
     "fit_window_mask",
+    "prerise_mask",
     "lifetime_from_truncated_mean",
     "linear_line_level",
     "set_zero",
@@ -212,6 +213,33 @@ def fit_window_mask(
         end = t_shifted[-1] if end is None else end
         return (t_shifted >= start) & (t_shifted <= end)
     raise ValueError(f"Unknown mode: {mode!r}")
+
+
+def prerise_mask(t_shifted: np.ndarray, gap: float = 2.0) -> np.ndarray:
+    """Boolean mask of the bins before the rising edge of a (peak-shifted) decay curve.
+
+    With periodic excitation these bins hold the tail of the previous laser
+    pulse (plus the constant background): a bin at ``t < 0`` continues the
+    decay at ``t + period``. Fitting them together with the tail extends the
+    observed decay to the whole period.
+
+    Parameters
+    ----------
+    t_shifted :
+        Time axis shifted so the peak sits at zero (as for
+        :func:`fit_window_mask`).
+    gap :
+        The region ends ``gap`` before the peak (same unit as ``t_shifted``),
+        which keeps the rising edge itself out. Must be finite and ``>= 0``.
+
+    Returns
+    -------
+    ndarray of bool
+        ``t_shifted < -gap``.
+    """
+    if not np.isfinite(gap) or gap < 0:
+        raise ValueError("gap must be a finite, non-negative number.")
+    return np.asarray(t_shifted, dtype=float) < -float(gap)
 
 
 def lifetime_from_truncated_mean(mean: np.ndarray | float, window: np.ndarray | float,

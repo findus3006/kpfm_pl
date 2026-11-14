@@ -412,3 +412,73 @@ def test_irf_file_reconvolution_and_per_bin_reuse(window, qtbot, tab, tmp_path, 
     assert other.irf is None and not other.irf_form.value("use")
     assert not window.ctx.settings.value("ptu/irf_path")
     second.runner.wait(10000)
+
+
+def test_fitted_background_and_prerise_without_irf(window, qtbot, tab):
+    messages = []
+    window.ctx.log.message.connect(lambda text, level: messages.append((text, level)))
+    # both are off by default; the background checkbox does not need an IRF
+    assert not tab.fit_form.value("prerise") and not tab.irf_form.value("fit_background")
+    assert tab.irf_form.fields["fit_background"].isVisibleTo(tab.irf_form)
+    assert not tab.irf_form.fields["fit_scatter"].isVisibleTo(tab.irf_form)
+    assert not tab.fit_form.fields["prerise_gap"].isVisibleTo(tab.fit_form)
+    tab.fit_form.set_value("prerise", True)
+    assert tab.fit_form.fields["prerise_gap"].isVisibleTo(tab.fit_form)
+    assert tab.fit_params().prerise and tab.fit_params().prerise_gap == 2.0
+
+    # per-bin fits without a lifetime fit with fitted background: dark counts + warning
+    tab.irf_form.set_value("fit_background", True)
+    assert "reuse the background" in tab.irf_note.text()
+    tab.lt_form.set_values({"bintime": 60.0, "n_exp": 1})
+    tab.run_lifetime_trace()
+    _wait(window, qtbot, lambda: tab.lifetime is not None, timeout=120000)
+    assert tab.lifetime[0].meta["background_rate"] is None and tab.lifetime[0].meta["prerise"]
+    assert any("Fitted background not used" in text and level == "warning"
+               for text, level in messages)
+
+    tab.run_fit()
+    _wait(window, qtbot, lambda: tab.fit is not None)
+    fit = tab.fit.fit
+    assert fit["fit_background"] and fit["prerise"] and not fit.get("reconvolution")
+    rows = [tab.fit_table.item(r, 0).text() for r in range(tab.fit_table.rowCount())]
+    assert "Bins before the rise" in rows
+    offset = tab.fit_table.item(rows.index("Offset"), 1).text()
+    assert "±" in offset                              # fitted: shown with its error
+    ax = tab.hist_plot.figure.axes[0]
+    labels = [patch.get_label() for patch in ax.patches]
+    assert "Fit window" in labels and "Before the rise (fitted)" in labels
+    # the fitted curve is broken at the rising edge
+    curve = next(line for line in ax.get_lines() if line.get_label() == "Fit")
+    assert np.isnan(curve.get_xdata()[fit["prerise_points"]])
+
+    previous = tab.lifetime
+    tab.run_lifetime_trace()
+    _wait(window, qtbot, lambda: tab.lifetime is not previous, timeout=120000)
+    duration = tab.fit.histogram.meta["acquisition_duration"]
+    assert tab.lifetime[0].meta["background_rate"] == pytest.approx(fit["background"] / duration)
+
+
+def test_flid_prerise_setting_is_copied_and_passed_on(window, qtbot, tab):
+    form = tab.flid_form
+    assert not tab.flid_params().prerise
+    assert not form.fields["prerise_gap"].isVisibleTo(form)
+    tab.fit_form.set_values({"prerise": True, "prerise_gap": 3.5})
+    assert not tab.flid_params().prerise           # the FLID keeps its own fit window
+    tab.copy_fit_window()
+    params = tab.flid_params()
+    assert params.prerise and params.prerise_gap == 3.5
+    assert params.prerise_kwargs() == {"prerise": True, "prerise_gap": 3.5}
+    assert form.fields["prerise_gap"].isVisibleTo(form)
+    form.set_value("method", "mean_arrival")       # no fit: the setting does not apply
+    assert not form.fields["prerise"].isVisibleTo(form)
+
+
+def test_period_fraction_in_the_advanced_settings(qtbot):
+    from kpfm_pl.gui.fit_options import FitOptionsDialog, describe_options
+
+    dialog = FitOptionsDialog(model.FitOptions(period_fraction=0.8))
+    qtbot.addWidget(dialog)
+    assert dialog.form.value("period_fraction") == pytest.approx(80.0)   # shown in percent
+    assert dialog.options().period_fraction == pytest.approx(0.8)
+    assert "custom warning thresholds" in describe_options(dialog.options())
+    assert describe_options(model.FitOptions()) != describe_options(dialog.options())

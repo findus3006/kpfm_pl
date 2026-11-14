@@ -462,3 +462,83 @@ def test_irf_trace_kwargs_come_from_the_last_irf_fit(handle, irf_handle):
                                           model.LifetimeTraceParams(bintime=60.0, n_exp=1),
                                           irf_kwargs=kwargs)
     assert signal.meta["reconvolution"] and signal.meta["irf_shift_ns"] == kwargs["irf_shift"]
+
+
+# ------------------------------- fitted background and bins before the rise
+def test_fit_window_kwargs_only_carry_prerise_when_switched_on():
+    assert "prerise" not in model.FitParams().window_kwargs()
+    kwargs = model.FitParams(prerise=True, prerise_gap=3.0).window_kwargs()
+    assert kwargs["prerise"] is True and kwargs["prerise_gap"] == 3.0
+    values = model.FitParams(mode="manual", start=1.5, prerise=True).window_values()
+    assert values["prerise"] is True and values["prerise_gap"] == 2.0
+    assert values["mode"] == "manual" and values["start"] == 1.5
+
+
+def test_tail_fit_with_fitted_background_and_prerise(handle):
+    params, states = model.TraceParams(bintime=1.0), model.StateParams()
+    options = model.FitOptions(weighting="mle")
+    plain = model.compute_fit(handle, params, model.FitParams(n_exp=2), states,
+                              options=options, irf_params=model.IRFParams())
+    assert not plain.fit["fit_background"] and "fit_background" not in plain.extra
+    assert "prerise_bins" not in model.fit_summary(plain.fit)
+
+    fit = model.FitParams(n_exp=2, prerise=True)
+    result = model.compute_fit(handle, params, fit, states, options=options,
+                               irf_params=model.IRFParams(fit_background=True))
+    assert result.fit["fit_background"] and not result.fit.get("reconvolution")
+    assert result.extra == {"fit_background": True}
+    assert result.fit["prerise"] and result.fit["prerise_points"] > 0
+    assert result.fit["background"] > plain.fit["background"]
+    assert result.fit["quality"]["n_params"] == 5
+    summary = model.fit_summary(result.fit)
+    assert summary["offset"] == pytest.approx(result.fit["background"])
+    assert summary["offset_err"] > 0
+    assert summary["prerise_bins"] == result.fit["prerise_points"]
+    assert summary["fit_points"] == len(result.fit["t_fit"])
+    payload = model.fit_payload(result)
+    assert payload.metadata["parameters"]["fit_background"] is True
+    assert payload.metadata["parameters"]["fit"]["prerise"] is True
+    # other fitted bins: the BIC of the two fits is not comparable
+    assert not model.same_fit_data(result, plain)
+    assert model.compare_bic(result, [plain]).verdict == "not comparable"
+    # the same bins with and without the fitted background are comparable
+    fixed = model.compute_fit(handle, params, fit, states, options=options)
+    assert model.compare_bic(result, [fixed]).verdict in ("better", "worse", "same")
+
+
+def test_background_trace_kwargs_come_from_the_last_tail_fit(handle, irf_handle):
+    params, states = model.TraceParams(bintime=1.0), model.StateParams()
+    source = str(handle.path)
+    assert model.background_trace_kwargs(None, source) == (None, "no lifetime fit has been "
+                                                           "run yet")
+    fixed = model.compute_fit(handle, params, model.FitParams(n_exp=1), states)
+    assert "did not fit the background" in model.background_trace_kwargs(fixed, source)[1]
+    irf_fit = model.compute_fit(handle, params, model.FitParams(n_exp=1), states,
+                                irf=irf_handle,
+                                irf_params=model.IRFParams(use=True, fit_background=True))
+    assert "used the IRF" in model.background_trace_kwargs(irf_fit, source)[1]
+    free = model.compute_fit(handle, params, model.FitParams(n_exp=2), states,
+                             irf_params=model.IRFParams(fit_background=True))
+    assert "another file" in model.background_trace_kwargs(free, "other.ptu")[1]
+    kwargs, reason = model.background_trace_kwargs(free, source)
+    duration = free.histogram.meta["acquisition_duration"]
+    assert reason is None and set(kwargs) == {"background_rate"}
+    assert kwargs["background_rate"] == pytest.approx(free.fit["background"] / duration)
+
+    fit = model.FitParams(prerise=True)
+    lt = model.LifetimeTraceParams(bintime=60.0, n_exp=1)
+    signal = model.compute_lifetime_trace(handle, params, fit, lt, irf_kwargs=kwargs)
+    assert signal.meta["prerise"] and not signal.meta["reconvolution"]
+    assert signal.meta["background_rate"] == kwargs["background_rate"]
+    payload = model.lifetime_trace_payload(signal, source, params, fit, lt)
+    parameters = payload.metadata["parameters"]
+    assert parameters["background_rate_per_s_and_bin"] == kwargs["background_rate"]
+    assert parameters["fit_window"]["prerise"] is True
+
+
+def test_period_fraction_is_a_warning_threshold():
+    options = model.FitOptions(period_fraction=0.8)
+    assert options.diagnostics()["period_fraction"] == 0.8
+    assert model.DIAGNOSTIC_DEFAULTS["period_fraction"] == 0.5
+    with pytest.raises(ValueError, match="period_fraction"):
+        model.FitOptions(period_fraction=-0.1).validate()

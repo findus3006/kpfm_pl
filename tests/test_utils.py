@@ -307,3 +307,15 @@ def test_image_shift_rejects_mismatched_shapes():
         image_shift(np.zeros((8, 8)), np.zeros((8, 9)))
     with pytest.raises(ValueError):
         image_shift(np.zeros((2, 8)), np.zeros((2, 8)))
+
+
+def test_prerise_mask_selects_bins_before_the_gap():
+    from kpfm_pl.utils import prerise_mask
+
+    t = np.array([-5.0, -2.5, -2.0, -1.0, 0.0, 3.0])
+    assert prerise_mask(t, 2.0).tolist() == [True, True, False, False, False, False]
+    assert prerise_mask(t, 0.0).tolist() == [True, True, True, True, False, False]
+    assert prerise_mask(t).tolist() == prerise_mask(t, 2.0).tolist()   # default gap 2
+    for bad in (-0.1, np.nan, np.inf):
+        with pytest.raises(ValueError, match="gap"):
+            prerise_mask(t, bad)

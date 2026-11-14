@@ -100,6 +100,7 @@ print(fit["tau_int"], fit["tau_int_err"])     # intensity-weighted mean lifetime
 print(fit["tau_amp"], fit["f_amp"], fit["f_int"])  # amplitude-weighted mean, A and intensity fractions
 print(fit["quality"]["bic"], fit["warnings"])  # compare n_exp by BIC; over-fitting warnings
 mle = ptu.fit_lifetime(states["on"], n_exp=2, weighting="mle")  # Poisson maximum likelihood
+free = ptu.fit_lifetime(states["on"], n_exp=2, fit_background=True, prerise=True)  # fitted offset + bins before the rise
 irf = ptu.fit_lifetime(ptu.lifetime_histogram(), n_exp=2, irf=PTU("irf.ptu"))  # IRF reconvolution
 
 lt = ptu.lifetime_trace(bintime=0.5, n_exp=1)  # Signal: fitted lifetime (ns) per time bin
@@ -222,7 +223,7 @@ jpks = pick_folder(r"D:\Measurements")               # all .jpk files below a ch
 | [`database`](src/kpfm_pl/database.py) | `build_database`, `filter_entries`, `add_entry`/`remove_entry`, JSON/CSV export | [database.md](docs/database.md) |
 | [`plotting`](src/kpfm_pl/plotting.py) | colormaps, `set_scaled_rcparams`, `plot_image`, `enable_zoom_pan`, `make_circle`, `crop_roi` | [plotting.md](docs/plotting.md) |
 | [`selector`](src/kpfm_pl/selector.py) | `InteractiveBoxSelector`, `SingleBoxSelector`, `DraggableCircle` | [plotting.md](docs/plotting.md) |
-| [`fitting`](src/kpfm_pl/fitting.py) | `MultiExpFit` (used by `PTU`; least squares or Poisson MLE, incomplete-decay correction), `IRFReconvolutionFit` (fit with a measured IRF; `prepare_irf`, `exp_kernel`, `irf_fwhm`), `poisson_chi_squared` (fit quality and BIC of photon counts), `poisson_deviance`, `fit_warnings` (signs of over-fitting), `mean_lifetime` (τ_int/τ_amp), `amplitude_fractions`, `intensity_fractions`; `gaussian2d`, `fit_gaussian2d`, `peak_power_density` for laser spot profiles | docstrings |
+| [`fitting`](src/kpfm_pl/fitting.py) | `MultiExpFit` (used by `PTU`; least squares or Poisson MLE, optional fitted offset, incomplete-decay correction), `IRFReconvolutionFit` (fit with a measured IRF; `prepare_irf`, `exp_kernel`, `irf_fwhm`), `poisson_chi_squared` (fit quality and BIC of photon counts), `poisson_deviance`, `fit_warnings` (signs of over-fitting), `mean_lifetime` (τ_int/τ_amp), `amplitude_fractions`, `intensity_fractions`; `gaussian2d`, `fit_gaussian2d`, `peak_power_density` for laser spot profiles | docstrings |
 | [`io`](src/kpfm_pl/io.py) | `pick_files`, `pick_folder` (tkinter dialogs), `sort_measurement_files` | docstrings |
 | [`utils`](src/kpfm_pl/utils.py) | smoothing, resampling, fit-window selection, AFM levelling, image shift, trigger points | docstrings |
 | [`core`](src/kpfm_pl/core.py) | `Signal`, `Image` | – |

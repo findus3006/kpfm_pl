@@ -265,3 +265,27 @@ def test_count_check_text_reports_failed_checks_only():
     assert "40%" in text and "at least 2 s" in text
     assert model.count_check_text({**check, "passed": True}) is None
     assert model.count_check_text(None) is None
+
+
+def test_flids_use_prerise_and_the_background_of_the_lifetime_fit(handle, tmp_path):
+    import dataclasses
+
+    trace_params = TraceParams(bintime=1.0)
+    params = model.FlidParams(method="both", prerise=True, prerise_gap=3.0, min_counts=0.0)
+    kwargs = {"background_rate": 0.01}
+    result = model.compute_flids(handle, trace_params, params, [ROI_A], irf_kwargs=kwargs)
+    entry = result.entries[0]
+    fitted = entry.traces["fit"]
+    assert fitted.meta["prerise"] and fitted.meta["prerise_gap_ns"] == 3.0
+    assert fitted.meta["background_rate"] == 0.01
+    assert "prerise" not in entry.traces["mean_arrival"].meta    # fits only
+    # exported as the background of the tail fits, not as an IRF
+    assert result.extra == {"background": {"background_rate": 0.01}}
+    payload = model.flid_payload(result, entry)
+    assert payload.metadata["parameters"]["background"] == {"background_rate": 0.01}
+    assert payload.metadata["parameters"]["irf"] is None
+    assert payload.metadata["parameters"]["flid"]["prerise"] is True
+    write_payload_csv(tmp_path / "flid.csv", payload)
+    # switching it off changes the per-bin lifetimes, so it is not a map-only setting
+    assert not params.same_lifetimes(dataclasses.replace(params, prerise=False))
+    assert model.FlidParams().prerise_kwargs() == {}

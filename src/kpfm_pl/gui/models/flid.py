@@ -70,7 +70,9 @@ class FlidParams:
 
     ``mode``/``fraction``/``smoothing``/``start``/``end`` are the FLID's own
     fit window (part of each decay that is fitted or averaged), ``method`` is
-    ``"fit"``, ``"mean_arrival"`` or ``"both"``. ``min_counts`` (0 disables),
+    ``"fit"``, ``"mean_arrival"`` or ``"both"``. ``prerise`` also fits the
+    bins more than ``prerise_gap`` ns before the histogram maximum (per-bin
+    tail fits only, not the mean arrival time). ``min_counts`` (0 disables),
     ``coverage`` and ``auto_bintime`` are the photon-count check of
     ``PTU.flid``.
     """
@@ -95,6 +97,8 @@ class FlidParams:
     min_counts: float = 100.0
     coverage: float = 0.9
     auto_bintime: bool = False
+    prerise: bool = False
+    prerise_gap: float = 2.0
 
     def lifetime_range(self) -> tuple[float, float] | None:
         if self.lifetime_max is None:
@@ -110,6 +114,12 @@ class FlidParams:
     def window_kwargs(self) -> dict[str, Any]:
         return {"mode": self.mode, "fraction": self.fraction, "smoothing": self.smoothing,
                 "start": self.start, "end": self.end}
+
+    def prerise_kwargs(self) -> dict[str, Any]:
+        """Pre-rise arguments of the per-bin fits (empty when switched off)."""
+        if not self.prerise:
+            return {}
+        return {"prerise": True, "prerise_gap": float(self.prerise_gap)}
 
     def methods(self) -> list[str]:
         """The per-bin lifetimes to compute, in display order."""
@@ -196,10 +206,14 @@ class FlidResult:
 
 
 def irf_description(irf_kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Export-friendly summary of per-bin IRF settings (the reader becomes its path)."""
+    """Export-friendly summary of per-bin IRF/background settings.
+
+    The IRF reader becomes its path (``source``); settings without an IRF
+    (the background rate of the tail fits) are returned as they are.
+    """
     out = {k: v for k, v in irf_kwargs.items() if k != "irf"}
-    reader = irf_kwargs.get("irf")
-    out["source"] = str(getattr(reader, "filepath", ""))
+    if "irf" in irf_kwargs:
+        out["source"] = str(getattr(irf_kwargs["irf"], "filepath", ""))
     return out
 
 
@@ -304,8 +318,10 @@ def compute_flids(handle: LoadedFile, trace_params: TraceParams, params: FlidPar
     aborts the computation. ``options`` are the advanced fit settings of the
     per-bin fits. A failed photon-count check is not warned about by the
     backend; :func:`count_check_text` of ``entry.count_check`` gives the
-    advice per ROI. ``irf_kwargs`` (see ``models.ptu.irf_trace_kwargs``)
-    switches the per-bin fits to IRF reconvolution.
+    advice per ROI. ``irf_kwargs`` are extra per-bin fit arguments from the
+    last lifetime fit: ``models.ptu.irf_trace_kwargs`` switches the per-bin
+    fits to IRF reconvolution, ``models.ptu.background_trace_kwargs`` sets
+    the background of the tail fits.
     """
     lifetime_range = params.lifetime_range()
     methods = params.methods()
@@ -339,7 +355,8 @@ def compute_flids(handle: LoadedFile, trace_params: TraceParams, params: FlidPar
         result = FlidResult([], [], trace, params, lifetime_range, intensity_range,
                             str(handle.path), fallback, options=options)
         if irf_kwargs:
-            result.extra["irf"] = irf_description(irf_kwargs)
+            key = "irf" if "irf" in irf_kwargs else "background"
+            result.extra[key] = irf_description(irf_kwargs)
         for k, (i, roi) in enumerate(selected):
             parts = range(k * len(methods), (k + 1) * len(methods))
             traces: dict[str, Signal] = {}
@@ -353,7 +370,7 @@ def compute_flids(handle: LoadedFile, trace_params: TraceParams, params: FlidPar
                             traces[method] = ptu.lifetime_trace(
                                 roi=roi, n_exp=params.n_exp, bins=params.bins,
                                 progress=tracker.part(part), **common, **fit_kwargs,
-                                **(irf_kwargs or {}))
+                                **params.prerise_kwargs(), **(irf_kwargs or {}))
                         else:
                             traces[method] = ptu.arrival_time_trace(
                                 roi=roi, truncation_correction=params.truncation_correction,
@@ -397,7 +414,8 @@ def _metadata(result: FlidResult, entry: FlidEntry, analysis: str) -> dict[str, 
         parameters={"time_trace": asdict(result.trace.params),
                     "flid": asdict(result.params),
                     "fit_options": asdict(result.options),
-                    "irf": result.extra.get("irf")},
+                    "irf": result.extra.get("irf"),
+                    "background": result.extra.get("background")},
         results={"region": result.entry_name(entry),
                  "roi_number": (None if result.params.region == "window"
                                 else entry.index + 1),

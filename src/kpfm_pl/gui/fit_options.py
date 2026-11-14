@@ -53,7 +53,7 @@ _COLUMNS = (
 
 
 #: FitOptions fractions that the dialog shows in percent.
-_PERCENT_FIELDS = ("min_fraction", "merge_rel", "bound_rel")
+_PERCENT_FIELDS = ("min_fraction", "merge_rel", "bound_rel", "period_fraction")
 
 
 def describe_options(options: FitOptions) -> str:
@@ -189,6 +189,13 @@ class FitOptionsDialog(QDialog):
                     tooltip="Warn when a fitted τ or A ends within this percentage of one "
                             "of its bounds (Advanced bounds above): the fit wants to go "
                             "beyond it.")
+        f.add_float("period_fraction", "τ vs. background above", 50.0, minimum=0.0,
+                    maximum=1000.0, step=5.0, decimals=0, suffix=" % of the period",
+                    tooltip="Only with a fitted background: warn when a lifetime exceeds "
+                            "this percentage of the laser period. Such a slow decay is "
+                            "nearly flat within one period (at 50 % it only falls to "
+                            "14 %), so it and the constant background are barely "
+                            "separable and both become uncertain.")
         f.changed.connect(self._update_fields)
         layout.addWidget(f)
 

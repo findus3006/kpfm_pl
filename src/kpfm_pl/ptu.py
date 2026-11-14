@@ -26,7 +26,13 @@ from .fitting import (
     poisson_chi_squared,
     prepare_irf,
 )
-from .utils import TriggerPoint, fit_window_mask, lifetime_from_truncated_mean, trigger_points
+from .utils import (
+    TriggerPoint,
+    fit_window_mask,
+    lifetime_from_truncated_mean,
+    prerise_mask,
+    trigger_points,
+)
 
 __all__ = ["PTU", "flid_map"]
 
@@ -538,6 +544,53 @@ class PTU:
         mask[seam // bins] = False
         return mask
 
+    def _beyond_period(self) -> np.ndarray:
+        """Lifetime bins that are not fully inside one laser period.
+
+        Bins past the period never fill, and if the period is not a whole
+        number of bins its last bin is only partly covered (after a lifetime
+        shift that is :attr:`lifetime_seam_bin`). The same holds for the bins
+        after the last one that holds a photon anywhere in the file: there
+        the real laser period is shorter than the header says (seen in
+        legacy files whose sync only ran while the laser was on). Fits of
+        the bins before the rise rely on the period and leave all of them
+        out; as empty bins they would also pull a fitted background down.
+        """
+        period_bins = self.rep_time / self.resolution
+        wrap = int(np.ceil(period_bins - 1e-6))
+        out = np.arange(self.n_lt_bins) >= wrap
+        if wrap > self.n_lt_bins:
+            return out                  # window shorter than the period: nothing wraps
+        if period_bins - (wrap - 1) < 0.99:
+            seam = self.lifetime_seam_bin if self.lifetime_seam_bin is not None else wrap - 1
+            out[seam] = True
+        raw = getattr(self, "_raw_dtime", None)
+        if raw is not None and len(raw):
+            # Raw bins that never filled, moved along with a lifetime shift.
+            empty = np.arange(int(np.max(raw)) + 1, wrap)
+            shift_bins = int(round(self.lifetime_shift_ns * 1e-9 / self.resolution))
+            out[(empty - shift_bins) % wrap] = True
+        return out
+
+    def _prerise_bins(self, t_ns: np.ndarray, window: np.ndarray, gap: float) -> np.ndarray:
+        """Bins before the rising edge that are fitted together with the tail.
+
+        ``t_ns`` is the lifetime axis with the histogram maximum at 0,
+        ``window`` the tail-fit window (its bins are not counted twice) and
+        ``gap`` the distance in ns the region keeps from the maximum, see
+        :func:`~kpfm_pl.utils.prerise_mask`.
+        """
+        if self._period_ns() is None:
+            raise ValueError("Fitting the bins before the rise needs the laser period.")
+        pre = prerise_mask(t_ns, gap) & ~np.asarray(window, dtype=bool)
+        if pre.size == self.n_lt_bins:
+            pre &= ~self._beyond_period()
+        if not pre.any():
+            raise ValueError(
+                f"No lifetime bins lie more than {gap:g} ns before the histogram maximum; "
+                "there is nothing before the rise to fit (prerise).")
+        return pre
+
     def _period_ns(self) -> float | None:
         """Laser period in ns for the incomplete-decay correction (``None`` if unknown)."""
         rep_time = getattr(self, "rep_time", None)
@@ -870,6 +923,8 @@ class PTU:
         end: float | None = None, weighting: str = "none",
         decay_correction: bool = True,
         irf: dict[str, Any] | None = None,
+        prerise: bool = False, prerise_gap: float = 2.0,
+        background_rate: float | None = None,
         progress: Callable[[int, int], Any] | None = None,
         **fit_kwargs,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -879,7 +934,8 @@ class PTU:
         decay of earlier pulses when ``decay_correction``, see
         :class:`~kpfm_pl.fitting.MultiExpFit`'s ``period``), ``amps_fit`` the
         fitted ones. ``irf`` (see :meth:`lifetime_trace`) switches to the
-        reconvolution fit.
+        reconvolution fit. ``prerise``/``prerise_gap`` and ``background_rate``
+        (tail fits) are described in :meth:`lifetime_trace`.
         """
         if irf is not None:
             return self._fit_time_bin_lifetimes_irf(
@@ -894,6 +950,12 @@ class PTU:
         # remain NaN so their positions stay aligned with ``time``.
         lt_ns, t0_ns, mask = self._lifetime_window(
             matrix[selected, :], mode, fraction, smoothing, start, end)
+        pre = np.zeros(mask.shape, dtype=bool)
+        if prerise:
+            pre = self._prerise_bins(lt_ns - t0_ns, mask, prerise_gap)
+        if background_rate is not None and (not np.isfinite(background_rate)
+                                            or background_rate < 0):
+            raise ValueError("background_rate must be a finite, non-negative number or None.")
 
         group_starts = np.arange(0, matrix.shape[1], bins)
         if group_starts.size < 2:
@@ -901,7 +963,19 @@ class PTU:
         group_sizes = np.minimum(bins, matrix.shape[1] - group_starts)
         binned_lt = np.add.reduceat(lt_ns, group_starts) / group_sizes
         mask = self._drop_seam(np.add.reduceat(mask, group_starts) > 0, bins)
-        t_fit = (binned_lt - t0_ns)[mask]
+        t_rel = binned_lt - t0_ns
+        if prerise:
+            # A group lies before the rise only if all its bins do, and the
+            # wrapped times need groups that are fully inside the period.
+            whole = np.add.reduceat(pre.astype(int), group_starts) == group_sizes
+            outside = np.add.reduceat(self._beyond_period().astype(int), group_starts) > 0
+            pre = whole & ~mask & ~outside
+            if not pre.any():
+                raise ValueError("bins leaves no whole lifetime group before the rise.")
+            mask = (mask & ~outside) | pre
+            # Bins before the rise continue the decay of the previous pulse.
+            t_rel = np.where(pre, t_rel + self._period_ns(), t_rel)
+        t_fit = t_rel[mask]
         if t_fit.size < 2:
             raise ValueError("The selected lifetime fit window contains fewer than two bins.")
         binned_matrix = np.add.reduceat(matrix, group_starts, axis=1)
@@ -927,7 +1001,10 @@ class PTU:
             y_fit = y_fit / ymax
             # The offset must be in the units of y_fit: counts / (norm * ymax).
             scale = norm * ymax
-            offset = self.dark_counts * bintime / n_binned / scale
+            if background_rate is not None:
+                offset = float(background_rate) * bintime * bins / scale
+            else:
+                offset = self.dark_counts * bintime / n_binned / scale
             bin_kwargs = _poisson_weights(weighting, lt_bin[mask], scale, fit_kwargs)
             fit = MultiExpFit(t_fit, y_fit, n_exp, offset, period=period_ns, **bin_kwargs)
             if fit.success:
@@ -1053,6 +1130,7 @@ class PTU:
                        background_rate: float | None = None,
                        scatter_fraction: float | None = None,
                        irf_background: float | str | None = "auto",
+                       prerise: bool = False, prerise_gap: float = 2.0,
                        progress: Callable[[int, int], Any] | None = None,
                        **fit_kwargs) -> Signal:
         """Return mean fitted lifetime versus acquisition time.
@@ -1093,6 +1171,14 @@ class PTU:
         fit; default: the dark counts) and ``scatter_fraction`` the scattered
         light as a fraction of each bin's photons (e.g. ``scatter /
         total counts``; default 0).
+
+        Without ``irf`` (tail fits), ``prerise`` also fits the bins that lie
+        more than ``prerise_gap`` ns before the histogram maximum, at their
+        time since the previous pulse, as in :meth:`fit_lifetime`. The
+        constant offset of a bin is never fitted (too few photons): it is
+        ``background_rate`` (counts per second and lifetime bin, e.g. from
+        ``fit_lifetime(..., fit_background=True)`` of the summed histogram)
+        or, by default, the dark counts.
         """
         self._validate_fit_args(n_exp, bins, weighting, fit_kwargs, mean_lifetime)
         irf_options = None
@@ -1109,9 +1195,11 @@ class PTU:
         taus, amps, amps_fit = self._fit_time_bin_lifetimes(
             sel, n_exp=n_exp, bins=bins, mode=mode, fraction=fraction,
             smoothing=smoothing, start=start, end=end, weighting=weighting,
-            decay_correction=decay_correction, irf=irf_options, progress=progress,
+            decay_correction=decay_correction, irf=irf_options, prerise=prerise,
+            prerise_gap=prerise_gap, background_rate=background_rate, progress=progress,
             **fit_kwargs,
         )
+        tail_prerise = bool(prerise) and irf is None
         return Signal(
             sel["time"], _weighted_mean_lifetime(taus, amps, mean_lifetime),
             label=f"{self.filepath.stem} mean lifetime",
@@ -1120,7 +1208,10 @@ class PTU:
                   "taus": taus, "amplitudes": amps, "amplitudes_fit": amps_fit,
                   "weighting": weighting, "mean_lifetime": mean_lifetime,
                   "decay_correction": bool(decay_correction),
-                  "reconvolution": irf is not None, "irf_shift_ns": irf_shift},
+                  "reconvolution": irf is not None, "irf_shift_ns": irf_shift,
+                  "prerise": tail_prerise,
+                  "prerise_gap_ns": float(prerise_gap) if tail_prerise else None,
+                  "background_rate": background_rate},
         )
 
     def arrival_time_trace(self, roi: dict[str, float] | None = None, *,
@@ -1231,6 +1322,7 @@ class PTU:
              irf: PTU | Signal | np.ndarray | None = None,
              irf_shift: float | None = None, background_rate: float | None = None,
              scatter_fraction: float | None = None,
+             prerise: bool = False, prerise_gap: float = 2.0,
              progress: Callable[[int, int], Any] | None = None,
              **fit_kwargs) -> Image | list[Image]:
         """Compute a FLID (Fluorescence-Lifetime-Intensity-Distribution) map.
@@ -1303,7 +1395,11 @@ class PTU:
             laser pulses (default), see :meth:`fit_lifetime`.
         irf, irf_shift, background_rate, scatter_fraction :
             Per-bin IRF reconvolution, see :meth:`lifetime_trace` (``method="fit"``
-            only).
+            only). ``background_rate`` also sets the constant offset of the
+            per-bin tail fits.
+        prerise, prerise_gap :
+            Also fit the bins before the rise in the per-bin tail fits, see
+            :meth:`lifetime_trace` (``method="fit"`` only).
         progress :
             Optional callback ``progress(done, total)``, called before each
             per-bin fit and once with ``done == total`` at the end (e.g. to
@@ -1334,6 +1430,7 @@ class PTU:
                                         irf=irf, irf_shift=irf_shift,
                                         background_rate=background_rate,
                                         scatter_fraction=scatter_fraction,
+                                        prerise=prerise, prerise_gap=prerise_gap,
                                         **common, **fit_kwargs)
             done = "fitted"
         elif method == "mean_arrival":
@@ -1400,6 +1497,7 @@ class PTU:
                      fit_background: bool = False, fit_scatter: bool = False,
                      irf_shift: float | None = None,
                      irf_background: float | str | None = "auto",
+                     prerise: bool = False, prerise_gap: float = 2.0,
                      **fit_kwargs) -> dict[str, Any]:
         """Fit a lifetime ``histogram`` with ``n_exp`` exponentials.
 
@@ -1440,6 +1538,24 @@ class PTU:
         :func:`~kpfm_pl.fitting.fit_warnings`; ``diagnostics`` overrides its
         thresholds (e.g. ``{"min_fraction": 0.02}``).
 
+        **Background and the bins before the rise (tail fit).** By default
+        the constant offset is fixed at the dark counts. ``fit_background``
+        fits it instead (``out["background"]`` ± ``out["background_err"]``,
+        counts per bin; one more parameter in the BIC), for a pedestal the
+        dark counts do not cover (afterpulsing, stray light, emission much
+        slower than the laser period). ``prerise`` also fits the bins that
+        lie more than ``prerise_gap`` ns before the histogram maximum. With
+        periodic excitation they hold the tail of the previous pulse, so
+        they enter the fit at their time since that pulse, ``t + T``
+        (``out["t_model"]``; ``out["t_fit"]`` keeps the plot position), and
+        extend the observed decay to the whole laser period. The first
+        ``out["prerise_points"]`` fitted points are those bins. ``prerise``
+        leaves out lifetime bins that are not fully inside the period. A
+        fitted background and a lifetime above half the laser period are
+        barely separable, which ``out["warnings"]`` reports
+        (``diagnostics={"period_fraction": ...}``). ``prerise`` is not used
+        with ``irf``: the reconvolution fits the whole period anyway.
+
         **IRF reconvolution.** With ``irf`` (a :class:`PTU` of the recorded
         instrument response, its lifetime histogram as :class:`Signal`, or an
         array on the same lifetime bins) the model is convolved with the IRF
@@ -1455,7 +1571,8 @@ class PTU:
         like the IRF). ``decay_correction`` selects the periodic kernel (decay
         of all earlier pulses) or a single pulse; the amplitudes are per-pulse
         values of the IRF-free decay. ``irf_background`` is subtracted from
-        the IRF (``"auto"``: its median). ``normalize`` is not available.
+        the IRF (``"auto"``: the mean of its floor bins). ``normalize`` is not
+        available.
         The result adds ``shift_ns``/``shift_err_ns``, ``background``,
         ``scatter`` (with errors), ``irf_fwhm_ns``, ``irf_shifted`` and
         ``full_curve`` (on ``irf_t_ns``, the period's time axis) and
@@ -1481,6 +1598,17 @@ class PTU:
                                smoothing=smoothing, start=start, end=end)
         if y.size == self.n_lt_bins:
             mask = self._drop_seam(mask)
+            if prerise:
+                # The wrapped times rely on the period: keep only bins fully inside it.
+                mask = mask & ~self._beyond_period()
+        tail = mask
+        pre = np.zeros(y.size, dtype=bool)
+        t_model = np.asarray(t_ns, dtype=float)
+        if prerise:
+            # Bins before the rise continue the decay of the previous pulse.
+            pre = self._prerise_bins(t_model, tail, prerise_gap)
+            t_model = np.where(pre, t_model + self._period_ns(), t_model)
+            mask = tail | pre
 
         t_fit, y_fit = t_ns[mask], y[mask]
         norm = 1.0
@@ -1490,18 +1618,25 @@ class PTU:
         offset = self._dark_offset(histogram) / norm
 
         fit_kwargs = _poisson_weights(weighting, y[mask], norm, fit_kwargs)
-        fit = MultiExpFit(t_fit, y_fit, n_exp, offset,
+        fit = MultiExpFit(t_model[mask], y_fit, n_exp, offset,
                           period=self._period_ns() if decay_correction else None,
-                          **fit_kwargs)
+                          fit_offset=fit_background, **fit_kwargs)
         out = fit.to_dict()
-        self._finish_fit(out, fit, y[mask], norm, 2 * n_exp, weighting=weighting,
-                         diagnostics=diagnostics, mean_lifetime=mean_lifetime,
-                         decay_correction=decay_correction)
+        self._finish_fit(out, fit, y[mask], norm, 2 * n_exp + int(bool(fit_background)),
+                         weighting=weighting, diagnostics=diagnostics,
+                         mean_lifetime=mean_lifetime, decay_correction=decay_correction,
+                         period=self._period_ns())
         seam = self.lifetime_seam_bin if y.size == self.n_lt_bins else None
         out.update({"shifted_histogram_x": t_ns, "t_fit": t_fit, "y_fit": y_fit,
-                    "left_bound_ns": float(t_fit[0]), "weighting": weighting,
+                    "t_model": t_model[mask],
+                    "left_bound_ns": float(t_ns[tail][0]), "weighting": weighting,
                     "lifetime_shift_ns": self.lifetime_shift_ns,
-                    "seam_ns": None if seam is None else float(t_ns[seam])})
+                    "seam_ns": None if seam is None else float(t_ns[seam]),
+                    "fit_background": bool(fit_background),
+                    "background": float(out.get("offset", offset)) * norm,
+                    "background_err": float(out.get("offset_err", 0.0)) * norm,
+                    "prerise": bool(prerise), "prerise_points": int(np.count_nonzero(pre)),
+                    "prerise_gap_ns": float(prerise_gap) if prerise else None})
         return out
 
     def _dark_offset(self, histogram: Signal) -> float:
@@ -1517,8 +1652,13 @@ class PTU:
     @staticmethod
     def _finish_fit(out: dict[str, Any], fit: MultiExpFit, counts: np.ndarray, norm: float,
                     n_params: int, *, weighting: str, diagnostics: dict[str, float] | None,
-                    mean_lifetime: str, decay_correction: bool) -> None:
-        """Add the chosen mean lifetime, Poisson quality, BIC and warnings to ``out``."""
+                    mean_lifetime: str, decay_correction: bool,
+                    period: float | None = None) -> None:
+        """Add the chosen mean lifetime, Poisson quality, BIC and warnings to ``out``.
+
+        ``period`` (ns) is the laser period for the warning about a fitted
+        background next to a long lifetime (also without ``decay_correction``).
+        """
         key = "tau_int" if mean_lifetime == "intensity" else "tau_amp"
         if key in out:
             out["tau_mean"], out["tau_mean_err"] = out[key], out[f"{key}_err"]
@@ -1530,7 +1670,10 @@ class PTU:
                                     bic_from="deviance" if weighting == "mle"
                                     else "chi_squared"))
         converged = out.get("success") and "curve" in out
-        out["warnings"] = fit.diagnostics(**(diagnostics or {})) if converged else []
+        thresholds = dict(diagnostics or {})
+        if period is not None:
+            thresholds.setdefault("period", period)
+        out["warnings"] = fit.diagnostics(**thresholds) if converged else []
 
     # ---------------------------------------------------------- IRF reconvolution
     def irf_histogram(self, irf: PTU | Signal | np.ndarray) -> np.ndarray:
@@ -1612,7 +1755,7 @@ class PTU:
         out = fit.to_dict()
         self._finish_fit(out, fit, y_p[mask], 1.0, fit._n_params(), weighting=weighting,
                          diagnostics=diagnostics, mean_lifetime=mean_lifetime,
-                         decay_correction=decay_correction)
+                         decay_correction=decay_correction, period=self._period_ns())
         out.update({"shifted_histogram_x": t_ns, "t_fit": t_p[mask], "y_fit": y_p[mask],
                     "left_bound_ns": float(t_p[mask][0]), "weighting": weighting,
                     "lifetime_shift_ns": self.lifetime_shift_ns, "irf_t_ns": t_p,

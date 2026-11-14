@@ -107,7 +107,10 @@ the convolution with the IRF becomes *circular* over one period. At
 `T = 100 ns` this is a 0.7 % effect for `τ = 20 ns` and 16 % for `τ = 50 ns`.
 A side effect matters in practice: with an incomplete decay the bins before
 the rising edge contain fluorescence from the previous pulse, so the
-background `B` can no longer be read off those bins [5].
+background `B` can no longer be read off those bins [5]. The reconvolution
+fit covers them because it fits the whole period; the tail fit can include
+them with `prerise=True` (since v1.8.0, see
+[ptu.md](ptu.md#background-and-the-bins-before-the-rise)).
 
 ## 3. Fitting statistics
 
@@ -216,7 +219,11 @@ Unlike in a tail fit, none of these depends on where `t = 0` is put.
 Already available (v1.5.0): the Poisson MLE (`weighting="mle"`), the BIC of
 every lifetime fit with the ΔBIC against the previous fit in the GUI, the
 over-fitting warnings, and the incomplete-decay correction of the tail fit
-(`A = A_fit·(1 − exp(−T/τ))`, section 2).
+(`A = A_fit·(1 − exp(−T/τ))`, section 2). Since v1.8.0 the tail fit can
+also fit its background (`fit_background=True`) and the bins before the
+rise (`prerise=True`), and every fit with a fitted background warns about
+lifetimes above half the laser period (the `B` ↔ `τ ≳ T` correlation of
+section 7).
 
 Implemented in v1.7.0 (`fitting.IRFReconvolutionFit`, `PTU.fit_lifetime(irf=...)`;
 verified on synthetic data: kernel against brute-force integration, unbiased

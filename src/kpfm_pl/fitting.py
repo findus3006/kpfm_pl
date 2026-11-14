@@ -10,9 +10,9 @@ The model is
     f(t) = \\sum_{i=1}^{n} A_i\\, e^{-t/\\tau_i} + C
 
 Besides (weighted) least squares, :class:`MultiExpFit` offers a Poisson
-maximum-likelihood fit (``statistic="poisson_mle"``) and, for periodic
-excitation, the correction of the amplitudes for the incomplete decay of
-earlier pulses (``period``).
+maximum-likelihood fit (``statistic="poisson_mle"``), a fitted offset
+(``fit_offset``) and, for periodic excitation, the correction of the
+amplitudes for the incomplete decay of earlier pulses (``period``).
 """
 
 from __future__ import annotations
@@ -99,17 +99,28 @@ class MultiExpFit:
     Parameters
     ----------
     t, y :
-        Time and intensity data.
+        Time and intensity data. ``t`` need not be sorted: with periodic
+        excitation the bins before the rising edge can be appended with
+        their time since the previous pulse (``t + period``).
     n_exp :
         Number of exponential components.
     offset :
-        Constant offset ``C`` added to the model (e.g. dark counts).
+        Constant offset ``C`` added to the model (e.g. dark counts); with
+        ``fit_offset`` only the lower limit of its starting value.
+    fit_offset :
+        Fit the offset ``C >= 0`` as an extra, last parameter instead of
+        fixing it (default ``False``). It starts at the larger of ``offset``
+        and the 5th percentile of ``y``. A constant offset and a lifetime
+        approaching the laser period are barely separable, see
+        :func:`fit_warnings`.
     p0 :
-        Optional initial guess ``[A_1..A_n, tau_1..tau_n]``. Auto-generated when
-        ``None``; individual ``NaN`` entries are auto-generated too. Automatic
-        guesses are clipped into ``bounds``, explicit ones are used as given.
+        Optional initial guess ``[A_1..A_n, tau_1..tau_n]`` (plus ``C`` with
+        ``fit_offset``; it may be left out). Auto-generated when ``None``;
+        individual ``NaN`` entries are auto-generated too. Automatic guesses
+        are clipped into ``bounds``, explicit ones are used as given.
     bounds :
-        Optional ``(lower, upper)`` arrays. Auto-generated when ``None``.
+        Optional ``(lower, upper)`` arrays, laid out like ``p0``.
+        Auto-generated when ``None``.
     loss, f_scale :
         Passed through to :func:`scipy.optimize.least_squares` for robust losses.
     weights :
@@ -156,11 +167,13 @@ class MultiExpFit:
         statistic: str = "least_squares",
         count_scale: float = 1.0,
         period: float | None = None,
+        fit_offset: bool = False,
     ) -> None:
         self.t = np.asarray(t, dtype=float)
         self.y = np.asarray(y, dtype=float)
         self.n_exp = int(n_exp)
         self.offset = float(offset)
+        self.fit_offset = bool(fit_offset)
         self.loss = loss
         self.f_scale = f_scale
         self.weights = None if weights is None else np.asarray(weights, dtype=float)
@@ -192,7 +205,11 @@ class MultiExpFit:
         t = np.asarray(t, dtype=float)
         n = self.n_exp
         A, tau = params[:n], params[n:2 * n]
-        return np.exp(-t[:, None] / tau[None, :]) @ A + self.offset
+        return np.exp(-t[:, None] / tau[None, :]) @ A + self._offset_of(params)
+
+    def _offset_of(self, params: np.ndarray) -> float:
+        """The offset ``C``: the last parameter when fitted, else the fixed one."""
+        return float(params[2 * self.n_exp]) if self.fit_offset else self.offset
 
     def _residuals(self, params: np.ndarray, t: np.ndarray, y: np.ndarray) -> np.ndarray:
         r = self.model(t, params) - y
@@ -208,7 +225,10 @@ class MultiExpFit:
         A, tau = params[:n], params[n:2 * n]
         exp_terms = np.exp(-t[:, None] / tau[None, :])
         d_tau = (t[:, None] / tau[None, :] ** 2) * A[None, :] * exp_terms
-        jac = np.column_stack([exp_terms, d_tau])
+        columns = [exp_terms, d_tau]
+        if self.fit_offset:
+            columns.append(np.ones(t.size))
+        jac = np.column_stack(columns)
         if self.weights is not None:
             jac = jac * self.weights[:, None]
         if self.constrain_sum_A:
@@ -221,12 +241,13 @@ class MultiExpFit:
     # -- hooks for subclasses with extra parameters -----------------------------
     def _n_params(self) -> int:
         """Number of fitted parameters (``[A_1..A_n, tau_1..tau_n]`` plus extras)."""
-        return 2 * self.n_exp
+        return 2 * self.n_exp + int(self.fit_offset)
 
     def _param_names(self) -> list[str]:
         """Display names of the fitted parameters (used in warnings)."""
         n = self.n_exp
-        return [f"A{i + 1}" for i in range(n)] + [f"τ{i + 1}" for i in range(n)]
+        names = [f"A{i + 1}" for i in range(n)] + [f"τ{i + 1}" for i in range(n)]
+        return names + (["offset C"] if self.fit_offset else [])
 
     def _complete(self, values, defaults: np.ndarray) -> np.ndarray:
         """Guesses or bounds for all parameters.
@@ -302,7 +323,12 @@ class MultiExpFit:
     def _size_floor(self, size: np.ndarray) -> np.ndarray:
         """Scale of each parameter for the MLE convergence test (zeros allowed)."""
         n = self.n_exp
-        return np.repeat([np.max(size[:n]), np.max(size[n:2 * n])], n)
+        floor = np.repeat([np.max(size[:n]), np.max(size[n:2 * n])], n)
+        if self.fit_offset:
+            # Absolute resolution of the offset: 1e-3 of the largest value
+            # (the test multiplies the floor by 1e-6).
+            floor = np.append(floor, max(float(np.max(np.abs(self.y))), 1e-300) * 1e3)
+        return floor
 
     def _require_result(self):
         """Return the optimizer result or raise a clear error if the fit failed.
@@ -336,18 +362,26 @@ class MultiExpFit:
         return p0
 
     def _default_p0(self) -> np.ndarray:
-        A_guess = np.full(self.n_exp, np.max(self.y) / self.n_exp)
-        t_lower = (self.t[1] - self.t[0]) * 2
-        tail_thresh = np.mean(self.y[-30:]) + 2 * np.std(self.y[-30:])
-        valid = np.where(self.y > tail_thresh)[0]
-        t_upper = self.t[valid[-1]] if len(valid) else self.t.max()
+        # Sorted by time, so a wrapped (unsorted) time axis gives the same guess.
+        order = np.argsort(self.t, kind="stable")
+        t, y = self.t[order], self.y[order]
+        A_guess = np.full(self.n_exp, np.max(y) / self.n_exp)
+        t_lower = (t[1] - t[0]) * 2
+        tail_thresh = np.mean(y[-30:]) + 2 * np.std(y[-30:])
+        valid = np.where(y > tail_thresh)[0]
+        t_upper = t[valid[-1]] if len(valid) else t.max()
         tau_guess = np.logspace(np.log10(t_lower), np.log10(max(t_upper, t_lower * 2)), self.n_exp)
-        return np.concatenate([A_guess, tau_guess])
+        guess = np.concatenate([A_guess, tau_guess])
+        if self.fit_offset:
+            guess = np.append(guess, max(self.offset, float(np.percentile(y, 5)), 0.0))
+        return guess
 
     def _default_bounds(self) -> tuple[np.ndarray, np.ndarray]:
         upper_A = np.ones(self.n_exp) if self.constrain_sum_A else np.full(self.n_exp, np.inf)
         lower = np.concatenate([np.zeros(self.n_exp), np.full(self.n_exp, 1e-10)])
         upper = np.concatenate([upper_A, np.full(self.n_exp, np.inf)])
+        if self.fit_offset:
+            lower, upper = np.append(lower, 0.0), np.append(upper, np.inf)
         return lower, upper
 
     # -- accessors -------------------------------------------------------------
@@ -373,6 +407,15 @@ class MultiExpFit:
         n = self.n_exp
         A_fit, tau = params[:n], params[n:2 * n]
         return {"A": A_fit * self._period_factor(tau), "tau": tau, "A_fit": A_fit}
+
+    def offset_value(self) -> tuple[float, float]:
+        """The offset ``C`` and its standard error (0 when the offset is fixed)."""
+        if not self.fit_offset:
+            return self.offset, 0.0
+        index = 2 * self.n_exp
+        variance = float(self.covariance()[index, index])
+        error = float(np.sqrt(variance)) if variance >= 0 else float("nan")
+        return float(self._require_result().x[index]), error
 
     def curve(self, t: np.ndarray | None = None) -> np.ndarray:
         """Evaluate the fitted model (defaults to the fitting grid)."""
@@ -433,10 +476,11 @@ class MultiExpFit:
         p = self.parameters()
         tau, A_fit = np.asarray(p["tau"], dtype=float), np.asarray(p["A_fit"], dtype=float)
         n = self.n_exp
-        jac = np.eye(2 * n)
+        jac = np.eye(cov.shape[0])      # extra parameters (offset) pass unchanged
         jac[:n, :n] = np.diag(self._period_factor(tau))
         # d/dtau of (1 - exp(-T/tau)) = -exp(-T/tau) * T / tau^2
-        jac[:n, n:] = np.diag(-A_fit * np.exp(-self.period / tau) * self.period / tau ** 2)
+        jac[:n, n:2 * n] = np.diag(-A_fit * np.exp(-self.period / tau)
+                                   * self.period / tau ** 2)
         return jac @ cov @ jac.T
 
     def _values(self, corrected: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -521,10 +565,14 @@ class MultiExpFit:
     def diagnostics(self, **thresholds: float) -> list[str]:
         """Warnings about a probably over-parameterised fit, see :func:`fit_warnings`.
 
-        Checks the per-pulse amplitudes and lifetimes (with their errors) and
-        whether a fitted parameter ended at one of the fit's bounds.
-        ``thresholds`` are forwarded to :func:`fit_warnings`.
+        Checks the per-pulse amplitudes and lifetimes (with their errors),
+        whether a fitted parameter ended at one of the fit's bounds and, with
+        a fitted offset, whether a lifetime is too long to be told apart from
+        it. ``thresholds`` are forwarded to :func:`fit_warnings`; ``period``
+        and ``free_offset`` default to this fit's.
         """
+        thresholds.setdefault("period", self.period)
+        thresholds.setdefault("free_offset", self.fit_offset)
         p = self.parameters()
         errors = np.sqrt(np.clip(np.diag(self.corrected_covariance()), 0.0, None))
         n = self.n_exp
@@ -542,8 +590,9 @@ class MultiExpFit:
         terms = [rf"{a:.{precision}f} e^{{-t/{tau:.{precision}f}\,\mathrm{{ns}}}}"
                  for a, tau in zip(p["A_fit"], p["tau"])]
         label = " + ".join(terms)
-        if abs(self.offset) > 1e-12:
-            label += rf" + {self.offset:.{precision}f}"
+        offset = self.offset_value()[0]
+        if abs(offset) > 1e-12:
+            label += rf" + {offset:.{precision}f}"
         return r"$f(t) = " + label + r"$"
 
     def to_dict(self) -> dict[str, Any]:
@@ -558,9 +607,12 @@ class MultiExpFit:
         ``f_amp_err``/``f_int_err`` (:meth:`fractions`). These are per-pulse
         values (see ``period``); ``A_fit``/``A_fit_err``/``tau_int_fit``/
         ``tau_amp_fit`` are the uncorrected values of the fitted curve.
+        ``offset``/``offset_err`` are the constant offset and its standard
+        error (0 unless ``fit_offset``).
         """
         params = self.parameters()
         n = self.n_exp
+        offset, offset_err = self.offset_value()
         errors = np.sqrt(np.clip(np.diag(self.corrected_covariance()), 0.0, None))
         fit_errors = np.sqrt(np.clip(np.diag(self.covariance()), 0.0, None))
         tau_int, tau_int_err = self.mean_lifetime("intensity")
@@ -586,7 +638,9 @@ class MultiExpFit:
             "tau_amp_fit": self.mean_lifetime("amplitude", corrected=False)[0],
             "period": self.period,
             "statistic": self.statistic,
-            "offset": self.offset,
+            "offset": offset,
+            "offset_err": offset_err,
+            "fit_offset": self.fit_offset,
             "curve": self.curve(),
             "quality": self.quality(),
             "label": self.legend_label(),
@@ -816,6 +870,19 @@ class IRFReconvolutionFit(MultiExpFit):
         names = {"shift": "IRF shift", "background": "background B", "scatter": "scatter s"}
         return super()._param_names() + [names[e] for e in self._extras()]
 
+    def _offset_of(self, params: np.ndarray) -> float:
+        return float(self._unpack(params)["background"])
+
+    def offset_value(self) -> tuple[float, float]:
+        """The background ``B`` and its standard error (0 when it is fixed)."""
+        return self.extras()["background"]
+
+    def diagnostics(self, **thresholds: float) -> list[str]:
+        """:meth:`MultiExpFit.diagnostics` with this fit's period and background."""
+        thresholds.setdefault("period", self.n_grid * self.dt)
+        thresholds.setdefault("free_offset", self.fit_background)
+        return super().diagnostics(**thresholds)
+
     def _unpack(self, params: np.ndarray) -> dict[str, Any]:
         n = self.n_exp
         out = {"A": np.asarray(params[:n], dtype=float),
@@ -1008,12 +1075,16 @@ def fit_warnings(A: np.ndarray, tau: np.ndarray, A_err: np.ndarray | None = None
                  names: list[str] | None = None,
                  amp_sigma: float = 2.0, min_fraction: float = 0.01,
                  merge_sigma: float = 2.0, merge_rel: float = 0.1,
-                 bound_rel: float = 0.01) -> list[str]:
+                 bound_rel: float = 0.01,
+                 period: float | None = None, free_offset: bool = False,
+                 period_fraction: float = 0.5) -> list[str]:
     """Signs that a multi-exponential fit has more components than the data support.
 
     Complements a model comparison by BIC: an extra component that the data
     do not need often ends with a vanishing amplitude, a lifetime equal to
-    another one, or a parameter stuck at a bound.
+    another one, or a parameter stuck at a bound. With a fitted constant
+    offset it also flags lifetimes that are too long to be told apart from
+    that offset.
 
     Parameters
     ----------
@@ -1042,6 +1113,12 @@ def fit_warnings(A: np.ndarray, tau: np.ndarray, A_err: np.ndarray | None = None
     bound_rel :
         A parameter lies at a bound if it is within ``bound_rel`` (relative to
         the bound) of it.
+    period, free_offset, period_fraction :
+        With a fitted constant offset (``free_offset``) and a known laser
+        ``period`` (units of ``tau``), a lifetime above ``period_fraction``
+        times the period is flagged: within one period such a decay is
+        nearly flat (at ``tau = period / 2`` it only falls to 14 %), so it
+        and the offset are barely separable and both become uncertain.
 
     Returns
     -------
@@ -1074,6 +1151,14 @@ def fit_warnings(A: np.ndarray, tau: np.ndarray, A_err: np.ndarray | None = None
                     (larger > 0 and diff / larger < merge_rel):
                 out.append(f"Lifetimes τ{i + 1} = {tau[i]:.3g} ns and τ{j + 1} = "
                            f"{tau[j]:.3g} ns have merged: they describe the same decay.")
+    if free_offset and period is not None and np.isfinite(period) and period > 0:
+        for i in range(n):
+            if np.isfinite(tau[i]) and tau[i] > period_fraction * period:
+                out.append(f"τ{i + 1} = {tau[i]:.3g} ns is longer than "
+                           f"{100 * period_fraction:g} % of the laser period "
+                           f"({period:.4g} ns) while the background is fitted: such a slow "
+                           "decay and a constant background are barely separable, so both "
+                           "are uncertain.")
     if fitted is not None and bounds is not None:
         fitted = np.asarray(fitted, dtype=float)
         if names is None:

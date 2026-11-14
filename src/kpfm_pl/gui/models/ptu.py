@@ -37,6 +37,7 @@ __all__ = [
     "IRFParams",
     "load_irf",
     "irf_trace_kwargs",
+    "background_trace_kwargs",
     "TraceResult",
     "FitResult",
     "apply_lifetime_shift",
@@ -77,7 +78,7 @@ WEIGHTINGS = (("none", "None (least squares)"), ("poisson", "Poisson (1/√count
               ("mle", "Poisson MLE (maximum likelihood)"))
 #: Defaults of the over-fitting warnings (``fitting.fit_warnings``).
 DIAGNOSTIC_DEFAULTS = {"amp_sigma": 2.0, "min_fraction": 0.01, "merge_sigma": 2.0,
-                       "merge_rel": 0.1, "bound_rel": 0.01}
+                       "merge_rel": 0.1, "bound_rel": 0.01, "period_fraction": 0.5}
 #: Default |ΔBIC| below which two fits count as equally good (Kass & Raftery:
 #: > 10 is "very strong" evidence).
 BIC_THRESHOLD = 10.0
@@ -125,6 +126,10 @@ class FitParams:
     ``source`` is ``"all"``, ``"on"``, ``"off"``, ``"roi"`` (the ROI with the
     0-based index ``roi``), ``"rois"`` (all ROIs combined) or ``"each"`` (one
     fit per ROI, see :func:`compute_roi_fits`).
+
+    ``prerise`` also fits the bins that lie more than ``prerise_gap`` ns
+    before the histogram maximum (tail fits only; they hold the tail of the
+    previous laser pulse).
     """
 
     source: str = "all"
@@ -135,10 +140,22 @@ class FitParams:
     start: float = 0.0
     end: float | None = None
     roi: int = 0
+    prerise: bool = False
+    prerise_gap: float = 2.0
 
     def window_kwargs(self) -> dict[str, Any]:
+        """Fit-window arguments; the pre-rise ones only when switched on."""
+        kwargs = {"mode": self.mode, "fraction": self.fraction, "smoothing": self.smoothing,
+                  "start": self.start, "end": self.end}
+        if self.prerise:
+            kwargs.update(prerise=True, prerise_gap=float(self.prerise_gap))
+        return kwargs
+
+    def window_values(self) -> dict[str, Any]:
+        """All fit-window settings (for copying them to another form)."""
         return {"mode": self.mode, "fraction": self.fraction, "smoothing": self.smoothing,
-                "start": self.start, "end": self.end}
+                "start": self.start, "end": self.end, "prerise": self.prerise,
+                "prerise_gap": self.prerise_gap}
 
 
 def _components(value: float | None = None) -> list[float | None]:
@@ -176,7 +193,9 @@ class FitOptions:
     or worse than the previous one (see :func:`compare_bic`). ``amp_sigma``,
     ``min_fraction``, ``merge_sigma``, ``merge_rel`` and ``bound_rel`` are the
     thresholds of the over-fitting warnings of the lifetime fit
-    (``kpfm_pl.fitting.fit_warnings``). These only affect the lifetime fit.
+    (``kpfm_pl.fitting.fit_warnings``); ``period_fraction`` is the fraction of
+    the laser period above which a lifetime is flagged when the background is
+    fitted. These only affect the lifetime fit.
     """
 
     tau_guess: list[float | None] = field(default_factory=_components)
@@ -197,6 +216,7 @@ class FitOptions:
     merge_sigma: float = DIAGNOSTIC_DEFAULTS["merge_sigma"]
     merge_rel: float = DIAGNOSTIC_DEFAULTS["merge_rel"]
     bound_rel: float = DIAGNOSTIC_DEFAULTS["bound_rel"]
+    period_fraction: float = DIAGNOSTIC_DEFAULTS["period_fraction"]
 
     def is_default(self) -> bool:
         return not self.fit_kwargs(MAX_COMPONENTS)
@@ -278,11 +298,11 @@ class FitOptions:
 
 @dataclass
 class IRFParams:
-    """IRF reconvolution settings of the lifetime fit (``PTU.fit_lifetime(irf=...)``).
+    """Background and IRF settings of the lifetime fit (``PTU.fit_lifetime``).
 
-    ``use`` switches the reconvolution on (an IRF file must be loaded);
-    ``fit_background`` and ``fit_scatter`` free the constant background and
-    the scattered-light contribution.
+    ``use`` switches the IRF reconvolution on (an IRF file must be loaded).
+    ``fit_background`` frees the constant background, with or without the
+    IRF; ``fit_scatter`` the scattered-light contribution (IRF only).
     """
 
     use: bool = False
@@ -561,16 +581,21 @@ def load_irf(path: str | Path) -> LoadedFile:
 
 
 def _irf_kwargs(irf: LoadedFile | None, irf_params: IRFParams | None) -> dict[str, Any]:
-    if irf is None or irf_params is None or not irf_params.use:
+    """``fit_lifetime`` arguments of the IRF and background settings."""
+    if irf_params is None:
         return {}
+    if irf is None or not irf_params.use:
+        # Tail fit: only the fitted background applies.
+        return {"fit_background": True} if irf_params.fit_background else {}
     return {"irf": irf.reader, "fit_background": irf_params.fit_background,
             "fit_scatter": irf_params.fit_scatter}
 
 
 def _irf_extra(irf: LoadedFile | None, irf_params: IRFParams | None) -> dict[str, Any]:
-    if not _irf_kwargs(irf, irf_params):
-        return {}
-    return {"irf": {"source": str(irf.path), **asdict(irf_params)}}
+    kwargs = _irf_kwargs(irf, irf_params)
+    if "irf" in kwargs:
+        return {"irf": {"source": str(irf.path), **asdict(irf_params)}}
+    return {"fit_background": True} if kwargs else {}
 
 
 def _fit_histogram(handle: LoadedFile, histogram: Signal, fit: FitParams,
@@ -649,8 +674,9 @@ def compute_lifetime_trace(handle: LoadedFile, params: TraceParams, fit: FitPara
                            irf_kwargs: dict[str, Any] | None = None) -> Signal:
     """Mean fitted lifetime per time bin within the trace's (or an ROI's) window.
 
-    ``irf_kwargs`` (see :func:`irf_trace_kwargs`) switches the per-bin fits to
-    IRF reconvolution.
+    ``irf_kwargs`` are extra per-bin arguments from the last lifetime fit:
+    :func:`irf_trace_kwargs` switches the per-bin fits to IRF reconvolution,
+    :func:`background_trace_kwargs` sets the background of the tail fits.
     """
     options = options or FitOptions()
     options.validate()
@@ -702,6 +728,33 @@ def irf_trace_kwargs(fit: FitResult | None, source: str,
     fraction = float(fit.fit.get("scatter", 0.0)) / total if total > 0 else 0.0
     return ({"irf": irf.reader, "irf_shift": float(fit.fit["shift_ns"]),
              "background_rate": rate, "scatter_fraction": fraction}, None)
+
+
+def background_trace_kwargs(fit: FitResult | None,
+                            source: str) -> tuple[dict[str, Any] | None, str | None]:
+    """Per-bin background of the tail fits (lifetime trace/FLIDs) from the last lifetime fit.
+
+    A time bin holds too few photons to fit its own background, so the
+    per-bin tail fits take it, as a rate per second and lifetime bin, from
+    the lifetime fit of the summed histogram with a fitted background.
+    Returns ``(kwargs, None)``, or ``(None, reason)`` when there is no
+    suitable lifetime fit (none, of another file, an IRF fit, or without a
+    fitted background).
+    """
+    if fit is None:
+        return None, "no lifetime fit has been run yet"
+    if fit.source != source:
+        return None, "the last lifetime fit belongs to another file"
+    if fit.fit.get("reconvolution"):
+        return None, "the last lifetime fit used the IRF"
+    if not fit.fit.get("fit_background"):
+        return None, "the last lifetime fit did not fit the background"
+    if not fit.fit.get("success", False):
+        return None, "the last lifetime fit did not converge"
+    duration = fit.histogram.meta.get("acquisition_duration")
+    if not duration:
+        return None, "the fitted histogram has no acquisition duration"
+    return {"background_rate": float(fit.fit["background"]) / float(duration)}, None
 
 
 # ------------------------------------------------------------------ summaries
@@ -757,6 +810,8 @@ def fit_summary(fit: dict[str, Any]) -> dict[str, Any]:
         summary["offset_err"] = float(fit.get("background_err", np.nan))
     else:
         summary["offset"] = float(fit.get("offset", 0.0))
+    if fit.get("prerise"):
+        summary["prerise_bins"] = int(fit.get("prerise_points", 0))
     summary["reduced_chi_squared"] = float(quality.get("reduced_chi_squared", np.nan))
     if "bic" in quality:
         summary["bic"] = float(quality["bic"])
@@ -946,6 +1001,8 @@ def _fit_parameters(result: FitResult) -> dict[str, Any]:
         params["rois"] = result.rois
     if result.extra.get("irf"):
         params["irf"] = result.extra["irf"]
+    if result.extra.get("fit_background"):
+        params["fit_background"] = True
     return params
 
 
@@ -1058,6 +1115,9 @@ def lifetime_trace_payload(signal: Signal, source: str, params: TraceParams,
                          ("fit_options", options or FitOptions()))
     if signal.meta.get("reconvolution"):
         parameters["irf"] = {"shift_ns": signal.meta.get("irf_shift_ns")}
+    elif signal.meta.get("background_rate") is not None:
+        # Background of the per-bin tail fits, from the last lifetime fit.
+        parameters["background_rate_per_s_and_bin"] = float(signal.meta["background_rate"])
     if lt.roi is not None and 0 <= lt.roi < len(rois):
         parameters["roi"] = dict(rois[lt.roi])
     meta = build_metadata(

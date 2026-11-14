@@ -1026,3 +1026,151 @@ def test_fit_lifetime_returns_intensity_weighted_lifetime(ptu):
     A, tau = np.asarray(fit["A"]), np.asarray(fit["tau"])
     assert fit["tau_int"] == pytest.approx(np.sum(A * tau**2) / np.sum(A * tau))
     assert np.isfinite(fit["tau_int_err"]) and fit["tau_int_err"] > 0
+
+
+# ------------------------------------- bins before the rise, fitted background
+def _periodic_ptu(taus, amps, *, background=0.0, rows=1, period_ns=100.0, res_ns=0.1,
+                  peak_ns=10.0, bintime=1.0) -> PTU:
+    """Synthetic file with a periodic decay (sharp rise at ``peak_ns``) in every time bin.
+
+    As in real files, the lifetime axis has one bin more than the period,
+    which never fills.
+    """
+    n_period = int(round(period_ns / res_ns))
+    t = np.arange(n_period) * res_ns
+    since_pulse = (t - peak_ns) % period_ns
+    counts = sum(a * np.exp(-since_pulse / tau) / (1 - np.exp(-period_ns / tau))
+                 for a, tau in zip(amps, taus)) + background
+    row = np.concatenate([counts, [0.0]])
+    p = _synthetic_ptu(np.tile(row, (rows, 1)), bintime=bintime,
+                       acquisition_time=rows * bintime)
+    p.resolution, p.rep_time = res_ns * 1e-9, period_ns * 1e-9
+    p.lt_time = np.arange(row.size) * res_ns * 1e-9
+    return p
+
+
+def test_fit_lifetime_prerise_fits_the_previous_pulse_tail():
+    p = _periodic_ptu([4.0, 30.0], [1000.0, 200.0])
+    hist = p.lifetime_histogram(p._matrix, bintime=1.0)
+    plain = p.fit_lifetime(hist, n_exp=2, mode="manual", start=0.0)
+    assert plain["prerise"] is False and plain["prerise_points"] == 0
+    assert len(plain["t_fit"]) == 901          # tail incl. the never-filled last bin
+    np.testing.assert_array_equal(plain["t_model"], plain["t_fit"])
+
+    fit = p.fit_lifetime(hist, n_exp=2, mode="manual", start=0.0, prerise=True)
+    # 80 bins lie more than 2 ns before the maximum at 10 ns; the last bin is left out
+    assert fit["prerise"] is True and fit["prerise_points"] == 80
+    assert fit["prerise_gap_ns"] == 2.0 and len(fit["t_fit"]) == 80 + 900
+    assert fit["t_fit"][0] == pytest.approx(-10.0) and fit["left_bound_ns"] == 0.0
+    # those bins are fitted at their time since the previous pulse
+    np.testing.assert_allclose(fit["t_model"][:80], fit["t_fit"][:80] + 100.0)
+    np.testing.assert_allclose(fit["t_model"][80:], fit["t_fit"][80:])
+    order = np.argsort(fit["tau"])
+    np.testing.assert_allclose(np.asarray(fit["tau"])[order], [4.0, 30.0], rtol=1e-4)
+    np.testing.assert_allclose(np.asarray(fit["A"])[order], [1000.0, 200.0], rtol=1e-3)
+    assert len(fit["curve"]) == len(fit["t_fit"]) == len(fit["quality"]["weighted_residuals"])
+    assert fit["quality"]["n_params"] == 4 and fit["fit_background"] is False
+
+    wide = p.fit_lifetime(hist, n_exp=2, mode="manual", start=0.0, prerise=True,
+                          prerise_gap=5.0)
+    assert wide["prerise_points"] == 50
+    with pytest.raises(ValueError, match="before the histogram maximum"):
+        p.fit_lifetime(hist, n_exp=2, mode="manual", start=0.0, prerise=True,
+                       prerise_gap=20.0)
+    with pytest.raises(ValueError, match="gap"):
+        p.fit_lifetime(hist, n_exp=2, mode="manual", start=0.0, prerise=True,
+                       prerise_gap=-1.0)
+
+
+def test_fit_lifetime_fits_the_background_of_a_tail_fit():
+    p = _periodic_ptu([4.0, 30.0], [1000.0, 200.0], background=7.5)
+    hist = p.lifetime_histogram(p._matrix, bintime=1.0)
+    for options in ({}, {"prerise": True}):
+        fit = p.fit_lifetime(hist, n_exp=2, mode="manual", start=0.0, fit_background=True,
+                             **options)
+        assert fit["fit_background"] is True
+        # The plain window keeps the never-filled last bin (as the tail fit always
+        # did), whose zero pulls the background down a little; prerise drops it.
+        tolerance = 1e-3 if options else 5e-2
+        assert fit["background"] == pytest.approx(7.5, rel=tolerance)
+        assert fit["offset"] == pytest.approx(fit["background"])
+        np.testing.assert_allclose(np.sort(fit["tau"]), [4.0, 30.0], rtol=tolerance)
+        assert fit["quality"]["n_params"] == 5
+        assert fit["quality"]["dof"] == len(fit["t_fit"]) - 5
+        # prerise leaves out the never-filled last bin; the plain window keeps it
+        assert len(fit["t_fit"]) == (980 if options else 901)
+    # with the offset fixed at the dark level (0) the background goes into the lifetimes
+    fixed = p.fit_lifetime(hist, n_exp=2, mode="manual", start=0.0)
+    assert fixed["background"] == 0.0 and fixed["background_err"] == 0.0
+    assert np.max(fixed["tau"]) > 33.0
+
+
+def test_fitted_background_warns_about_a_lifetime_near_the_period():
+    p = _periodic_ptu([5.0, 70.0], [1000.0, 300.0], background=4.0)
+    hist = p.lifetime_histogram(p._matrix, bintime=1.0)
+    kwargs = dict(n_exp=2, mode="manual", start=0.0, prerise=True,
+                  p0=[1000.0, 600.0, 5.0, 70.0])
+    fit = p.fit_lifetime(hist, fit_background=True, **kwargs)
+    assert any("laser period" in w for w in fit["warnings"])
+    # also without the incomplete-decay correction, and adjustable
+    plain = p.fit_lifetime(hist, fit_background=True, decay_correction=False, **kwargs)
+    assert any("laser period" in w for w in plain["warnings"])
+    quiet = p.fit_lifetime(hist, fit_background=True,
+                           diagnostics={"period_fraction": 0.9}, **kwargs)
+    assert not any("laser period" in w for w in quiet["warnings"])
+    fixed = p.fit_lifetime(hist, **kwargs)
+    assert not any("laser period" in w for w in fixed["warnings"])
+
+
+def test_lifetime_trace_prerise_and_background_rate():
+    # 1 s time bins; 200 counts per lifetime bin and second of flat background
+    p = _periodic_ptu([20.0], [5000.0], background=200.0, rows=3)
+    p._matrix = np.round(p._matrix).astype(np.uint32)
+    common = dict(bintime=1.0, n_exp=1, mode="manual", start=0.0, min_counts=None,
+                  weighting="mle")
+    plain = p.lifetime_trace(**common)
+    assert plain.meta["prerise"] is False and plain.meta["background_rate"] is None
+    assert np.all(plain.y > 21.0)                   # the background lengthens the lifetime
+    lt = p.lifetime_trace(prerise=True, background_rate=200.0, **common)
+    np.testing.assert_allclose(lt.y, 20.0, rtol=5e-3)
+    assert lt.meta["prerise"] is True and lt.meta["prerise_gap_ns"] == 2.0
+    assert lt.meta["background_rate"] == 200.0
+    # grouped lifetime bins: only whole groups before the rise are used
+    grouped = p.lifetime_trace(prerise=True, background_rate=200.0, bins=4, **common)
+    np.testing.assert_allclose(grouped.y, 20.0, rtol=5e-3)
+    with pytest.raises(ValueError, match="background_rate"):
+        p.lifetime_trace(background_rate=-1.0, **common)
+    with pytest.raises(ValueError, match="before the histogram maximum"):
+        p.lifetime_trace(prerise=True, prerise_gap=50.0, **common)
+    image = p.flid(prerise=True, background_rate=200.0, lifetime_range=(0.0, 40.0), **common)
+    assert image.meta["prerise"] is True and image.meta["background_rate"] == 200.0
+
+
+def test_beyond_period_marks_unfilled_and_partial_bins():
+    p = _periodic_ptu([5.0], [100.0])               # 1000-bin period, 1001 lifetime bins
+    assert np.flatnonzero(p._beyond_period()).tolist() == [1000]
+    p.rep_time = 99.95e-9                           # 999.5 bins: the last one is partial
+    assert np.flatnonzero(p._beyond_period()).tolist() == [999, 1000]
+    p.lifetime_seam_bin = 400                       # after a lifetime shift
+    assert np.flatnonzero(p._beyond_period()).tolist() == [400, 1000]
+    # bins after the last photon of the file never filled: the real period is shorter
+    p.lifetime_seam_bin, p.rep_time = None, 100e-9
+    p._raw_dtime = np.array([3.0, 995.0, 120.0])
+    assert np.flatnonzero(p._beyond_period()).tolist() == [996, 997, 998, 999, 1000]
+    p.lifetime_shift_ns = 10.0                      # they move along with a lifetime shift
+    assert np.flatnonzero(p._beyond_period()).tolist() == [896, 897, 898, 899, 1000]
+
+
+def test_fitted_background_leaves_out_never_filled_bins_of_a_real_file():
+    legacy = DATA_DIR / "ptu_test1_NoLaserPulse_(360s_400nW_532nm_000).ptu"
+    if not legacy.exists():
+        pytest.skip("PTU test file missing")
+    p = PTU(legacy)
+    p.time_trace(bintime=1.0)
+    hist = p.lifetime_histogram()
+    last = int(np.flatnonzero(hist.y)[-1])
+    assert last < p.n_lt_bins - 2                   # the header period is too long here
+    fit = p.fit_lifetime(hist, n_exp=2, weighting="mle", fit_background=True, prerise=True)
+    used = np.isin(np.round(fit["shifted_histogram_x"], 6), np.round(fit["t_fit"], 6))
+    assert not used[last + 1:].any() and used[last]
+    assert np.all(np.asarray(fit["y_fit"])[-3:] > 0)    # no empty bins at the end

@@ -162,7 +162,10 @@ window's left bound is chosen by `mode`:
 
 Additional keywords: `smoothing` (Gaussian sigma for edge finding),
 `normalize` (scale the fitted curve peak to 1), `weighting` (see below),
-`diagnostics` (thresholds of the over-fitting warnings, see below), plus any
+`diagnostics` (thresholds of the over-fitting warnings, see below),
+`fit_background` and `prerise`/`prerise_gap` (see
+[Background and the bins before the rise](#background-and-the-bins-before-the-rise)),
+plus any
 [`MultiExpFit`](../src/kpfm_pl/fitting.py) keyword (`p0`, `bounds`, `loss`,
 `f_scale`, `weights`, `constrain_sum_A`, ...). `NaN` entries of `p0` are
 filled with the automatic guess, which is also clipped into `bounds`. With
@@ -198,7 +201,8 @@ The returned dict contains:
 | `f_amp`, `f_amp_err` | amplitude fractions `A_i / sum(A)` (0..1) and their errors |
 | `f_int`, `f_int_err` | intensity fractions `A_i tau_i / sum(A tau)` (0..1, share of the photons) and their errors |
 | `period`, `decay_correction` | laser period `T` (ns) used for the incomplete-decay correction (`None` with `decay_correction=False`) |
-| `offset` | constant offset used |
+| `offset`, `offset_err` | constant offset of the fitted data and its standard error (0 when fixed) |
+| `background`, `background_err`, `fit_background` | the offset in counts per bin (also with `normalize`), its error, and whether it was fitted |
 | `curve` | model evaluated on the fitted grid |
 | `quality` | `{residuals, cost, success, message, r_squared}` plus the Poisson goodness of fit `{reduced_chi_squared, chi_squared, dof, deviance, weighted_residuals}` and the model selection `{bic, bic_statistic, n_points, n_params}` |
 | `warnings` | list of over-fitting warnings (empty if none) |
@@ -207,7 +211,9 @@ The returned dict contains:
 | `success` | whether the optimiser converged |
 | `shifted_histogram_x` | full lifetime axis shifted so the peak is at 0 ns |
 | `t_fit`, `y_fit` | the time/intensity arrays actually fitted |
-| `left_bound_ns` | left bound of the fit window (ns) |
+| `t_model` | time since the laser pulse of every fitted point (equal to `t_fit`, except `t_fit + T` for the bins before the rise) |
+| `prerise`, `prerise_points`, `prerise_gap_ns` | whether the bins before the rise were fitted, how many (they are the first entries of `t_fit`), and the gap used |
+| `left_bound_ns` | left bound of the fit window after the maximum (ns) |
 
 **Fit quality.** `R²` is close to 1 for almost any decay, so it is a poor
 measure for photon-counting data. `quality["reduced_chi_squared"]`
@@ -253,16 +259,18 @@ work on any amplitudes, also row-wise on `lifetime_trace(...).meta`.
 **How many exponentials? (BIC and warnings)** Adding an exponential always
 lowers χ², even if it only fits noise. `quality["bic"]` is the Bayesian
 information criterion `BIC = χ² + k ln n` (Poisson deviance instead of χ²
-for `weighting="mle"`), with `k = 2 n_exp` free parameters and `n` fitted
-bins. The lower BIC is preferred; compare only fits of the **same histogram,
+for `weighting="mle"`), with `k = 2 n_exp` free parameters (one more with
+`fit_background`) and `n` fitted bins. The lower BIC is preferred; compare only fits of the **same histogram,
 window and weighting**. Kass & Raftery (1995) grade a difference of 2–6 as
 positive, 6–10 as strong and > 10 as very strong evidence. `out["warnings"]`
 ([`fit_warnings`](../src/kpfm_pl/fitting.py)) flags typical signs of too many
 components: an amplitude compatible with zero (below `amp_sigma`=2 standard
 errors) or carrying less than `min_fraction`=1 % of the intensity, two
 lifetimes that differ by less than `merge_sigma`=2 combined errors or
-`merge_rel`=10 %, and a parameter within `bound_rel`=1 % of a bound. Change the
-thresholds with `diagnostics={"min_fraction": 0.02, ...}`. References:
+`merge_rel`=10 %, and a parameter within `bound_rel`=1 % of a bound. With a
+fitted background it also flags a lifetime above `period_fraction`=50 % of
+the laser period (see below). Change the thresholds with
+`diagnostics={"min_fraction": 0.02, ...}`. References:
 G. Schwarz, *Ann. Statist.* 6, 461 (1978); R. E. Kass & A. E. Raftery,
 *J. Am. Stat. Assoc.* 90, 773 (1995); for MLE vs. least squares M. Maus et al.,
 *Anal. Chem.* 73, 2078 (2001). Background on the fit statistics and the BIC:
@@ -282,6 +290,76 @@ ax.plot(fit["shifted_histogram_x"], states["on"].y, "bo", label="Data")
 ax.plot(fit["t_fit"], fit["curve"], "r-", label=fit["label"])
 ax.set_xlabel("Time (ns)"); ax.set_ylabel("Counts")
 ```
+
+### Background and the bins before the rise
+
+```python
+fit = ptu.fit_lifetime(hist, n_exp=2, weighting="mle",
+                       fit_background=True, prerise=True)   # both default to False
+print(fit["background"], fit["background_err"], fit["prerise_points"])
+```
+
+Both options belong to the tail fit and are off by default.
+
+**`fit_background=True`** fits the constant offset `C ≥ 0` instead of fixing
+it at the dark counts. Use it when the histogram sits on a pedestal that the
+dark counts do not cover: detector afterpulsing, stray light, or emission
+much slower than the laser period. A fixed offset that is too low is not
+harmless: the fit then puts the pedestal into its longest lifetime. The
+result is `fit["background"] ± fit["background_err"]` in counts per bin; the
+BIC counts it as one more parameter, so fits with and without it can be
+compared on the same bins.
+
+**`prerise=True`** also fits the bins before the rising edge. With periodic
+excitation those bins hold the tail of the previous laser pulse, so a bin at
+`t < 0` continues the decay at `t + T`. They enter the fit at that time
+(`fit["t_model"]`; `fit["t_fit"]` keeps their position on the plot axis),
+which extends the observed decay from the fit window to the whole laser
+period. That is useful for samples whose decay has not reached the
+background within one period. The model itself does not change: the tail fit
+already fits the steady-state curve whose amplitudes include all earlier
+pulses (see *Incomplete decay* above). `prerise_gap` (ns, default 2) is how
+far before the histogram maximum the region ends, which keeps the rising
+edge itself out of the fit; set it to a few widths of the instrument
+response. The first `fit["prerise_points"]` entries of `t_fit`, `y_fit` and
+`curve` are these bins, so break a plotted line there:
+
+```python
+n = fit["prerise_points"]
+ax.plot(fit["t_fit"][:n], fit["curve"][:n], "r-")     # before the rise
+ax.plot(fit["t_fit"][n:], fit["curve"][n:], "r-")     # the fit window
+```
+
+It needs no full-period lifetime window (`T` is the sync period) and is
+ignored with `irf=`, where the whole period is fitted anyway.
+
+Notes:
+
+- **Bins outside the period.** `prerise` leaves out lifetime bins that are
+  not fully inside one laser period: the bin past the period, a partly
+  covered last bin, and bins after the last one that holds a photon anywhere
+  in the file (legacy files whose header period is longer than the real
+  one). `fit_background` alone keeps the bins of the plain tail fit, so the
+  BIC of the two can be compared.
+- **Long lifetimes and the background are hard to tell apart.** Within one
+  period a slow decay is nearly flat: at `τ = T/2` it only falls to 14 %.
+  The bins before the rise extend the time range by the part of the period
+  before the maximum, which helps but does not remove the ambiguity. With a
+  fitted background, `fit["warnings"]` therefore reports every lifetime above
+  half the laser period (`diagnostics={"period_fraction": 0.5}`). In that
+  case fix the background at an independently measured level (e.g. the count
+  rate while the laser is off) or record with a lower repetition rate.
+- On the test file `ptu_test1_…` (2 exponentials, `weighting="mle"`) the
+  dark-count offset of 0.5 counts per bin gives 6.1 / 29.2 ns; with
+  `fit_background=True` the fit finds 10.8 ± 0.3 counts per bin and
+  2.5 / 14.1 ns, with a BIC of 1580 instead of 2010. Which is right depends
+  on the sample: check what the offset should be before trusting either.
+
+**Per time bin** (`lifetime_trace`, `flid`): pass `prerise=True` as well. A
+time bin holds too few photons to fit its own background, so the per-bin
+offset is never fitted; pass the background of the summed-histogram fit as
+`background_rate=fit["background"] / hist.meta["acquisition_duration"]`
+(counts per second and lifetime bin). Without it the dark counts are used.
 
 ### IRF reconvolution
 
@@ -361,7 +439,10 @@ lt = ptu.lifetime_trace(bintime=0.5, n_exp=2, bins=10)
 the fitted lifetime in ns: for `n_exp > 1`, the intensity-weighted mean
 `sum(A_i tau_i^2) / sum(A_i tau_i)` (or the amplitude-weighted
 `sum(A_i tau_i) / sum(A_i)` with `mean_lifetime="amplitude"`), as in the
-[FLID map](#flid-map). `decay_correction` works as in `fit_lifetime`. Its `x`
+[FLID map](#flid-map). `decay_correction` works as in `fit_lifetime`;
+`prerise`/`prerise_gap` and `background_rate` are described in
+[Background and the bins before the rise](#background-and-the-bins-before-the-rise).
+Its `x`
 and `y` arrays have exactly one entry per selected time bin. Bins outside an
 intensity ROI, empty bins, failed fits and bins whose amplitudes are all zero
 remain `NaN` at their original positions; the individual fitted components
@@ -486,6 +567,8 @@ Key parameters:
 | `weighting` | `"none"` | `"poisson"` weights every per-bin fit by photon noise, `"mle"` fits each bin by Poisson maximum likelihood (recommended for few photons per bin), as in `fit_lifetime` (also for `lifetime_trace`) |
 | `mean_lifetime` | `"intensity"` | mean lifetime of a bin with `n_exp > 1`: `"intensity"` (`tau_int`) or `"amplitude"` (`tau_amp`); fitted maps only (also for `lifetime_trace`) |
 | `decay_correction` | `True` | correct the per-bin amplitudes for the incomplete decay of earlier pulses, as in `fit_lifetime` (also for `lifetime_trace`) |
+| `prerise`/`prerise_gap` | `False`/`2.0` | also fit the bins more than `prerise_gap` ns before the histogram maximum in the per-bin tail fits, as in `fit_lifetime` (also for `lifetime_trace`; fitted maps only) |
+| `background_rate` | `None` | constant offset of the per-bin fits in counts per second and lifetime bin, e.g. from `fit_lifetime(..., fit_background=True)`; `None` = dark counts (also for `lifetime_trace`; fitted maps only) |
 | `method` | `"fit"` | `"mean_arrival"`: map the mean photon arrival time instead of fitting |
 | `truncation_correction` | `True` | for `method="mean_arrival"`, see [Mean arrival time](#mean-arrival-time-no-fit) |
 | `min_counts`/`coverage`/`auto_bintime` | `100`/`0.9`/`False` | photon-count check, see [Photons per time bin](#photons-per-time-bin) |

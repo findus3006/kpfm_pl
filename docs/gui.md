@@ -101,15 +101,37 @@ title on the left to fold it away.
    *Dark counts* are subtracted as an offset.
    The fit always works on the raw counts (there is no *Normalise* any more:
    the percentages below show the relative amplitudes directly).
+   - **Background** (*fit background B*, off by default): fits the constant
+     offset instead of fixing it at the dark counts, with or without the IRF.
+     Use it when the histogram sits on a pedestal the dark counts do not
+     cover (afterpulsing, stray light, emission much slower than the laser
+     period); a fixed offset that is too low ends up in the longest lifetime.
+     The *Offset* row then shows the fitted value ± error. The lifetime trace
+     and the FLIDs cannot fit a background per time bin (too few photons):
+     they reuse the background of the **last lifetime fit**; without such a
+     fit they use the dark counts and say so in the log. A fitted background
+     and a lifetime above half the laser period are barely separable; the log
+     warns then (threshold in *Advanced fit settings*).
+   - **Before the rise** (*also fit these bins*, off by default; tail fit
+     only): also fits the bins before the rising edge. They hold the tail of
+     the previous laser pulse and enter the fit at their time since that
+     pulse, which extends the observed decay to the whole laser period. Meant
+     for decays that have not reached the background within one period. *Gap
+     before maximum* (default 2 ns) keeps the rising edge out. The plot
+     hatches the region, the fitted curve is drawn on both sides of the rise,
+     and the table adds *Bins before the rise*. A fit with and one without
+     these bins use different data, so their BIC is "not comparable". Also
+     used by the lifetime trace. See
+     [ptu.md](ptu.md#background-and-the-bins-before-the-rise).
    - **IRF reconvolution** (optional): *Choose IRF file…* loads a `.ptu`
      recording of the instrument response (e.g. scattered laser light, same
      detector, TCSPC resolution and laser period). The file is remembered and
      loaded again at the next start; *Clear IRF* forgets it. With *use IRF
      (reconvolution)* the decay is convolved with the IRF and fitted over the
      whole laser period, including the rising edge (*Manual* fit start: only
-     start…end); the IRF shift δ is fitted. *fit background B* frees the
-     constant background (otherwise fixed from the dark counts), *fit scatter
-     s* adds scattered laser light shaped like the IRF. The table adds *IRF
+     start…end); the IRF shift δ is fitted. *fit background B* (above) also
+     applies here, *fit scatter s* adds scattered laser light shaped like the
+     IRF. The table adds *IRF
      shift δ*, *IRF FWHM* (and *Scatter s*), the plot shows the shifted IRF
      (grey, dashed). The lifetime trace and the FLIDs then reuse δ, B and s
      of the **last lifetime fit** and fit only the amplitudes and lifetimes
@@ -147,8 +169,9 @@ title on the left to fold it away.
      only the BIC is shown, in gray, as "not comparable". Fit 1, then 2, then
      3 exponentials and keep the last green one.
    - **Over-fitting warnings** in the log: an amplitude compatible with zero
-     or carrying almost no intensity, two lifetimes that have merged, or a
-     parameter that ended at one of its bounds.
+     or carrying almost no intensity, two lifetimes that have merged, a
+     parameter that ended at one of its bounds, or (with a fitted background)
+     a lifetime above half the laser period.
    - **Incomplete decay**: by default the amplitudes are per-pulse values,
      corrected for the photons of earlier laser pulses when the decay has not
      reached the noise floor within one period (A = A_fit·(1 − exp(−T/τ)));
@@ -195,8 +218,10 @@ title on the left to fold it away.
      than the mean arrival time, which follows the intensity-weighted mean.
    - **Fit window**: the FLID has its own (*Fit start*, *Edge fraction*,
      *Edge smoothing*, *Start*/*End*): **which part of each decay** is fitted
-     or averaged. *Copy fit window from 'Lifetime fit'* takes over the
-     settings of the lifetime fit.
+     or averaged. *Before the rise* works as in the lifetime fit (fitted
+     maps only, not the mean arrival time). *Copy fit window from 'Lifetime
+     fit'* takes over the settings of the lifetime fit. With *fit background
+     B* ticked the per-bin fits use the background of the last lifetime fit.
    - **Photons per time bin**: at least *At least* photons *in* that share of
      the bins (90 %; 50 % is the median). Otherwise the log suggests a larger
      bin time for that ROI. With *Bin time: automatic (per ROI)* such an ROI
