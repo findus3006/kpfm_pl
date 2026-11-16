@@ -72,10 +72,23 @@ def test_bin_average_trailing_partial_bin():
     assert np.allclose(yb, [1.0, 1.0])
 
 
-def test_left_bound_fraction_finds_rising_edge():
+def test_left_bound_fraction_finds_the_falling_edge():
+    # rising edge, maximum at index 20, then exp(-t/5) per sample
+    y = np.concatenate([np.linspace(0, 1, 21)[:-1], np.exp(-np.arange(40) / 5.0)])
+    idx = left_bound_fraction(y, fraction=0.5, smoothing=0)
+    # first sample after the maximum at or below half of it: exp(-4/5) = 0.45
+    assert idx == 24
+    # the rising edge also passes 50 %, but it is never chosen
+    assert left_bound_fraction(y, fraction=0.95, smoothing=0) == 21
+    assert left_bound_fraction(y, fraction=0.95, smoothing=2) > 20
+    # fraction 1 starts at the maximum
+    assert left_bound_fraction(y, fraction=1.0, smoothing=0) == 20
+
+
+def test_left_bound_fraction_falls_back_to_the_maximum():
+    # a plateau that never falls to the fraction
     y = np.concatenate([np.zeros(10), np.linspace(0, 1, 10), np.ones(10)])
-    idx = left_bound_fraction(y, fraction=0.95, smoothing=0)
-    assert idx >= 18
+    assert left_bound_fraction(y, fraction=0.95, smoothing=0) == 19
 
 
 def test_linear_line_level_removes_tilt():
@@ -206,12 +219,35 @@ def test_left_bound_fraction_with_smoothing():
     assert 10 <= idx <= 29
 
 
-def test_inflection_left_bound_detects_curvature_change():
+def test_inflection_left_bound_ignores_the_rising_edge():
+    # A rising sigmoid has its only inflection before the maximum (at the end),
+    # i.e. on the rising edge, so there is none to start a tail fit at.
     x = np.linspace(-5, 5, 200)
-    y = 1.0 / (1.0 + np.exp(-x))  # sigmoid: inflection near the centre
-    idx = inflection_left_bound(y, smoothing=1.5)
-    assert idx is not None
-    assert 0 <= idx < len(y)
+    y = 1.0 / (1.0 + np.exp(-x))
+    assert inflection_left_bound(y, smoothing=1.5) is None
+    # mirrored it is a falling edge: the inflection near the centre is found
+    idx = inflection_left_bound(y[::-1], smoothing=1.5)
+    assert idx is not None and abs(idx - 100) <= 3
+
+
+def test_inflection_left_bound_is_on_the_falling_edge():
+    # Gaussian peak at index 50: inflection points at 50 -/+ 8 (sigma)
+    x = np.arange(200, dtype=float)
+    y = np.exp(-0.5 * ((x - 50.0) / 8.0) ** 2)
+    idx = inflection_left_bound(y, smoothing=0.5)
+    assert idx is not None and abs(idx - 58) <= 1
+    t_shifted = x - 50.0
+    mask = fit_window_mask(t_shifted, y, "inflection", smoothing=0.5)
+    assert np.array_equal(mask, t_shifted >= t_shifted[idx])
+
+
+def test_fit_window_mask_inflection_falls_back_to_the_maximum():
+    # a sharp peak without any inflection point within the top 10 %
+    y = np.array([0.0, 0.0, 10.0, 0.0, 0.0, 0.0])
+    t_shifted = np.arange(y.size, dtype=float) - 2.0
+    assert inflection_left_bound(y) is None
+    mask = fit_window_mask(t_shifted, y, "inflection", smoothing=0.5)
+    assert np.array_equal(mask, t_shifted >= 0.0)
 
 
 def test_inflection_left_bound_returns_none_for_short_peak():

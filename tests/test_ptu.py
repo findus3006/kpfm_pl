@@ -160,6 +160,21 @@ def test_flid_preserves_raw_counts_and_odd_lifetime_groups(monkeypatch):
     assert image.data.shape == (4, 3)
 
 
+def test_lifetime_trace_grouped_bins_keep_only_whole_groups_in_the_window():
+    # Maximum at bin 10, exp(-t/5 ns) after it, an empty rising edge before.
+    # With bins=4 the group of bins 8..11 straddles a window starting at 1 ns
+    # (bin 11); it must be left out, otherwise its empty bins lengthen tau.
+    n = 100
+    t = np.arange(n) - 10.0
+    row = np.where(t >= 0, 1e6 * np.exp(-np.clip(t, 0, None) / 5.0), 0.0)
+    p = _synthetic_ptu(np.round(row)[None, :].astype(np.uint32), bintime=1.0,
+                       acquisition_time=1.0)
+    kwargs = dict(bintime=1.0, n_exp=1, mode="manual", start=1.0, min_counts=None,
+                  decay_correction=False)
+    np.testing.assert_allclose(p.lifetime_trace(bins=4, **kwargs).y, 5.0, rtol=1e-3)
+    np.testing.assert_allclose(p.lifetime_trace(bins=1, **kwargs).y, 5.0, rtol=1e-3)
+
+
 def test_lifetime_trace_preserves_time_bins_and_marks_failed_fits(monkeypatch):
     class DummyFit:
         calls = 0

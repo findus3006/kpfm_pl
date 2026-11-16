@@ -156,8 +156,13 @@ window's left bound is chosen by `mode`:
 
 | `mode` | Left bound |
 |--------|-----------|
-| `"fraction"` (default) | rising edge reaching `fraction` (default `0.95`) of the smoothed max |
-| `"inflection"` | dominant inflection point of the decay |
+| `"fraction"` (default) | first bin after the maximum where the smoothed decay has fallen to `fraction` (default `0.95`) of the maximum |
+| `"inflection"` | dominant inflection point of the falling edge (after the maximum; the maximum itself if there is none) |
+
+Both automatic modes start after the maximum, so the tail fit leaves out the
+rising edge and the top of the peak, which the instrument response shapes.
+`t = 0` stays at the histogram maximum: the fitted amplitudes are the decay
+extrapolated to the maximum, not to the excitation time.
 | `"manual"` | keep `start <= t <= end` (ns), `end=None` = last sample |
 
 Additional keywords: `smoothing` (Gaussian sigma for edge finding),
@@ -471,10 +476,15 @@ arrival = ptu.arrival_time_trace(bintime=0.5)    # same arguments as lifetime_tr
 
 A fast sanity check of the fitted lifetimes. For each time bin it takes the
 mean delay of the photons inside the fit window (chosen exactly as for the
-fits, on the summed histogram of the selected bins). For a decay
-`sum(A_i exp(-t/tau_i))` that mean is exactly the intensity-weighted mean
-lifetime `sum(A_i tau_i^2) / sum(A_i tau_i)` of the fits, wherever the window
-starts. Two effects bias it, and both are corrected:
+fits, on the summed histogram of the selected bins). For one exponential that
+mean is exactly `tau`, wherever the window starts (an exponential has no
+memory). For a decay `sum(A_i exp(-t/tau_i))` it is the intensity-weighted
+mean lifetime of the decay **as it is at the window start** `t0`:
+`sum(a_i tau_i^2) / sum(a_i tau_i)` with `a_i = A_i exp(-t0/tau_i)`. The
+short components have already faded there, so this is longer than the
+`tau_int` of the fits (whose amplitudes refer to `t = 0`, the histogram
+maximum), and it grows with `t0`. Two further effects bias it, and both are
+corrected:
 
 - **Truncation.** The window has a finite length `T` (e.g. 100 ns at 10 MHz,
   minus the part before the peak), so late photons are missing and the mean
@@ -593,6 +603,18 @@ and `counts` are stored in `Image.meta`. `counts` contains the raw
 photon total in each time bin; lifetime curves are normalised only for fitting.
 The two explicit histogram sizes keep FLID memory bounded independently of the
 measurement duration.
+
+**Smoothing and the width of the map.** Even an emitter with one fixed
+lifetime gives a spread of fitted lifetimes from photon shot noise alone,
+roughly `tau / sqrt(N)` for `N` photons per bin (more with background): the
+typical funnel, wide at low counts and narrow at high counts. The Gaussian
+smoothing `sigma` (in map bins) adds its own width to that spread, in
+quadrature. For example, with 0.1 ns per lifetime bin, `sigma=1.5` adds
+0.15 ns: at `tau = 3 ns` that widens the cloud by about 12 % at 100 photons
+but doubles it at 1000 photons. A smoothed map can therefore look broader
+than shot noise allows, i.e. suggest a lifetime heterogeneity that is not
+there. Use `sigma=0` (redraw with `flid_map`, no new fits) before judging
+the width of a FLID.
 
 **Histogram ranges.** By default each map spans its own data, padded so the
 Gaussian smoothing (`sigma`) is not cut off at the outermost points. Two FLIDs

@@ -72,7 +72,7 @@ __all__ = [
 #: Histogram sources selectable for the lifetime fit; "roi" also needs ``FitParams.roi``.
 HISTOGRAM_SOURCES = (("all", "Whole time trace"), ("on", "On state"), ("off", "Off state"))
 ROI_SOURCES = (("rois", "All ROIs combined"), ("each", "Each ROI separately"))
-FIT_MODES = (("fraction", "Rising edge (fraction)"), ("inflection", "Inflection point"),
+FIT_MODES = (("fraction", "Falling edge (fraction)"), ("inflection", "Inflection point"),
              ("manual", "Manual (start/end)"))
 WEIGHTINGS = (("none", "None (least squares)"), ("poisson", "Poisson (1/√counts)"),
               ("mle", "Poisson MLE (maximum likelihood)"))

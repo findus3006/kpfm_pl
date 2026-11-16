@@ -338,8 +338,8 @@ class PTUTab(BaseTab):
                              "the lifetime trace (the FLID has its own fit window).\n"
                              "Manual: drag on the histogram plot or enter start/end.")
         f.add_float("fraction", "Edge fraction", 0.95, maximum=1.0, step=0.05, decimals=2,
-                    tooltip="Fit starts where the rising edge reaches this fraction "
-                            "of the maximum.")
+                    tooltip="Fit starts after the maximum, where the decay has fallen "
+                            "to this fraction of the maximum.")
         f.add_float("smoothing", "Smoothing", 2.0, maximum=50, step=0.5, decimals=1,
                     tooltip="Smoothing applied to the histogram before locating the start.")
         f.add_float("start", "Start", 0.0, minimum=-1000, maximum=1000, step=0.5,
@@ -438,8 +438,8 @@ class PTUTab(BaseTab):
                      tooltip="How the start of the FLID's fit window is chosen, on the "
                              "summed histogram of all mapped time bins.")
         f.add_float("fraction", "Edge fraction", 0.95, maximum=1.0, step=0.05, decimals=2,
-                    tooltip="Window starts where the rising edge reaches this fraction "
-                            "of the maximum.")
+                    tooltip="Window starts after the maximum, where the decay has fallen "
+                            "to this fraction of the maximum.")
         f.add_float("smoothing", "Edge smoothing", 2.0, maximum=50, step=0.5, decimals=1,
                     tooltip="Smoothing applied to the histogram before locating the "
                             "start (not the map smoothing).")
@@ -492,7 +492,9 @@ class PTUTab(BaseTab):
                   tooltip="Number of histogram bins along the counts axis.")
         f.add_float("sigma", "Map smoothing", 1.5, maximum=20, step=0.5, decimals=1,
                     suffix=" bins", tooltip="Gaussian smoothing of the 2-D histogram "
-                                            "(0 disables it).")
+                                            "(0 disables it). It widens the map: set 0 "
+                                            "before reading the spread of the lifetimes "
+                                            "(e.g. against the shot-noise width).")
         f.changed.connect(self._flid_form_changed)
         layout.addWidget(f)
         self.add_button(layout, "Copy fit window from 'Lifetime fit'", self.copy_fit_window,

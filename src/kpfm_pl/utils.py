@@ -133,29 +133,40 @@ def bin_average(
 
 
 def left_bound_fraction(y: np.ndarray, fraction: float = 0.95, smoothing: float = 2) -> int:
-    """Index of the first sample reaching ``fraction`` of the (smoothed) maximum.
+    """Index where the (smoothed) decay has fallen to ``fraction`` of its maximum.
 
-    Useful to find the rising edge of a lifetime histogram before fitting.
+    The first sample at or after the maximum of the smoothed curve that is at
+    most ``fraction`` times that maximum, i.e. on the falling edge. A tail fit
+    started there leaves out the rising edge and the top of the peak, which
+    are shaped by the instrument response rather than by the decay. Returns
+    the index of the maximum when the curve never falls that far.
     """
     y = np.asarray(y, dtype=float)
     if smoothing > 0:
         y = ndimage.gaussian_filter1d(y, sigma=smoothing)
-    ymax = np.max(y)
-    return int(np.where(y >= fraction * ymax)[0][0])
+    peak = int(np.argmax(y))
+    below = np.flatnonzero(y[peak:] <= fraction * y[peak])
+    return peak + int(below[0]) if below.size else peak
 
 
 def inflection_left_bound(y: np.ndarray, smoothing: float = 1.5) -> int | None:
-    """Index of the dominant inflection point within the top 10 % of ``y``.
+    """Index of the dominant inflection point after the maximum, within the top 10 % of ``y``.
 
-    Returns ``None`` when no curvature sign change is found.
+    On the falling edge the peak (curved downwards) turns into the decay
+    (curved upwards); the inflection point is where the decay is steepest.
+    Only samples at or after the maximum of the smoothed curve are searched,
+    so the inflection of the rising edge is never chosen. Returns ``None``
+    when no curvature sign change is found there.
     """
     y = np.asarray(y, dtype=float)
+    y_smooth = ndimage.gaussian_filter1d(y, sigma=smoothing)
+    peak = int(np.argmax(y_smooth))
     threshold = 0.10 * np.max(y)
-    indices = np.where(y >= threshold)[0]
+    indices = np.flatnonzero(y >= threshold)
+    indices = indices[indices >= peak]
     if len(indices) < 3:
         return None
 
-    y_smooth = ndimage.gaussian_filter1d(y, sigma=smoothing)
     d2y = np.gradient(np.gradient(y_smooth))
     d2y_sub = d2y[indices]
 
@@ -194,10 +205,11 @@ def fit_window_mask(
 
     ``mode``:
 
-    * ``"fraction"`` -- start at the rising edge reaching ``fraction`` of the
-      (``smoothing``-blurred) maximum (see :func:`left_bound_fraction`).
-    * ``"inflection"`` -- start at the dominant inflection point
-      (see :func:`inflection_left_bound`; falls back to index 0).
+    * ``"fraction"`` -- start where the falling edge has dropped to
+      ``fraction`` of the (``smoothing``-blurred) maximum (see
+      :func:`left_bound_fraction`).
+    * ``"inflection"`` -- start at the dominant inflection point after the
+      maximum (see :func:`inflection_left_bound`; falls back to the maximum).
     * ``"manual"`` -- keep ``start <= t_shifted <= end`` (``end=None`` uses the
       last sample).
     """
@@ -207,7 +219,9 @@ def fit_window_mask(
         lb = left_bound_fraction(y, fraction, smoothing)
         return t_shifted >= t_shifted[lb]
     if mode == "inflection":
-        lb = inflection_left_bound(y, smoothing) or 0
+        lb = inflection_left_bound(y, smoothing)
+        if lb is None:
+            lb = int(np.argmax(ndimage.gaussian_filter1d(y, sigma=smoothing)))
         return t_shifted >= t_shifted[lb]
     if mode == "manual":
         end = t_shifted[-1] if end is None else end

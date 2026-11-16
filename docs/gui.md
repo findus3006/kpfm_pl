@@ -96,8 +96,11 @@ title on the left to fold it away.
 4. **Lifetime fit**: *Histogram of* chooses the photons: whole trace, on or
    off state, one ROI, *All ROIs combined*, or *Each ROI separately* (one fit
    per ROI, overlaid in the ROI colours, one table column per ROI). Choose
-   the number of exponentials and how the fit window starts; in *Manual*
-   mode you can drag across the histogram plot to set start and end.
+   the number of exponentials and how the fit window starts: *Falling edge
+   (fraction)* starts after the maximum where the decay has fallen to *Edge
+   fraction* of it, *Inflection point* at the steepest point of the falling
+   edge (both leave the rising edge out); in *Manual* mode you can drag
+   across the histogram plot to set start and end.
    *Dark counts* are subtracted as an offset.
    The fit always works on the raw counts (there is no *Normalise* any more:
    the percentages below show the relative amplitudes directly).
@@ -231,7 +234,10 @@ title on the left to fold it away.
    - **Map**: lifetime and count range, bins and *Map smoothing* redraw the
      maps **instantly** from the stored per-bin lifetimes, without fitting
      again. All maps share the same lifetime range (default 0–20 ns) and
-     count range, so their values are directly comparable.
+     count range, so their values are directly comparable. *Map smoothing*
+     widens the maps; set it to 0 before judging their width (the shot-noise
+     spread of the lifetimes, see
+     [ptu.md](ptu.md#flid-map)).
    - Maps are square. **Double-click** a map (or select its ROI and press
      *Pop out map(s)*) to open it in its own window, with pan/zoom tools,
      wheel zoom and colour-scale fields: minimum, maximum, colormap and

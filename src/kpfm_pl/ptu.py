@@ -183,7 +183,10 @@ def flid_map(trace: Signal, *, lifetime_bins: int = 100, intensity_bins: int = 1
         side (not below 0) so the smoothed histogram is not cut off at the
         outermost points.
     sigma :
-        Gaussian smoothing applied to the 2-D histogram (``0`` disables).
+        Gaussian smoothing applied to the 2-D histogram, in map bins (``0``
+        disables). It adds its width to the shot-noise spread of the per-bin
+        lifetimes (about ``tau / sqrt(N)``), so use ``0`` before judging the
+        width of a map.
     isolated :
         One map per fitted component (``meta["taus"]``, fitted traces only)
         instead of one map of ``y``.
@@ -962,7 +965,11 @@ class PTU:
             raise ValueError("bins must leave at least two lifetime groups for fitting.")
         group_sizes = np.minimum(bins, matrix.shape[1] - group_starts)
         binned_lt = np.add.reduceat(lt_ns, group_starts) / group_sizes
-        mask = self._drop_seam(np.add.reduceat(mask, group_starts) > 0, bins)
+        # Only groups whose bins all lie in the window: a group straddling the
+        # window start would add rising-edge bins at its mean time (too few
+        # counts there, so the fitted lifetimes come out too long).
+        mask = self._drop_seam(
+            np.add.reduceat(mask.astype(int), group_starts) == group_sizes, bins)
         t_rel = binned_lt - t0_ns
         if prerise:
             # A group lies before the rise only if all its bins do, and the
@@ -1234,10 +1241,14 @@ class PTU:
         channel (``dark_counts * bintime / n_lt_bins``) are subtracted and the
         mean delay of the remaining photons after the window start is taken.
 
-        For a decay ``sum(A_i exp(-t/tau_i))`` observed without limit this mean
-        is exactly the intensity-weighted mean lifetime
-        ``sum(A_i tau_i**2) / sum(A_i tau_i)`` of the fits, independent of where
-        the window starts. The window of length ``T`` cuts off late photons, so
+        Observed without limit, this mean is exactly ``tau`` for one
+        exponential, wherever the window starts. For a decay
+        ``sum(A_i exp(-t/tau_i))`` it is the intensity-weighted mean lifetime
+        of the decay at the window start ``t0``:
+        ``sum(a_i tau_i**2) / sum(a_i tau_i)`` with ``a_i = A_i exp(-t0/tau_i)``,
+        longer than the ``tau_int`` of the fits (amplitudes at ``t = 0``, the
+        histogram maximum) for ``t0 > 0``, since the short components have
+        already faded. The window of length ``T`` cuts off late photons, so
         the mean is too short: ``tau - T / (exp(T / tau) - 1)`` for one
         exponential. ``truncation_correction=True`` (default) inverts this
         relation (:func:`~kpfm_pl.utils.lifetime_from_truncated_mean`); it is
