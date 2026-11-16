@@ -493,7 +493,8 @@ class PTU:
         one period, which is negligible for time bins of milliseconds.
         If the period is not a whole number of bins, the last bin of the window
         is only partly covered. After a shift it lies inside the decay
-        (:attr:`lifetime_seam_bin`), so the lifetime fits leave it out.
+        (:attr:`lifetime_seam_bin`); the lifetime fits leave it and the other
+        seam bins out (:meth:`seam_bins`).
         All cached traces are discarded.
         """
         self._require_pulsed()
@@ -535,59 +536,95 @@ class PTU:
                   f"{self.lifetime_shift_ns:.3f} ns.")
         return self.lifetime_shift_ns
 
-    def _drop_seam(self, mask: np.ndarray, bins: int = 1) -> np.ndarray:
-        """Remove the partial seam bin (see :meth:`set_lifetime_shift`) from ``mask``.
+    def seam_bins(self) -> np.ndarray:
+        """Lifetime bins that are not fully inside one laser period (the seam).
 
-        ``mask`` is over lifetime bins grouped by ``bins``.
+        Detected from the geometry of the file, not from count statistics:
+
+        * bins past the laser period, which never fill;
+        * the last bin of the period if the period is not a whole number of
+          bins: it is only partly covered and collects fewer photons;
+        * the bins after the last one that holds a photon anywhere in the
+          file: there the real laser period is shorter than the header says
+          (seen in legacy files whose sync only ran while the laser was on).
+
+        Unshifted they sit at the end of the lifetime window; a lifetime
+        shift (:meth:`set_lifetime_shift`) moves them into the decay, and
+        this mask follows it. Every lifetime fit leaves them out by default
+        (``exclude_seam``): a partly covered or empty bin does not follow the
+        decay, and the bins before the rise (``prerise``) rely on the period.
+
+        Returns
+        -------
+        ndarray of bool
+            One entry per lifetime bin (:attr:`n_lt_bins`), ``True`` for a
+            seam bin. All ``False`` when the laser period is unknown.
         """
-        seam = self.lifetime_seam_bin
-        if seam is None or seam // bins >= mask.size:
-            return mask
-        mask = mask.copy()
-        mask[seam // bins] = False
-        return mask
-
-    def _beyond_period(self) -> np.ndarray:
-        """Lifetime bins that are not fully inside one laser period.
-
-        Bins past the period never fill, and if the period is not a whole
-        number of bins its last bin is only partly covered (after a lifetime
-        shift that is :attr:`lifetime_seam_bin`). The same holds for the bins
-        after the last one that holds a photon anywhere in the file: there
-        the real laser period is shorter than the header says (seen in
-        legacy files whose sync only ran while the laser was on). Fits of
-        the bins before the rise rely on the period and leave all of them
-        out; as empty bins they would also pull a fitted background down.
-        """
-        period_bins = self.rep_time / self.resolution
+        out = np.zeros(self.n_lt_bins, dtype=bool)
+        resolution = getattr(self, "resolution", None)
+        if self._period_ns() is None or not resolution:
+            return out
+        period_bins = self.rep_time / resolution
         wrap = int(np.ceil(period_bins - 1e-6))
         out = np.arange(self.n_lt_bins) >= wrap
         if wrap > self.n_lt_bins:
             return out                  # window shorter than the period: nothing wraps
-        if period_bins - (wrap - 1) < 0.99:
-            seam = self.lifetime_seam_bin if self.lifetime_seam_bin is not None else wrap - 1
-            out[seam] = True
+        partial = self._partial_bin()
+        if partial is not None:
+            out[partial] = True
         raw = getattr(self, "_raw_dtime", None)
         if raw is not None and len(raw):
             # Raw bins that never filled, moved along with a lifetime shift.
             empty = np.arange(int(np.max(raw)) + 1, wrap)
-            shift_bins = int(round(self.lifetime_shift_ns * 1e-9 / self.resolution))
+            shift_bins = int(round(self.lifetime_shift_ns * 1e-9 / resolution))
             out[(empty - shift_bins) % wrap] = True
         return out
 
-    def _prerise_bins(self, t_ns: np.ndarray, window: np.ndarray, gap: float) -> np.ndarray:
+    def _partial_bin(self) -> int | None:
+        """The partly covered last bin of the period (moved by a lifetime shift), if any."""
+        resolution = getattr(self, "resolution", None)
+        if self._period_ns() is None or not resolution:
+            return None
+        period_bins = self.rep_time / resolution
+        wrap = int(np.ceil(period_bins - 1e-6))
+        if wrap > self.n_lt_bins or period_bins - (wrap - 1) >= 0.99:
+            return None
+        return self.lifetime_seam_bin if self.lifetime_seam_bin is not None else wrap - 1
+
+    def _seam_mask(self, size: int, exclude_seam: bool) -> np.ndarray:
+        """:meth:`seam_bins` for a histogram of ``size`` bins, or all ``False``.
+
+        Nothing is left out with ``exclude_seam=False`` or for a histogram
+        that is not on this file's lifetime bins.
+        """
+        if not exclude_seam or size != self.n_lt_bins:
+            return np.zeros(size, dtype=bool)
+        return self.seam_bins()
+
+    def _seam_report(self, t_ns: np.ndarray, seam: np.ndarray) -> dict[str, Any]:
+        """Fit-result entries describing the seam bins left out (``t_ns`` per bin)."""
+        partial = self._partial_bin() if seam.any() else None
+        if partial is not None and not (partial < seam.size and seam[partial]):
+            partial = None
+        return {"seam_ns": None if partial is None else float(t_ns[partial]),
+                "excluded_ns": np.asarray(t_ns, dtype=float)[seam],
+                "seam_points": int(np.count_nonzero(seam))}
+
+    def _prerise_bins(self, t_ns: np.ndarray, window: np.ndarray, gap: float,
+                      seam: np.ndarray | None = None) -> np.ndarray:
         """Bins before the rising edge that are fitted together with the tail.
 
         ``t_ns`` is the lifetime axis with the histogram maximum at 0,
-        ``window`` the tail-fit window (its bins are not counted twice) and
+        ``window`` the tail-fit window (its bins are not counted twice),
         ``gap`` the distance in ns the region keeps from the maximum, see
-        :func:`~kpfm_pl.utils.prerise_mask`.
+        :func:`~kpfm_pl.utils.prerise_mask`, and ``seam`` the seam bins to
+        leave out (:meth:`seam_bins`).
         """
         if self._period_ns() is None:
             raise ValueError("Fitting the bins before the rise needs the laser period.")
         pre = prerise_mask(t_ns, gap) & ~np.asarray(window, dtype=bool)
-        if pre.size == self.n_lt_bins:
-            pre &= ~self._beyond_period()
+        if seam is not None and seam.size == pre.size:
+            pre &= ~seam
         if not pre.any():
             raise ValueError(
                 f"No lifetime bins lie more than {gap:g} ns before the histogram maximum; "
@@ -928,6 +965,7 @@ class PTU:
         irf: dict[str, Any] | None = None,
         prerise: bool = False, prerise_gap: float = 2.0,
         background_rate: float | None = None,
+        exclude_seam: bool = True,
         progress: Callable[[int, int], Any] | None = None,
         **fit_kwargs,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -943,8 +981,8 @@ class PTU:
         if irf is not None:
             return self._fit_time_bin_lifetimes_irf(
                 sel, irf, n_exp=n_exp, bins=bins, mode=mode, start=start, end=end,
-                weighting=weighting, decay_correction=decay_correction, progress=progress,
-                **fit_kwargs)
+                weighting=weighting, decay_correction=decay_correction,
+                exclude_seam=exclude_seam, progress=progress, **fit_kwargs)
         time, matrix, selected = sel["time"], sel["matrix"], sel["selected"]
         bintime = sel["bintime"]
 
@@ -953,9 +991,10 @@ class PTU:
         # remain NaN so their positions stay aligned with ``time``.
         lt_ns, t0_ns, mask = self._lifetime_window(
             matrix[selected, :], mode, fraction, smoothing, start, end)
+        seam = self._seam_mask(mask.size, exclude_seam)
         pre = np.zeros(mask.shape, dtype=bool)
         if prerise:
-            pre = self._prerise_bins(lt_ns - t0_ns, mask, prerise_gap)
+            pre = self._prerise_bins(lt_ns - t0_ns, mask, prerise_gap, seam)
         if background_rate is not None and (not np.isfinite(background_rate)
                                             or background_rate < 0):
             raise ValueError("background_rate must be a finite, non-negative number or None.")
@@ -967,19 +1006,19 @@ class PTU:
         binned_lt = np.add.reduceat(lt_ns, group_starts) / group_sizes
         # Only groups whose bins all lie in the window: a group straddling the
         # window start would add rising-edge bins at its mean time (too few
-        # counts there, so the fitted lifetimes come out too long).
-        mask = self._drop_seam(
-            np.add.reduceat(mask.astype(int), group_starts) == group_sizes, bins)
+        # counts there, so the fitted lifetimes come out too long). A group
+        # holding a seam bin is left out as a whole.
+        outside = np.add.reduceat(seam.astype(int), group_starts) > 0
+        mask = (np.add.reduceat(mask.astype(int), group_starts) == group_sizes) & ~outside
         t_rel = binned_lt - t0_ns
         if prerise:
             # A group lies before the rise only if all its bins do, and the
             # wrapped times need groups that are fully inside the period.
             whole = np.add.reduceat(pre.astype(int), group_starts) == group_sizes
-            outside = np.add.reduceat(self._beyond_period().astype(int), group_starts) > 0
             pre = whole & ~mask & ~outside
             if not pre.any():
                 raise ValueError("bins leaves no whole lifetime group before the rise.")
-            mask = (mask & ~outside) | pre
+            mask = mask | pre
             # Bins before the rise continue the decay of the previous pulse.
             t_rel = np.where(pre, t_rel + self._period_ns(), t_rel)
         t_fit = t_rel[mask]
@@ -1032,13 +1071,15 @@ class PTU:
     def _fit_time_bin_lifetimes_irf(
         self, sel: dict[str, Any], irf: dict[str, Any], *, n_exp: int, bins: int,
         mode: str, start: float, end: float | None, weighting: str,
-        decay_correction: bool, progress: Callable[[int, int], Any] | None = None,
+        decay_correction: bool, exclude_seam: bool = True,
+        progress: Callable[[int, int], Any] | None = None,
         **fit_kwargs,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Reconvolution fit of every selected time bin (see :meth:`lifetime_trace`)."""
         time, matrix, selected = sel["time"], sel["matrix"], sel["selected"]
         bintime = sel["bintime"]
-        wrap, seam = self._period_grid()
+        wrap = self._period_grid()
+        seam = self._seam_mask(self.n_lt_bins, exclude_seam)[:wrap]
         irf_full, _ = prepare_irf(self.irf_histogram(irf["irf"])[:wrap],
                                   irf.get("background", "auto"))
         # Group the lifetime bins of one period by ``bins``.
@@ -1056,8 +1097,8 @@ class PTU:
             mask = fit_window_mask(t_rel, summed, "manual", start=start, end=end)
         else:
             mask = np.ones(starts.size, dtype=bool)
-        if seam is not None and seam < wrap:
-            mask[seam // bins] = False
+        # A group holding a seam bin is left out as a whole.
+        mask &= ~(np.add.reduceat(seam.astype(int), starts) > 0)
         if mask.sum() < 2 * n_exp + 3:
             raise ValueError("The fit window holds too few bins for the reconvolution fit.")
         dt = self.resolution * 1e9 * bins
@@ -1138,6 +1179,7 @@ class PTU:
                        scatter_fraction: float | None = None,
                        irf_background: float | str | None = "auto",
                        prerise: bool = False, prerise_gap: float = 2.0,
+                       exclude_seam: bool = True,
                        progress: Callable[[int, int], Any] | None = None,
                        **fit_kwargs) -> Signal:
         """Return mean fitted lifetime versus acquisition time.
@@ -1186,6 +1228,11 @@ class PTU:
         ``background_rate`` (counts per second and lifetime bin, e.g. from
         ``fit_lifetime(..., fit_background=True)`` of the summed histogram)
         or, by default, the dark counts.
+
+        ``exclude_seam`` (default) leaves the seam bins out of every per-bin
+        fit (:meth:`seam_bins`; with ``bins > 1`` the whole group holding
+        one), as in :meth:`fit_lifetime`. ``meta["seam_points"]`` is their
+        number.
         """
         self._validate_fit_args(n_exp, bins, weighting, fit_kwargs, mean_lifetime)
         irf_options = None
@@ -1203,10 +1250,12 @@ class PTU:
             sel, n_exp=n_exp, bins=bins, mode=mode, fraction=fraction,
             smoothing=smoothing, start=start, end=end, weighting=weighting,
             decay_correction=decay_correction, irf=irf_options, prerise=prerise,
-            prerise_gap=prerise_gap, background_rate=background_rate, progress=progress,
+            prerise_gap=prerise_gap, background_rate=background_rate,
+            exclude_seam=exclude_seam, progress=progress,
             **fit_kwargs,
         )
         tail_prerise = bool(prerise) and irf is None
+        n_seam = int(np.count_nonzero(self._seam_mask(self.n_lt_bins, exclude_seam)))
         return Signal(
             sel["time"], _weighted_mean_lifetime(taus, amps, mean_lifetime),
             label=f"{self.filepath.stem} mean lifetime",
@@ -1218,7 +1267,8 @@ class PTU:
                   "reconvolution": irf is not None, "irf_shift_ns": irf_shift,
                   "prerise": tail_prerise,
                   "prerise_gap_ns": float(prerise_gap) if tail_prerise else None,
-                  "background_rate": background_rate},
+                  "background_rate": background_rate,
+                  "exclude_seam": bool(exclude_seam), "seam_points": n_seam},
         )
 
     def arrival_time_trace(self, roi: dict[str, float] | None = None, *,
@@ -1232,6 +1282,7 @@ class PTU:
                            truncation_correction: bool = True,
                            min_counts: float | None = 100, coverage: float = 0.9,
                            auto_bintime: bool = False,
+                           exclude_seam: bool = True,
                            progress: Callable[[int, int], Any] | None = None) -> Signal:
         """Lifetime per time bin from the mean photon arrival time, without fitting.
 
@@ -1254,7 +1305,8 @@ class PTU:
         relation (:func:`~kpfm_pl.utils.lifetime_from_truncated_mean`); it is
         exact for one exponential and approximate for several. Without dark-count
         subtraction (``dark_counts`` set wrongly) the flat background pulls the
-        mean towards ``T / 2``.
+        mean towards ``T / 2``. ``exclude_seam`` (default) leaves the seam
+        bins (:meth:`seam_bins`) out of the mean.
 
         Returns
         -------
@@ -1276,7 +1328,7 @@ class PTU:
         time, matrix, selected = sel["time"], sel["matrix"], sel["selected"]
         lt_ns, t0_ns, mask = self._lifetime_window(
             matrix[selected, :], mode, fraction, smoothing, start, end)
-        channels = np.flatnonzero(self._drop_seam(mask))
+        channels = np.flatnonzero(mask & ~self._seam_mask(mask.size, exclude_seam))
         if channels.size < 2:
             raise ValueError("The selected lifetime fit window contains fewer than two bins.")
         res_ns = self.resolution * 1e9
@@ -1313,7 +1365,8 @@ class PTU:
                   "photons": photons, "window_ns": window_ns,
                   "window_start_ns": window_start - t0_ns,
                   "dark_per_channel": dark,
-                  "truncation_correction": bool(truncation_correction)},
+                  "truncation_correction": bool(truncation_correction),
+                  "exclude_seam": bool(exclude_seam)},
         )
 
     def flid(self, roi: dict[str, float] | None = None, *,
@@ -1334,6 +1387,7 @@ class PTU:
              irf_shift: float | None = None, background_rate: float | None = None,
              scatter_fraction: float | None = None,
              prerise: bool = False, prerise_gap: float = 2.0,
+             exclude_seam: bool = True,
              progress: Callable[[int, int], Any] | None = None,
              **fit_kwargs) -> Image | list[Image]:
         """Compute a FLID (Fluorescence-Lifetime-Intensity-Distribution) map.
@@ -1411,6 +1465,9 @@ class PTU:
         prerise, prerise_gap :
             Also fit the bins before the rise in the per-bin tail fits, see
             :meth:`lifetime_trace` (``method="fit"`` only).
+        exclude_seam :
+            Leave the seam bins (:meth:`seam_bins`) out of every per-bin fit
+            or mean arrival time (default).
         progress :
             Optional callback ``progress(done, total)``, called before each
             per-bin fit and once with ``done == total`` at the end (e.g. to
@@ -1433,7 +1490,8 @@ class PTU:
                   "start": start, "end": end}
         common = {"x_min": x_min, "x_max": x_max, "y_min": y_min, "y_max": y_max,
                   "bintime": bintime, "min_counts": min_counts, "coverage": coverage,
-                  "auto_bintime": auto_bintime, "progress": progress, **window}
+                  "auto_bintime": auto_bintime, "exclude_seam": exclude_seam,
+                  "progress": progress, **window}
         if method == "fit":
             trace = self.lifetime_trace(roi, n_exp=n_exp, bins=bins, weighting=weighting,
                                         mean_lifetime=mean_lifetime,
@@ -1509,6 +1567,7 @@ class PTU:
                      irf_shift: float | None = None,
                      irf_background: float | str | None = "auto",
                      prerise: bool = False, prerise_gap: float = 2.0,
+                     exclude_seam: bool = True,
                      **fit_kwargs) -> dict[str, Any]:
         """Fit a lifetime ``histogram`` with ``n_exp`` exponentials.
 
@@ -1560,12 +1619,21 @@ class PTU:
         they enter the fit at their time since that pulse, ``t + T``
         (``out["t_model"]``; ``out["t_fit"]`` keeps the plot position), and
         extend the observed decay to the whole laser period. The first
-        ``out["prerise_points"]`` fitted points are those bins. ``prerise``
-        leaves out lifetime bins that are not fully inside the period. A
+        ``out["prerise_points"]`` fitted points are those bins. A
         fitted background and a lifetime above half the laser period are
         barely separable, which ``out["warnings"]`` reports
         (``diagnostics={"period_fraction": ...}``). ``prerise`` is not used
         with ``irf``: the reconvolution fits the whole period anyway.
+
+        **Seam bins.** ``exclude_seam`` (default) leaves out the lifetime
+        bins that are not fully inside one laser period (:meth:`seam_bins`:
+        bins past the period, its partly covered last bin, bins that never
+        fill; they follow a lifetime shift), in the tail fit, the bins before
+        the rise and the reconvolution alike. ``out["excluded_ns"]`` holds
+        their positions on ``shifted_histogram_x``, ``out["seam_points"]``
+        their number and ``out["seam_ns"]`` the partly covered bin (``None``
+        without one). ``exclude_seam=False`` fits them like any other bin.
+        Only histograms on this file's lifetime bins have seam bins.
 
         **IRF reconvolution.** With ``irf`` (a :class:`PTU` of the recorded
         instrument response, its lifetime histogram as :class:`Signal`, or an
@@ -1574,7 +1642,7 @@ class PTU:
         (:class:`~kpfm_pl.fitting.IRFReconvolutionFit`). The IRF must have the
         same TCSPC resolution and laser period, and the lifetime window must
         cover a whole period. ``mode="fraction"``/``"inflection"`` then fit
-        the whole period (except the partial last bin), ``"manual"`` the
+        the whole period (except the seam bins), ``"manual"`` the
         bins between ``start`` and ``end``. The IRF shift ``δ`` is fitted
         (``irf_shift`` fixes it, in ns); ``fit_background`` also fits the
         constant background ``B`` (otherwise fixed from the dark counts) and
@@ -1600,24 +1668,22 @@ class PTU:
                 weighting=weighting, diagnostics=diagnostics, mean_lifetime=mean_lifetime,
                 decay_correction=decay_correction, fit_background=fit_background,
                 fit_scatter=fit_scatter, irf_shift=irf_shift, irf_background=irf_background,
-                **fit_kwargs)
+                exclude_seam=exclude_seam, **fit_kwargs)
         y = np.asarray(histogram["y"], dtype=float)
         t0 = histogram["x"][np.argmax(y)]
         t_ns = (histogram["x"] - t0) * 1e9
 
         mask = fit_window_mask(t_ns, y, mode, fraction=fraction,
                                smoothing=smoothing, start=start, end=end)
-        if y.size == self.n_lt_bins:
-            mask = self._drop_seam(mask)
-            if prerise:
-                # The wrapped times rely on the period: keep only bins fully inside it.
-                mask = mask & ~self._beyond_period()
+        # Bins not fully inside one laser period do not follow the decay.
+        seam = self._seam_mask(y.size, exclude_seam)
+        mask = mask & ~seam
         tail = mask
         pre = np.zeros(y.size, dtype=bool)
         t_model = np.asarray(t_ns, dtype=float)
         if prerise:
             # Bins before the rise continue the decay of the previous pulse.
-            pre = self._prerise_bins(t_model, tail, prerise_gap)
+            pre = self._prerise_bins(t_model, tail, prerise_gap, seam)
             t_model = np.where(pre, t_model + self._period_ns(), t_model)
             mask = tail | pre
 
@@ -1637,12 +1703,11 @@ class PTU:
                          weighting=weighting, diagnostics=diagnostics,
                          mean_lifetime=mean_lifetime, decay_correction=decay_correction,
                          period=self._period_ns())
-        seam = self.lifetime_seam_bin if y.size == self.n_lt_bins else None
         out.update({"shifted_histogram_x": t_ns, "t_fit": t_fit, "y_fit": y_fit,
                     "t_model": t_model[mask],
                     "left_bound_ns": float(t_ns[tail][0]), "weighting": weighting,
                     "lifetime_shift_ns": self.lifetime_shift_ns,
-                    "seam_ns": None if seam is None else float(t_ns[seam]),
+                    "exclude_seam": bool(exclude_seam), **self._seam_report(t_ns, seam),
                     "fit_background": bool(fit_background),
                     "background": float(out.get("offset", offset)) * norm,
                     "background_err": float(out.get("offset_err", 0.0)) * norm,
@@ -1719,8 +1784,8 @@ class PTU:
                              f"{self.filepath.name} has {self.n_lt_bins} lifetime bins.")
         return counts
 
-    def _period_grid(self) -> tuple[int, int | None]:
-        """``(bins of one laser period, partial bin to leave out or None)``."""
+    def _period_grid(self) -> int:
+        """Number of lifetime bins of one laser period (the window must cover it)."""
         period_bins = self.rep_time / self.resolution
         wrap = int(np.ceil(period_bins - 1e-6))
         if self.n_lt_bins < wrap:
@@ -1729,23 +1794,21 @@ class PTU:
                 f"{self.n_lt_bins * self.resolution * 1e9:.4g} ns) is shorter than one laser "
                 f"period ({self.rep_time * 1e9:.4g} ns). IRF reconvolution needs the whole "
                 "period; record with a coarser TCSPC resolution.")
-        seam = None
-        if period_bins - (wrap - 1) < 0.99:     # the last bin is only partly covered
-            seam = self.lifetime_seam_bin if self.lifetime_seam_bin is not None else wrap - 1
-        return wrap, seam
+        return wrap
 
     def _fit_lifetime_irf(self, histogram: Signal, n_exp: int, irf, *, mode: str,
                           start: float, end: float | None, weighting: str,
                           diagnostics: dict[str, float] | None, mean_lifetime: str,
                           decay_correction: bool, fit_background: bool, fit_scatter: bool,
                           irf_shift: float | None, irf_background: float | str | None,
-                          **fit_kwargs) -> dict[str, Any]:
+                          exclude_seam: bool = True, **fit_kwargs) -> dict[str, Any]:
         y = np.asarray(histogram["y"], dtype=float)
         if y.size != self.n_lt_bins:
             raise ValueError("IRF reconvolution needs a lifetime histogram of this file "
                              f"({self.n_lt_bins} bins).")
         irf_counts = self.irf_histogram(irf)
-        wrap, seam = self._period_grid()
+        wrap = self._period_grid()
+        seam = self._seam_mask(y.size, exclude_seam)
         x = np.asarray(histogram["x"], dtype=float)
         t_ns = (x - x[int(np.argmax(y))]) * 1e9
         t_p, y_p = t_ns[:wrap], y[:wrap]
@@ -1753,8 +1816,7 @@ class PTU:
             mask = fit_window_mask(t_p, y_p, "manual", start=start, end=end)
         else:
             mask = np.ones(wrap, dtype=bool)
-        if seam is not None and seam < wrap:
-            mask[seam] = False
+        mask &= ~seam[:wrap]
         if mask.sum() < 2 * n_exp + 3:
             raise ValueError("The fit window holds too few bins for the reconvolution fit.")
         fit_kwargs = _poisson_weights(weighting, y_p[mask], 1.0, fit_kwargs)
@@ -1771,7 +1833,7 @@ class PTU:
                     "left_bound_ns": float(t_p[mask][0]), "weighting": weighting,
                     "lifetime_shift_ns": self.lifetime_shift_ns, "irf_t_ns": t_p,
                     "period": self.rep_time * 1e9 if decay_correction else None,
-                    "seam_ns": None if seam is None else float(t_ns[seam])})
+                    "exclude_seam": bool(exclude_seam), **self._seam_report(t_ns, seam)})
         if isinstance(irf, PTU):
             out["irf_source"] = str(irf.filepath)
         return out

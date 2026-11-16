@@ -138,11 +138,51 @@ Notes:
 - It requires the window to cover a full period (`rep_time / resolution`
   bins, at most 4096); otherwise it raises `ValueError`.
 - If the period is not a whole number of bins (e.g. 1562.5), the partly
-  covered last bin ends up inside the decay. It is left out of all lifetime
-  fits (`ptu.lifetime_seam_bin`, `fit["seam_ns"]`).
+  covered last bin ends up inside the decay (`ptu.lifetime_seam_bin`). It is
+  a [seam bin](#seam-bins) and left out of all lifetime fits.
+- The rotation works on whole bins: the bins moved across the window edge
+  are placed `N` bins later, with `N` the period rounded up to whole bins.
+  They therefore sit up to one bin late (0.30 bin = 19 ps for a period of
+  1603.70 bins of 64 ps). The [bins before the rise](#background-and-the-bins-before-the-rise)
+  use the same physics without this rounding.
 - Time traces are unchanged. Photons moved across the window edge strictly
   belong to the previous pulse (one period, ~100 ns, earlier), which is
   negligible for time bins of milliseconds.
+
+## Seam bins
+
+Some lifetime bins are not fully inside one laser period and do not follow
+the decay:
+
+- bins past the period, which never fill;
+- the last bin of the period when the period is not a whole number of bins.
+  It is only partly covered and collects fewer photons (period 1603.70 bins:
+  the last bin holds about 70 % of the counts of its neighbours);
+- the bins after the last one that holds a photon anywhere in the file. There
+  the real laser period is shorter than the header says (legacy files whose
+  sync only ran while the laser was on).
+
+```python
+seam = ptu.seam_bins()            # boolean mask, one entry per lifetime bin
+```
+
+They are detected from this geometry, not from count statistics. Unshifted
+they sit at the end of the lifetime window; a [lifetime shift](#lifetime-shift-salvaging-a-wrong-sync-offset)
+moves them into the decay, and the mask follows it.
+
+Every lifetime analysis leaves them out by default: `fit_lifetime` (tail
+fit, bins before the rise and IRF reconvolution alike), `lifetime_trace`,
+`arrival_time_trace` and `flid` take `exclude_seam=True`. With lifetime
+binning (`bins > 1`) the whole group holding a seam bin is left out.
+`exclude_seam=False` treats them like any other bin. A fit result lists them
+in `fit["excluded_ns"]` (positions on `shifted_histogram_x`),
+`fit["seam_points"]` (their number) and `fit["seam_ns"]` (the partly covered
+bin, `None` without one); traces store `meta["seam_points"]`. A histogram
+that is not on the file's lifetime bins has no seam bins.
+
+Before v1.8.2 only some fits left out some of these bins: the plain tail fit
+of unshifted data kept all of them, and a shifted tail fit left out one bin
+even when several were empty.
 
 ## Lifetime fitting
 
@@ -219,6 +259,7 @@ The returned dict contains:
 | `t_model` | time since the laser pulse of every fitted point (equal to `t_fit`, except `t_fit + T` for the bins before the rise) |
 | `prerise`, `prerise_points`, `prerise_gap_ns` | whether the bins before the rise were fitted, how many (they are the first entries of `t_fit`), and the gap used |
 | `left_bound_ns` | left bound of the fit window after the maximum (ns) |
+| `exclude_seam`, `excluded_ns`, `seam_points`, `seam_ns` | whether the [seam bins](#seam-bins) were left out, their positions on `shifted_histogram_x`, their number, and the partly covered bin (`None` without one) |
 
 **Fit quality.** `R²` is close to 1 for almost any decay, so it is a poor
 measure for photon-counting data. `quality["reduced_chi_squared"]`
@@ -340,12 +381,19 @@ ignored with `irf=`, where the whole period is fitted anyway.
 
 Notes:
 
-- **Bins outside the period.** `prerise` leaves out lifetime bins that are
-  not fully inside one laser period: the bin past the period, a partly
-  covered last bin, and bins after the last one that holds a photon anywhere
-  in the file (legacy files whose header period is longer than the real
-  one). `fit_background` alone keeps the bins of the plain tail fit, so the
+- **Bins outside the period.** The [seam bins](#seam-bins) are left out, as
+  in every lifetime fit (`exclude_seam=True`): the wrapped times rely on the
+  period. `fit_background` alone keeps the bins of the plain tail fit, so the
   BIC of the two can be compared.
+- **Lifetime shift or bins before the rise?** Both use the fact that a bin
+  before the rise holds the tail of the previous pulse. The
+  [lifetime shift](#lifetime-shift-salvaging-a-wrong-sync-offset) rotates the
+  **data** by whole bins, so every histogram, plot, fit, lifetime trace and
+  FLID sees a decay in one piece; it is meant for a peak late in the window.
+  `prerise` leaves the data alone and only gives those bins the **model
+  time** `t + T`, with the exact period `T`, for the fit that asks for it.
+  They can be combined; after an automatic shift the bins before the rise are
+  the last part of the previous pulse's tail.
 - **Long lifetimes and the background are hard to tell apart.** Within one
   period a slow decay is nearly flat: at `τ = T/2` it only falls to 14 %.
   The bins before the rise extend the time range by the part of the period
@@ -578,6 +626,7 @@ Key parameters:
 | `mean_lifetime` | `"intensity"` | mean lifetime of a bin with `n_exp > 1`: `"intensity"` (`tau_int`) or `"amplitude"` (`tau_amp`); fitted maps only (also for `lifetime_trace`) |
 | `decay_correction` | `True` | correct the per-bin amplitudes for the incomplete decay of earlier pulses, as in `fit_lifetime` (also for `lifetime_trace`) |
 | `prerise`/`prerise_gap` | `False`/`2.0` | also fit the bins more than `prerise_gap` ns before the histogram maximum in the per-bin tail fits, as in `fit_lifetime` (also for `lifetime_trace`; fitted maps only) |
+| `exclude_seam` | `True` | leave the [seam bins](#seam-bins) out of every per-bin fit or mean arrival time (also for `lifetime_trace` and `arrival_time_trace`) |
 | `background_rate` | `None` | constant offset of the per-bin fits in counts per second and lifetime bin, e.g. from `fit_lifetime(..., fit_background=True)`; `None` = dark counts (also for `lifetime_trace`; fitted maps only) |
 | `method` | `"fit"` | `"mean_arrival"`: map the mean photon arrival time instead of fitting |
 | `truncation_correction` | `True` | for `method="mean_arrival"`, see [Mean arrival time](#mean-arrival-time-no-fit) |

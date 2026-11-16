@@ -542,3 +542,27 @@ def test_period_fraction_is_a_warning_threshold():
     assert model.DIAGNOSTIC_DEFAULTS["period_fraction"] == 0.5
     with pytest.raises(ValueError, match="period_fraction"):
         model.FitOptions(period_fraction=-0.1).validate()
+
+
+# ------------------------------------------------------------------ seam bins
+def test_seam_bins_are_left_out_by_default_and_reported(handle):
+    assert "exclude_seam" not in model.FitParams().window_kwargs()     # backend default
+    assert model.FitParams(exclude_seam=False).window_kwargs()["exclude_seam"] is False
+    assert model.FitParams(exclude_seam=False).window_values()["exclude_seam"] is False
+    params, states = model.TraceParams(bintime=1.0), model.StateParams()
+    result = model.compute_fit(handle, params, model.FitParams(n_exp=2), states)
+    assert result.fit["seam_points"] == 1                  # the partly covered last bin
+    assert model.fit_summary(result.fit)["seam_bins"] == 1
+    kept = model.compute_fit(handle, params, model.FitParams(n_exp=2, exclude_seam=False),
+                             states)
+    assert kept.fit["seam_points"] == 0 and "seam_bins" not in model.fit_summary(kept.fit)
+    assert len(kept.fit["t_fit"]) == len(result.fit["t_fit"]) + 1
+    payload = model.fit_payload(kept)
+    assert payload.metadata["parameters"]["fit"]["exclude_seam"] is False
+
+
+def test_bin_runs_group_neighbouring_bins():
+    assert model.bin_runs([], 0.1) == []
+    assert model.bin_runs([1.0, 1.1, 1.2, 5.0, 9.0, 9.1], 0.1) == [(1.0, 1.2), (5.0, 5.0),
+                                                                   (9.0, 9.1)]
+

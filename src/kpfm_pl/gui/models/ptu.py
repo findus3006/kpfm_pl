@@ -54,6 +54,7 @@ __all__ = [
     "compute_roi_fits",
     "compute_lifetime_trace",
     "fit_summary",
+    "bin_runs",
     "BicComparison",
     "same_fit_data",
     "compare_bic",
@@ -129,7 +130,8 @@ class FitParams:
 
     ``prerise`` also fits the bins that lie more than ``prerise_gap`` ns
     before the histogram maximum (tail fits only; they hold the tail of the
-    previous laser pulse).
+    previous laser pulse). ``exclude_seam`` leaves out the lifetime bins that
+    are not fully inside one laser period (``PTU.seam_bins``).
     """
 
     source: str = "all"
@@ -142,20 +144,26 @@ class FitParams:
     roi: int = 0
     prerise: bool = False
     prerise_gap: float = 2.0
+    exclude_seam: bool = True
 
     def window_kwargs(self) -> dict[str, Any]:
-        """Fit-window arguments; the pre-rise ones only when switched on."""
+        """Fit-window arguments; the pre-rise ones only when switched on.
+
+        ``exclude_seam`` is the backend default and only passed when off.
+        """
         kwargs = {"mode": self.mode, "fraction": self.fraction, "smoothing": self.smoothing,
                   "start": self.start, "end": self.end}
         if self.prerise:
             kwargs.update(prerise=True, prerise_gap=float(self.prerise_gap))
+        if not self.exclude_seam:
+            kwargs["exclude_seam"] = False
         return kwargs
 
     def window_values(self) -> dict[str, Any]:
         """All fit-window settings (for copying them to another form)."""
         return {"mode": self.mode, "fraction": self.fraction, "smoothing": self.smoothing,
                 "start": self.start, "end": self.end, "prerise": self.prerise,
-                "prerise_gap": self.prerise_gap}
+                "prerise_gap": self.prerise_gap, "exclude_seam": self.exclude_seam}
 
 
 def _components(value: float | None = None) -> list[float | None]:
@@ -812,6 +820,8 @@ def fit_summary(fit: dict[str, Any]) -> dict[str, Any]:
         summary["offset"] = float(fit.get("offset", 0.0))
     if fit.get("prerise"):
         summary["prerise_bins"] = int(fit.get("prerise_points", 0))
+    if fit.get("seam_points"):
+        summary["seam_bins"] = int(fit["seam_points"])
     summary["reduced_chi_squared"] = float(quality.get("reduced_chi_squared", np.nan))
     if "bic" in quality:
         summary["bic"] = float(quality["bic"])
@@ -1022,6 +1032,20 @@ def _histogram_name(histogram: Signal, source: str) -> str:
     if "roi_numbers" in histogram.meta or label.startswith(("on (", "off (")):
         name += "_" + label.split(" (")[0].replace(" ", "")
     return name
+
+
+def bin_runs(times: Sequence[float], step: float) -> list[tuple[float, float]]:
+    """``(first, last)`` time of every run of neighbouring bins in ``times``.
+
+    ``times`` are sorted bin positions and ``step`` the bin width; bins less
+    than 1.5 widths apart belong to one run (used to mark the seam bins of a
+    fit as a few spans instead of one line per bin).
+    """
+    times = np.asarray(times, dtype=float)
+    if times.size == 0:
+        return []
+    breaks = np.flatnonzero(np.diff(times) > 1.5 * abs(step)) + 1
+    return [(float(run[0]), float(run[-1])) for run in np.split(times, breaks)]
 
 
 def shifted_histogram_x(histogram: Signal) -> np.ndarray:

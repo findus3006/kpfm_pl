@@ -1069,7 +1069,12 @@ def test_fit_lifetime_prerise_fits_the_previous_pulse_tail():
     hist = p.lifetime_histogram(p._matrix, bintime=1.0)
     plain = p.fit_lifetime(hist, n_exp=2, mode="manual", start=0.0)
     assert plain["prerise"] is False and plain["prerise_points"] == 0
-    assert len(plain["t_fit"]) == 901          # tail incl. the never-filled last bin
+    assert len(plain["t_fit"]) == 900          # tail without the never-filled last bin
+    assert plain["seam_points"] == 1 and plain["seam_ns"] is None
+    np.testing.assert_allclose(plain["excluded_ns"], [90.0])
+    kept = p.fit_lifetime(hist, n_exp=2, mode="manual", start=0.0, exclude_seam=False)
+    assert len(kept["t_fit"]) == 901 and kept["seam_points"] == 0   # fitted like any bin
+    assert kept["excluded_ns"].size == 0 and kept["exclude_seam"] is False
     np.testing.assert_array_equal(plain["t_model"], plain["t_fit"])
 
     fit = p.fit_lifetime(hist, n_exp=2, mode="manual", start=0.0, prerise=True)
@@ -1104,16 +1109,16 @@ def test_fit_lifetime_fits_the_background_of_a_tail_fit():
         fit = p.fit_lifetime(hist, n_exp=2, mode="manual", start=0.0, fit_background=True,
                              **options)
         assert fit["fit_background"] is True
-        # The plain window keeps the never-filled last bin (as the tail fit always
-        # did), whose zero pulls the background down a little; prerise drops it.
-        tolerance = 1e-3 if options else 5e-2
+        # The never-filled last bin is a seam bin and left out of both fits; its
+        # zero would pull the background down a little.
+        tolerance = 1e-3
         assert fit["background"] == pytest.approx(7.5, rel=tolerance)
         assert fit["offset"] == pytest.approx(fit["background"])
         np.testing.assert_allclose(np.sort(fit["tau"]), [4.0, 30.0], rtol=tolerance)
         assert fit["quality"]["n_params"] == 5
         assert fit["quality"]["dof"] == len(fit["t_fit"]) - 5
-        # prerise leaves out the never-filled last bin; the plain window keeps it
-        assert len(fit["t_fit"]) == (980 if options else 901)
+        assert len(fit["t_fit"]) == (980 if options else 900)
+        assert fit["seam_points"] == 1
     # with the offset fixed at the dark level (0) the background goes into the lifetimes
     fixed = p.fit_lifetime(hist, n_exp=2, mode="manual", start=0.0)
     assert fixed["background"] == 0.0 and fixed["background_err"] == 0.0
@@ -1161,19 +1166,19 @@ def test_lifetime_trace_prerise_and_background_rate():
     assert image.meta["prerise"] is True and image.meta["background_rate"] == 200.0
 
 
-def test_beyond_period_marks_unfilled_and_partial_bins():
+def test_seam_bins_mark_unfilled_and_partial_bins():
     p = _periodic_ptu([5.0], [100.0])               # 1000-bin period, 1001 lifetime bins
-    assert np.flatnonzero(p._beyond_period()).tolist() == [1000]
+    assert np.flatnonzero(p.seam_bins()).tolist() == [1000]
     p.rep_time = 99.95e-9                           # 999.5 bins: the last one is partial
-    assert np.flatnonzero(p._beyond_period()).tolist() == [999, 1000]
+    assert np.flatnonzero(p.seam_bins()).tolist() == [999, 1000]
     p.lifetime_seam_bin = 400                       # after a lifetime shift
-    assert np.flatnonzero(p._beyond_period()).tolist() == [400, 1000]
+    assert np.flatnonzero(p.seam_bins()).tolist() == [400, 1000]
     # bins after the last photon of the file never filled: the real period is shorter
     p.lifetime_seam_bin, p.rep_time = None, 100e-9
     p._raw_dtime = np.array([3.0, 995.0, 120.0])
-    assert np.flatnonzero(p._beyond_period()).tolist() == [996, 997, 998, 999, 1000]
+    assert np.flatnonzero(p.seam_bins()).tolist() == [996, 997, 998, 999, 1000]
     p.lifetime_shift_ns = 10.0                      # they move along with a lifetime shift
-    assert np.flatnonzero(p._beyond_period()).tolist() == [896, 897, 898, 899, 1000]
+    assert np.flatnonzero(p.seam_bins()).tolist() == [896, 897, 898, 899, 1000]
 
 
 def test_fitted_background_leaves_out_never_filled_bins_of_a_real_file():
@@ -1189,3 +1194,93 @@ def test_fitted_background_leaves_out_never_filled_bins_of_a_real_file():
     used = np.isin(np.round(fit["shifted_histogram_x"], 6), np.round(fit["t_fit"], 6))
     assert not used[last + 1:].any() and used[last]
     assert np.all(np.asarray(fit["y_fit"])[-3:] > 0)    # no empty bins at the end
+
+
+def test_seam_bins_need_a_known_period():
+    p = _synthetic_ptu(np.ones((2, 6), dtype=np.uint32), bintime=1.0, acquisition_time=2.0)
+    assert not p.seam_bins().any()                  # no resolution/period: nothing marked
+    hist = p.lifetime_histogram(p._matrix, bintime=1.0)
+    assert not p._seam_mask(hist.y.size, True).any()
+
+
+def test_every_fit_leaves_out_the_same_seam_bins_of_a_real_file():
+    if not PULSE.exists():
+        pytest.skip("PTU test file missing")
+    p = PTU(PULSE)                                  # period = 1603.70 bins
+    p.time_trace(bintime=1.0)
+    hist = p.lifetime_histogram()
+    seam = np.flatnonzero(p.seam_bins())
+    assert seam.tolist() == [p.n_lt_bins - 1]       # the partly covered last bin
+    assert hist.y[seam[0]] < 0.7 * np.median(hist.y[-60:-10])
+    for options in ({}, {"prerise": True}):
+        fit = p.fit_lifetime(hist, n_exp=2, weighting="mle", **options)
+        x = fit["shifted_histogram_x"]
+        assert fit["exclude_seam"] is True and fit["seam_points"] == 1
+        np.testing.assert_allclose(fit["excluded_ns"], x[seam])
+        assert fit["seam_ns"] == pytest.approx(x[seam[0]])
+        assert not np.isin(np.round(x[seam], 6), np.round(fit["t_fit"], 6)).any()
+    kept = p.fit_lifetime(hist, n_exp=2, weighting="mle", exclude_seam=False)
+    assert kept["seam_ns"] is None and kept["seam_points"] == 0
+    assert len(kept["t_fit"]) == len(p.fit_lifetime(hist, n_exp=2, weighting="mle")["t_fit"]) + 1
+    # a histogram that is not on the file's lifetime bins has no seam bins
+    short = Signal(hist.x[:800], hist.y[:800], meta=dict(hist.meta))
+    assert p.fit_lifetime(short, n_exp=2)["seam_points"] == 0
+
+
+def test_shifted_tail_fit_leaves_out_every_never_filled_bin():
+    legacy = DATA_DIR / "ptu_test1_NoLaserPulse_(360s_400nW_532nm_000).ptu"
+    if not legacy.exists():
+        pytest.skip("PTU test file missing")
+    p = PTU(legacy, lifetime_shift="auto")          # header period 5 bins too long
+    p.time_trace(bintime=1.0)
+    hist = p.lifetime_histogram()
+    seam = np.flatnonzero(p.seam_bins())
+    assert seam.size == 5 and np.all(np.diff(seam) == 1)
+    assert not hist.y[seam].any()                   # empty bins in the middle of the decay
+    fit = p.fit_lifetime(hist, n_exp=2, weighting="mle")
+    x = fit["shifted_histogram_x"]
+    assert fit["seam_points"] == 5
+    np.testing.assert_allclose(fit["excluded_ns"], x[seam])
+    assert fit["t_fit"][0] < x[seam[0]] < fit["t_fit"][-1]
+    assert not np.isin(np.round(x[seam], 6), np.round(fit["t_fit"], 6)).any()
+    # the neighbours are fitted; no zeros are left inside the window
+    inside = (fit["t_fit"] > x[seam[0]] - 2.0) & (fit["t_fit"] < x[seam[-1]] + 2.0)
+    assert np.all(np.asarray(fit["y_fit"])[inside] > 0)
+
+
+def test_irf_reconvolution_leaves_out_the_seam_bins():
+    p, irf = _irf_ptu()
+    p.rep_time = 499.5 * 0.1e-9                     # the last bin is only half covered
+    hist = p.lifetime_histogram(p._matrix, bintime=1.0)
+    fit = p.fit_lifetime(hist, n_exp=1, irf=irf)
+    assert fit["seam_points"] == 1 and len(fit["t_fit"]) == 499
+    assert fit["seam_ns"] == pytest.approx(fit["shifted_histogram_x"][499])
+    np.testing.assert_allclose(fit["excluded_ns"], [fit["seam_ns"]])
+    kept = p.fit_lifetime(hist, n_exp=1, irf=irf, exclude_seam=False)
+    assert kept["seam_points"] == 0 and len(kept["t_fit"]) == 500 and kept["seam_ns"] is None
+    trace = p.lifetime_trace(bintime=1.0, irf=irf, irf_shift=0.2, background_rate=50.0,
+                             bins=2, min_counts=None)
+    assert trace.meta["seam_points"] == 1 and np.all(np.isfinite(trace.y))
+
+
+def test_per_bin_fits_leave_out_seam_groups():
+    p = _periodic_ptu([20.0], [5000.0], background=0.0, rows=2)
+    p._matrix = np.round(p._matrix).astype(np.uint32)
+    common = dict(bintime=1.0, n_exp=1, mode="manual", start=0.0, min_counts=None)
+    lt = p.lifetime_trace(**common)
+    assert lt.meta["exclude_seam"] is True and lt.meta["seam_points"] == 1
+    np.testing.assert_allclose(lt.y, 20.0, rtol=5e-3)
+    kept = p.lifetime_trace(exclude_seam=False, **common)
+    assert kept.meta["exclude_seam"] is False and kept.meta["seam_points"] == 0
+    # the never-filled last bin (a zero) shortens the fitted lifetime when kept
+    assert np.all(kept.y <= lt.y + 1e-9)
+    grouped = p.lifetime_trace(bins=4, **common)    # the last group holds the seam bin
+    np.testing.assert_allclose(grouped.y, 20.0, rtol=5e-3)
+    arrival = p.arrival_time_trace(bintime=1.0, mode="manual", start=0.0, min_counts=None)
+    assert arrival.meta["exclude_seam"] is True
+    assert arrival.meta["window_ns"] == pytest.approx(90.0)
+    wide = p.arrival_time_trace(bintime=1.0, mode="manual", start=0.0, min_counts=None,
+                                exclude_seam=False)
+    assert wide.meta["window_ns"] == pytest.approx(90.1)
+    image = p.flid(lifetime_range=(0.0, 40.0), exclude_seam=False, **common)
+    assert image.meta["exclude_seam"] is False

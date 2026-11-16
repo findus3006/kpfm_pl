@@ -72,7 +72,9 @@ class FlidParams:
     fit window (part of each decay that is fitted or averaged), ``method`` is
     ``"fit"``, ``"mean_arrival"`` or ``"both"``. ``prerise`` also fits the
     bins more than ``prerise_gap`` ns before the histogram maximum (per-bin
-    tail fits only, not the mean arrival time). ``min_counts`` (0 disables),
+    tail fits only, not the mean arrival time). ``exclude_seam`` leaves out
+    the lifetime bins that are not fully inside one laser period
+    (``PTU.seam_bins``), for both methods. ``min_counts`` (0 disables),
     ``coverage`` and ``auto_bintime`` are the photon-count check of
     ``PTU.flid``.
     """
@@ -99,6 +101,7 @@ class FlidParams:
     auto_bintime: bool = False
     prerise: bool = False
     prerise_gap: float = 2.0
+    exclude_seam: bool = True
 
     def lifetime_range(self) -> tuple[float, float] | None:
         if self.lifetime_max is None:
@@ -112,8 +115,12 @@ class FlidParams:
         return 0.0, float(self.intensity_max) if self.intensity_max else top
 
     def window_kwargs(self) -> dict[str, Any]:
-        return {"mode": self.mode, "fraction": self.fraction, "smoothing": self.smoothing,
-                "start": self.start, "end": self.end}
+        """Fit-window arguments; ``exclude_seam`` (the backend default) only when off."""
+        kwargs = {"mode": self.mode, "fraction": self.fraction, "smoothing": self.smoothing,
+                  "start": self.start, "end": self.end}
+        if not self.exclude_seam:
+            kwargs["exclude_seam"] = False
+        return kwargs
 
     def prerise_kwargs(self) -> dict[str, Any]:
         """Pre-rise arguments of the per-bin fits (empty when switched off)."""

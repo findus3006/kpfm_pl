@@ -289,3 +289,14 @@ def test_flids_use_prerise_and_the_background_of_the_lifetime_fit(handle, tmp_pa
     # switching it off changes the per-bin lifetimes, so it is not a map-only setting
     assert not params.same_lifetimes(dataclasses.replace(params, prerise=False))
     assert model.FlidParams().prerise_kwargs() == {}
+
+
+def test_flid_seam_setting_reaches_both_methods(handle):
+    assert "exclude_seam" not in model.FlidParams().window_kwargs()    # backend default
+    params = model.FlidParams(method="both", exclude_seam=False, min_counts=0.0)
+    assert params.window_kwargs()["exclude_seam"] is False
+    result = model.compute_flids(handle, TraceParams(bintime=1.0), params, [ROI_A])
+    entry = result.entries[0]
+    assert entry.traces["fit"].meta["exclude_seam"] is False
+    assert entry.traces["mean_arrival"].meta["exclude_seam"] is False
+

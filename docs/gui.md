@@ -115,6 +115,14 @@ title on the left to fold it away.
      fit they use the dark counts and say so in the log. A fitted background
      and a lifetime above half the laser period are barely separable; the log
      warns then (threshold in *Advanced fit settings*).
+   - **Seam bins** (*leave out (auto-detected)*, on by default): lifetime
+     bins that are not fully inside one laser period (bins past the period,
+     its partly covered last bin, bins that never fill) are left out of the
+     tail fit, the bins before the rise and the IRF fit alike. They sit at
+     the end of the histogram, or inside the decay after a *Lifetime shift*.
+     The plot marks them in grey (*Seam bins, not fitted (n)*) and the table
+     lists their number. Untick to fit them like any other bin. See
+     [ptu.md](ptu.md#seam-bins).
    - **Before the rise** (*also fit these bins*, off by default; tail fit
      only): also fits the bins before the rising edge. They hold the tail of
      the previous laser pulse and enter the fit at their time since that
@@ -222,7 +230,7 @@ title on the left to fold it away.
    - **Fit window**: the FLID has its own (*Fit start*, *Edge fraction*,
      *Edge smoothing*, *Start*/*End*): **which part of each decay** is fitted
      or averaged. *Before the rise* works as in the lifetime fit (fitted
-     maps only, not the mean arrival time). *Copy fit window from 'Lifetime
+     maps only, not the mean arrival time), *Seam bins* too (both methods). *Copy fit window from 'Lifetime
      fit'* takes over the settings of the lifetime fit. With *fit background
      B* ticked the per-bin fits use the background of the last lifetime fit.
    - **Photons per time bin**: at least *At least* photons *in* that share of

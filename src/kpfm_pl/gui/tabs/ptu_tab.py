@@ -56,6 +56,7 @@ _SUMMARY_LABELS = {
     "fit_end_ns": "Fit end (ns)",
     "fit_points": "Fit points",
     "prerise_bins": "Bins before the rise",
+    "seam_bins": "Seam bins (not fitted)",
     "lifetime_shift_ns": "Lifetime shift (ns)",
     "irf_shift_ns": "IRF shift δ (ns)",
     "irf_fwhm_ns": "IRF FWHM (ns)",
@@ -100,6 +101,12 @@ _PRERISE_TOOLTIP = ("Tail fit: also fit the bins before the rising edge. With pe
                     "that have not reached the background within one period.")
 _PRERISE_GAP_TOOLTIP = ("The fitted bins before the rise end this far before the histogram "
                         "maximum, which keeps the rising edge itself out of the fit.")
+_SEAM_TOOLTIP = ("Leave out the lifetime bins that are not fully inside one laser period: "
+                 "bins past the period, its partly covered last bin (the period is not a "
+                 "whole number of bins) and bins that never fill. They sit at the end of "
+                 "the histogram, or inside the decay after a lifetime shift, and are "
+                 "marked in the fit plot. Applies to the tail fit, the bins before the "
+                 "rise and the IRF fit alike.")
 _A_FIT_TOOLTIP = ("Amplitude of the fitted curve, before the incomplete-decay correction "
                   "(includes the tails of earlier pulses).")
 #: Colours of the BIC verdicts (``BicComparison.colour``).
@@ -354,6 +361,9 @@ class PTUTab(BaseTab):
                                               "IRF, which fits the whole period anyway.")
         f.add_float("prerise_gap", "Gap before maximum", 2.0, maximum=1000, step=0.5,
                     decimals=2, suffix=" ns", tooltip=_PRERISE_GAP_TOOLTIP)
+        f.add_bool("exclude_seam", "Seam bins", True, text="leave out (auto-detected)",
+                   tooltip=_SEAM_TOOLTIP + "\nAlso used by the lifetime trace (the FLID "
+                                           "has its own setting).")
         layout.addWidget(f)
         f.changed.connect(self._update_fit_fields)
         self._update_fit_fields()
@@ -454,6 +464,8 @@ class PTUTab(BaseTab):
                                               "time) and not used with the IRF.")
         f.add_float("prerise_gap", "Gap before maximum", 2.0, maximum=1000, step=0.5,
                     decimals=2, suffix=" ns", tooltip=_PRERISE_GAP_TOOLTIP)
+        f.add_bool("exclude_seam", "Seam bins", True, text="leave out (auto-detected)",
+                   tooltip=_SEAM_TOOLTIP)
 
         f.add_heading("Photons per time bin")
         f.add_float("min_counts", "At least", 100.0, maximum=1e7, step=10, decimals=0,
@@ -1319,11 +1331,13 @@ class PTUTab(BaseTab):
             if n_pre:
                 ax.axvspan(t_fit[0], t_fit[n_pre - 1], color=colour, alpha=0.08, hatch="//",
                            label="Before the rise (fitted)")
-            if fit.get("seam_ns") is not None:
-                # Partial bin at the old window edge, left out of the fit.
-                ax.axvline(fit["seam_ns"], color="0.5", linestyle=":", linewidth=1,
-                           label="Shift seam (not fitted)" if fit.get("lifetime_shift_ns")
-                           else "Partial last bin (not fitted)")
+            # Bins not fully inside one laser period, left out of the fit.
+            excluded = np.asarray(fit.get("excluded_ns", ()), dtype=float)
+            step = float(np.median(np.diff(x))) if x.size > 1 else 0.0
+            for k, (lo, hi) in enumerate(model.bin_runs(excluded, step)):
+                ax.axvspan(lo, hi + step, facecolor="0.5", alpha=0.3, edgecolor="0.4",
+                           linestyle=":", linewidth=1,
+                           label=f"Seam bins, not fitted ({excluded.size})" if k == 0 else None)
         residuals = fit.get("quality", {}).get("weighted_residuals")
         if residuals is not None:
             ax_res.plot(broken(t_fit), broken(residuals), "-", color=colour, linewidth=0.7)

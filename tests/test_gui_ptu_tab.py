@@ -482,3 +482,27 @@ def test_period_fraction_in_the_advanced_settings(qtbot):
     assert dialog.options().period_fraction == pytest.approx(0.8)
     assert "custom warning thresholds" in describe_options(dialog.options())
     assert describe_options(model.FitOptions()) != describe_options(dialog.options())
+
+
+def test_seam_bins_tickbox_marks_and_keeps_the_bins(window, qtbot, tab):
+    assert tab.fit_params().exclude_seam and tab.flid_params().exclude_seam   # on by default
+    tab.run_fit()
+    _wait(window, qtbot, lambda: tab.fit is not None)
+    fit = tab.fit.fit
+    assert fit["seam_points"] == 1
+    labels = tab.hist_plot.figure.axes[0].get_legend_handles_labels()[1]
+    assert "Seam bins, not fitted (1)" in labels
+    rows = [tab.fit_table.item(r, 0).text() for r in range(tab.fit_table.rowCount())]
+    assert "Seam bins (not fitted)" in rows
+
+    tab.fit_form.set_value("exclude_seam", False)
+    assert tab.flid_params().exclude_seam          # the FLID keeps its own fit window
+    tab.copy_fit_window()
+    assert not tab.flid_params().exclude_seam
+    previous = tab.fit
+    tab.run_fit()
+    _wait(window, qtbot, lambda: tab.fit is not previous)
+    assert tab.fit.fit["seam_points"] == 0
+    labels = tab.hist_plot.figure.axes[0].get_legend_handles_labels()[1]
+    assert not any(label.startswith("Seam bins") for label in labels)
+
