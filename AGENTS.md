@@ -6,7 +6,7 @@ Guidance for AI coding agents working in the `kpfm_pl` repository.
 
 `kpfm_pl` is a small, well-structured Python toolbox for loading and
 correlating data from combined **KPFM**, **photoluminescence** (PicoQuant PTU /
-TCSPC) and **AFM** (JPK) experiments. It targets a research lab workflow, not a
+TCSPC, T3 and T2 mode) and **AFM** (JPK) experiments. It targets a research lab workflow, not a
 general audience, so clarity and correctness matter more than feature breadth.
 
 Design goals to preserve:
@@ -27,7 +27,7 @@ Design goals to preserve:
 src/kpfm_pl/
     __init__.py     public API (+ lazy matplotlib/GUI attributes)
     core.py         Signal / Image containers (the common return format)
-    ptu.py          PTU  – PicoQuant TTTR-T3 loader (time trace, lifetime, FLID)
+    ptu.py          PTU  – PicoQuant TTTR T3/T2 loader (time trace, lifetime, FLID)
     zurich.py       Zurich – lock-in .txt loader (KPFM, triggers)
     jpk.py          JPK    – AFM image loader (calibrated channels)
     match.py        Match  – align a PL time trace with a KPFM signal
@@ -121,7 +121,8 @@ docs/               per-module manuals (ptu, zurich, jpk, match, database, plott
 
 - Add or update tests under `tests/` for any behavioural change. The suite
   covers `utils`, `fitting`, `core`, `plotting`, `selector`, the loaders
-  (`ptu`, `zurich`, `jpk`), `match` and `database`. Interactive helpers are
+  (`ptu`, `zurich`, `jpk`), `match` and `database`. Synthetic PTU files of
+  any record format are written with `tests/ptu_writer.py`. Interactive helpers are
   tested on the Agg backend by dispatching synthetic `MouseEvent`s.
 - GUI tests (`tests/test_gui_*.py`) run headless: `tests/conftest.py` sets
   `QT_QPA_PLATFORM=offscreen`. Test models with plain pytest and widgets with
@@ -152,6 +153,27 @@ docs/               per-module manuals (ptu, zurich, jpk, match, database, plott
   two edges as a trigger list in `meta["triggers"]`. Bad practice, kept only
   for compatibility; `Match(...).extract(m.triggers[0], m.triggers[-1])`
   reproduces the legacy left/right window.
+- **PTU record formats**: the decoder is chosen from the header tag
+  `TTResultFormat_TTTRRecType` (`ptu.RECORD_TYPES`, following PicoQuant's
+  `Read_PTU.py`); files without the tag are PicoHarp 300 T3. Records are
+  decoded with NumPy in blocks (`_decode_records`), carrying the overflow
+  count between blocks. Detector channels are 1-based everywhere (raw
+  channel + 1, except PicoHarp 300 T3 whose routing channels already are).
+- **PTU T2 files** are converted to the T3-like `events` table on load. With
+  laser pulses on the sync channel the delay to the last pulse (modulo the
+  measured period, so sync dividers and lost syncs fold back) becomes the
+  lifetime bin; without them `has_lifetime` is `False`, `events[:, 0]` is the
+  time tag (`_sync_unit`) and lifetime methods raise via `_require_lifetime`.
+  Marker counts are sync numbers for T3 and time tags for T2
+  (`_marker_unit`). T2 is tested on synthetic files only (writers in
+  `tests/ptu_writer.py`) until real files are available.
+- **PTU detector selection** (`set_channels`) swaps `events`/`_raw_dtime` for
+  a subset of `_all_events`/`_all_raw_dtime` and re-applies the lifetime
+  shift; `photon_times`/`photon_channel` always cover all photons (kept for
+  a future antibunching analysis).
+- **PTU seam bins** (`seam_bins`): bins not fully inside one laser period are
+  left out of every lifetime fit by default (`exclude_seam`). Use that one
+  mask; do not add per-fit special cases again.
 - **Zurich time axis** is exported negative and reversed – the parser flips it
   to forward time. Don't "fix" this again.
 - **Zurich triggers vs. averaged signal**: pass `reference=<averaged Signal>`

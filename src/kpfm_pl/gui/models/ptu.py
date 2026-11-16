@@ -41,6 +41,9 @@ __all__ = [
     "TraceResult",
     "FitResult",
     "apply_lifetime_shift",
+    "apply_channels",
+    "channel_options",
+    "describe_file",
     "trigger_times",
     "trigger_options",
     "resolve_window",
@@ -349,6 +352,8 @@ class TraceResult:
     trigger_times: np.ndarray | None = None
     window: tuple[float, float | None] = (0.0, None)
     lifetime_shift_ns: float = 0.0
+    channels: tuple[int, ...] | None = None
+    has_lifetime: bool = True
 
 
 @dataclass
@@ -375,9 +380,55 @@ def apply_lifetime_shift(handle: LoadedFile, shift: float | str | None) -> float
     """
     with handle.lock:
         ptu = handle.reader
+        if not ptu.has_lifetime:
+            return 0.0                      # T2 file without laser pulses: nothing to shift
         if shift != ptu.lifetime_shift:
             ptu.set_lifetime_shift(shift)
         return ptu.lifetime_shift_ns
+
+
+# ------------------------------------------------------------------ detectors
+def apply_channels(handle: LoadedFile, channels: Sequence[int] | None) -> tuple[int, ...]:
+    """Select the detector channel(s) of the file (``PTU.set_channels``).
+
+    ``None`` uses the photons of all detectors together. Nothing is
+    recomputed when the selection is unchanged. Returns the channels in use.
+    """
+    with handle.lock:
+        ptu = handle.reader
+        chosen = None if channels is None else tuple(sorted(int(c) for c in channels))
+        if chosen != ptu.selected_channels:
+            ptu.set_channels(chosen)
+        return ptu.channels if chosen is None else chosen
+
+
+def channel_options(handle: LoadedFile | None) -> list[tuple[Any, str]]:
+    """Choices of the detector selector: all detectors, then each one."""
+    channels = tuple(handle.reader.channels) if handle is not None else ()
+    if len(channels) < 2:
+        return [("all", "All detectors")]
+    summed = " + ".join(str(c) for c in channels)
+    return [("all", f"All detectors ({summed})")] + [(c, f"Detector {c}") for c in channels]
+
+
+def describe_file(handle: LoadedFile) -> str:
+    """One line on the record format of a PTU file and what it allows."""
+    ptu = handle.reader
+    parts = [f"{ptu.device}, {ptu.measurement_mode} mode"]
+    if len(ptu.channels) > 1:
+        parts.append("detectors " + ", ".join(str(c) for c in ptu.channels))
+    if ptu.is_cw:
+        parts.append("continuous wave")
+    elif ptu.measurement_mode == "T2":
+        if ptu.has_lifetime:
+            divider = f", sync divider {ptu.sync_divider}" if ptu.sync_divider > 1 else ""
+            parts.append(f"laser pulses on channel 0 (period {ptu.rep_time * 1e9:.5g} ns"
+                         f"{divider}): lifetimes from the time since the last pulse, "
+                         f"{ptu.resolution * 1e12:.4g} ps per bin")
+        else:
+            parts.append("no laser pulses recorded: time traces and triggers only, "
+                         "no lifetimes")
+    return "; ".join(parts) + "."
 
 
 # ------------------------------------------------------------------ time window
@@ -483,7 +534,7 @@ def compute_trace(handle: LoadedFile, params: TraceParams) -> TraceResult:
             marker_times = (np.array([p["time"] for p in triggers], dtype=float)
                             if triggers else None)
     return TraceResult(signal, triggers, marker_times, params, str(handle.path), times, window,
-                       ptu.lifetime_shift_ns)
+                       ptu.lifetime_shift_ns, ptu.selected_channels, ptu.has_lifetime)
 
 
 # ----------------------------------------------------------------------- ROIs
@@ -832,6 +883,8 @@ def fit_summary(fit: dict[str, Any]) -> dict[str, Any]:
     summary["fit_points"] = int(len(fit.get("t_fit", [])))
     if fit.get("lifetime_shift_ns"):
         summary["lifetime_shift_ns"] = float(fit["lifetime_shift_ns"])
+    if fit.get("channels"):
+        summary["channels"] = ", ".join(str(c) for c in fit["channels"])
     return summary
 
 
@@ -976,6 +1029,8 @@ def trace_payload(result: TraceResult) -> ExportPayload:
         parameters=_params(("time_trace", result.params)),
         results={"time_window_s": list(result.window),
                  "lifetime_shift_ns": result.lifetime_shift_ns,
+                 "detector_channels": ("all" if result.channels is None
+                                       else list(result.channels)),
                  "laser_trigger_times_s": triggers,
                  "marker_times_s": result.marker_times,
                  **describe_meta(s.meta)},

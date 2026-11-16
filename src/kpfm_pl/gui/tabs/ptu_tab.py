@@ -58,6 +58,7 @@ _SUMMARY_LABELS = {
     "prerise_bins": "Bins before the rise",
     "seam_bins": "Seam bins (not fitted)",
     "lifetime_shift_ns": "Lifetime shift (ns)",
+    "channels": "Detector channel(s)",
     "irf_shift_ns": "IRF shift δ (ns)",
     "irf_fwhm_ns": "IRF FWHM (ns)",
     "scatter": "Scatter s (counts)",
@@ -107,6 +108,10 @@ _SEAM_TOOLTIP = ("Leave out the lifetime bins that are not fully inside one lase
                  "the histogram, or inside the decay after a lifetime shift, and are "
                  "marked in the fit plot. Applies to the tail fit, the bins before the "
                  "rise and the IRF fit alike.")
+_NO_LIFETIME_MESSAGE = ("This T2 file holds no laser pulses (no laser sync on channel 0), "
+                        "so its photons have no lifetime information. The time trace, "
+                        "the laser triggers and 'Correlate' work; lifetime fits, the "
+                        "lifetime trace and FLIDs need the laser pulses.")
 _A_FIT_TOOLTIP = ("Amplitude of the fitted curve, before the incomplete-decay correction "
                   "(includes the tails of earlier pulses).")
 #: Colours of the BIC verdicts (``BicComparison.colour``).
@@ -247,7 +252,19 @@ class PTUTab(BaseTab):
         self.file_label = QLabel("No PTU file loaded.")
         self.file_label.setWordWrap(True)
         layout.addWidget(self.file_label)
+        self.info_label = self._small("")
+        layout.addWidget(self.info_label)
         self.add_button(layout, "Open PTU file…", lambda: self.ctx.open_and_load("ptu"))
+        c = self.channel_form = ParamForm()
+        c.add_choice("channels", "Detector", model.channel_options(None), "all",
+                     tooltip="Which detector's photons are analysed: all detectors "
+                             "together or one of them. Applies to the time trace and "
+                             "everything computed from it (also in 'Correlate').\n"
+                             "Applied with 'Update time trace'; resets to all detectors "
+                             "for every new file.")
+        layout.addWidget(c)
+        c.setVisible(False)                 # only for files with several detectors
+        self._applied_channels = None
         f = self.shift_form = ParamForm()
         tip = ("Salvage for recordings with a wrong sync offset, where the decay starts "
                "late in the lifetime window and its tail continues at the window start. "
@@ -668,6 +685,11 @@ class PTUTab(BaseTab):
         self.shift_form.set_row_visible("shift_ns",
                                         self.shift_form.value("kind") == "manual")
 
+    def channel_value(self) -> tuple[int, ...] | None:
+        """The requested detector selection: ``None`` (all) or one channel."""
+        value = self.channel_form.value("channels")
+        return None if value in (None, "all") else (int(value),)
+
     def shift_value(self) -> float | str | None:
         """The requested lifetime shift: ``None`` (off), ``"auto"`` or ns."""
         kind = self.shift_form.value("kind")
@@ -835,10 +857,11 @@ class PTUTab(BaseTab):
             entered = self.trace_params()
         except ValueError:
             entered = None
-        if entered != params or self.shift_value() != self._applied_shift:
-            self.ctx.log.warning("The time-trace or lifetime-shift settings differ from the "
-                                 "displayed trace; the displayed trace is analysed. Press "
-                                 "'Update time trace' to apply them.")
+        if (entered != params or self.shift_value() != self._applied_shift
+                or self.channel_value() != self._applied_channels):
+            self.ctx.log.warning("The time-trace, detector or lifetime-shift settings differ "
+                                 "from the displayed trace; the displayed trace is analysed. "
+                                 "Press 'Update time trace' to apply them.")
         return params
 
     def state_params(self) -> model.StateParams:
@@ -880,6 +903,14 @@ class PTUTab(BaseTab):
         self.shift_form.set_value("kind", "off")
         self._applied_shift = None
         self.shift_label.setText("")
+        # So is the detector selection; the selector only shows for several detectors.
+        options = model.channel_options(handle)
+        self.channel_form.set_choices("channels", options)
+        self.channel_form.set_value("channels", "all")
+        self.channel_form.setVisible(len(options) > 1)
+        self._applied_channels = None
+        self.info_label.setText("" if handle is None else model.describe_file(handle))
+        self.shift_form.setEnabled(handle is None or handle.reader.has_lifetime)
         self.roi_editor.detach()
         self.roi_editor.set_rois([])
         self._fill_triggers()
@@ -916,23 +947,29 @@ class PTUTab(BaseTab):
             self.ctx.log.warning(str(exc))
             return
         states, fit, shift = self.state_params(), self.fit_params(), self.shift_value()
+        channels = self.channel_value()
         # Counts per bin grow with the bin time, so ROI count ranges are rescaled.
         factor = (params.bintime / self.trace.params.bintime
                   if self.trace is not None and self.rois else 1.0)
         rois = flid_model.scale_rois(self.rois, factor)
 
         def job(progress):
+            model.apply_channels(handle, channels)
             model.apply_lifetime_shift(handle, shift)
             result = model.compute_trace(handle, params)
+            if not result.has_lifetime:
+                # T2 file without laser pulses: a time trace, but no histogram.
+                return result, None, None, factor, shift, channels
             preview = model.preview_histogram(handle, params, fit, states, rois)
             payload = model.histogram_payload(preview, str(handle.path), params, states, rois)
-            return result, preview, payload, factor, shift
+            return result, preview, payload, factor, shift, channels
 
         self.run_job(f"Time trace of {handle.name}", job, self._trace_done,
                      disable=[self.trace_button])
 
     def _trace_done(self, value) -> None:
-        self.trace, hist, self.preview_payload, factor, self._applied_shift = value
+        (self.trace, hist, self.preview_payload, factor, self._applied_shift,
+         self._applied_channels) = value
         shift_ns = self.trace.lifetime_shift_ns
         self.shift_label.setText(f"Lifetime axis shifted by {shift_ns:.3f} ns (circular)."
                                  if shift_ns else "")
@@ -944,6 +981,14 @@ class PTUTab(BaseTab):
         # A new trace (other bin time or window) invalidates the previous fit.
         self.fits = []
         self.fit_table.setRowCount(0)
+        lifetime = self.trace.has_lifetime
+        for button in (self.fit_button, self.lt_button, self.flid_button):
+            button.setEnabled(lifetime)
+        if not lifetime:
+            self.preview_hist = None
+            for panel in (self.hist_plot, self.lt_plot, self.flid_plot):
+                panel.show_message(_NO_LIFETIME_MESSAGE)
+            return
         self.preview_hist = (model.shifted_histogram_x(hist), np.asarray(hist.y, dtype=float),
                              hist.label)
         self._draw_histogram()

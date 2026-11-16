@@ -7,7 +7,7 @@ tools used on that data:
 
 | File | Instrument | Reader |
 |------|------------|--------|
-| `.ptu` | PicoQuant TCSPC (TTTR T3): PL photon stream | `PTU` |
+| `.ptu` | PicoQuant TCSPC (TTTR T3 and T2; PicoHarp 300, HydraHarp, TimeHarp 260, MultiHarp, PicoHarp 330): PL photon stream | `PTU` |
 | `.txt` | Zurich Instruments lock-in export: KPFM signal and laser trigger | `Zurich` |
 | `.jpk` | JPK AFM: height, KPFM, photon-counter images | `JPK` |
 
@@ -102,6 +102,10 @@ print(fit["quality"]["bic"], fit["warnings"])  # compare n_exp by BIC; over-fitt
 mle = ptu.fit_lifetime(states["on"], n_exp=2, weighting="mle")  # Poisson maximum likelihood
 free = ptu.fit_lifetime(states["on"], n_exp=2, fit_background=True, prerise=True)  # fitted offset + bins before the rise
 irf = ptu.fit_lifetime(ptu.lifetime_histogram(), n_exp=2, irf=PTU("irf.ptu"))  # IRF reconvolution
+
+# The record format (T3/T2, device) is read from the header. Two detectors:
+ptu.set_channels(2)                  # analyse detector 2 only (None = all, summed)
+t1, t2 = ptu.photon_times(1), ptu.photon_times(2)   # photon arrival times in s
 
 lt = ptu.lifetime_trace(bintime=0.5, n_exp=1)  # Signal: fitted lifetime (ns) per time bin
 arrival = ptu.arrival_time_trace(bintime=0.5)  # Signal: lifetime from the mean arrival time (no fit)

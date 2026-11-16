@@ -1,7 +1,7 @@
 # PTU reader (`kpfm_pl.PTU`)
 
-Loads PicoQuant `.ptu` TTTR-T3 files (TCSPC / photoluminescence) and exposes
-them as binned **time traces**, **lifetime histograms**, **FLID maps** and
+Loads PicoQuant `.ptu` TTTR files in T3 or T2 mode (TCSPC /
+photoluminescence) and exposes them as binned **time traces**, **lifetime histograms**, **FLID maps** and
 **multi-exponential lifetime fits**. Primary plottable data products use the
 [`Signal`](../src/kpfm_pl/core.py) or [`Image`](../src/kpfm_pl/core.py)
 containers; fit summaries, triggers and raw event access use their documented
@@ -25,6 +25,9 @@ ptu = PTU("scan.ptu", dark_counts=2.25)
 | `dark_counts` | `0.0` | dark counts per second, subtracted as a constant offset `C` during lifetime fitting |
 | `smooth_rep_rate` | `False` | use the rounded laser repetition time for record decoding |
 | `lifetime_shift` | `None` | circular shift of the lifetime axis, see [Lifetime shift](#lifetime-shift-salvaging-a-wrong-sync-offset) |
+| `channels` | `None` | detector channel(s) to use, see [Detectors](#detectors); `None` = all detectors summed |
+| `lifetime_binning` | `None` | native time units per lifetime bin, see [Record formats](#record-formats-t3-and-t2) |
+| `sync_divider` | `None` | T2 files with laser pulses: laser pulses per recorded sync event (`None` = from the header sync rate) |
 
 On load the header tags and all photon records are parsed. Continuous-wave
 files (no laser trigger / infinite global resolution) are detected and the
@@ -43,9 +46,115 @@ Useful attributes after loading:
 | `rep_time` | laser repetition period (s; `inf` for continuous-wave files) |
 | `is_cw` | `True` for continuous-wave files (see above) |
 | `n_lt_bins`, `lt_time` | lifetime-axis length and time axis (s) |
-| `events` | raw photon array, shape `(N, 3)` = `[truesync, dtime, time_s]` |
-| `marker` | `{channel: [sync, ...]}` hardware markers |
+| `events` | photon array of the selected detectors, shape `(N, 3)` = `[truesync, dtime, time_s]` |
+| `marker` | `{channel: [count, ...]}` hardware markers (sync numbers for T3, time tags for T2; use `get_markers` for seconds) |
 | `tags` | all header tags as a `dict` |
+| `measurement_mode`, `device`, `record_type` | `"T3"` or `"T2"`, the device family and the raw record type from the header |
+| `has_lifetime` | whether photons carry a lifetime (`False` for T2 files without laser pulses) |
+| `channels`, `selected_channels` | detectors that hold photons, and the selection (`None` = all) |
+| `timetag_resolution` | unit of the T2 time tags in s (`None` for T3) |
+| `lifetime_binning`, `sync_divider`, `sync_events` | applied lifetime binning; for T2 files the sync divider and the number of recorded sync events |
+
+## Record formats (T3 and T2)
+
+The header tag `TTResultFormat_TTTRRecType` tells how the photon records are
+decoded; nothing has to be chosen by hand. An unknown record type raises a
+`ValueError`, and a file without the tag is read as PicoHarp 300 T3, as
+before.
+
+| Device | T3 | T2 |
+|--------|----|----|
+| PicoHarp 300 | yes | yes |
+| HydraHarp (V1 and V2), TimeHarp 260 N/P | yes | yes |
+| MultiHarp, PicoHarp 330 | yes | yes |
+
+- **T3**: every photon is stored with the number of its laser pulse and its
+  delay after that pulse. This is what lifetime analysis needs.
+- **T2**: every event is stored with an absolute time tag. A T2 file is
+  converted on load into the same internal format as a T3 file:
+  - **With laser pulses** (the sync input, channel 0 of the MultiHarp /
+    HydraHarp family, carries the pulse train): the delay of each photon is
+    its time since the last laser pulse, which recovers the T3 information.
+    Time traces, lifetime histograms, fits, lifetime traces, FLIDs, IRF
+    reconvolution and the lifetime shift then work exactly as for a T3 file.
+    The laser period (`rep_time`) is measured from the sync events.
+  - **Without laser pulses** (PicoHarp 300: both inputs are detectors and
+    are reported as channels 1 and 2; or a sync input that is not connected):
+    `has_lifetime` is `False`. Time traces, markers, laser triggers and
+    [`Match`](match.md) work; every lifetime method raises a `ValueError`
+    that says so.
+
+```python
+ptu = PTU("multiharp_t2.ptu")     # prints the format, period and lifetime bins
+ptu.measurement_mode              # "T2"
+ptu.has_lifetime                  # True: laser pulses were recorded
+hist = ptu.lifetime_histogram()   # as for a T3 file
+```
+
+**Lifetime bins.** The delay of a T2 photon comes in the unit of the time
+tags (e.g. 5 ps), which would give far more lifetime bins than needed.
+`lifetime_binning=None` combines the smallest power of two of native units
+that leaves at most 4096 bins per laser period (`MAX_LIFETIME_BINS`); the
+result is in `ptu.lifetime_binning` and `ptu.resolution`. The same rule
+applies to T3 files of the MultiHarp family (15-bit delays). PicoHarp 300 T3
+files keep their native bins. Pass a number to choose the binning yourself.
+
+**Sync divider.** If only every N-th laser pulse is recorded, the recorded
+sync interval spans N laser periods. Delays are folded back to one period.
+`N` is taken from the header sync rate (`TTResult_SyncRate` times the
+recorded interval); pass `sync_divider=N` if the header does not have it.
+Sync events that are missing for a while (laser sync lost) are handled the
+same way: the delay to the last recorded pulse folds back by whole periods.
+Photons before the first recorded pulse are kept as well.
+
+> The T2 support was written from PicoQuant's reference reader and tested on
+> synthetic files only. In particular the sync-divider handling of real
+> MultiHarp T2 files is unverified: check `ptu.rep_time` and the lifetime
+> histogram of the first real file.
+
+Notes:
+
+- A T2 file records every laser pulse as an event (40 MB per second at
+  10 MHz without a divider), so T2 files with laser pulses get large. The
+  sync events themselves are not kept in memory.
+- Sync events that are not periodic (the sync input used for something else)
+  are not taken as laser pulses; a warning says so and the file has no
+  lifetimes.
+- `smooth_rep_rate` only applies to T3 files.
+- Files are decoded with NumPy in blocks; loading is about ten times faster
+  than the record-by-record loop used before v1.9.0, with identical results
+  for PicoHarp 300 T3 files.
+
+## Detectors
+
+Detectors are numbered from 1 (`ptu.channels`). By default the photons of
+all detectors are used together, which equals a single-detector measurement
+of the summed signal. To analyse one detector:
+
+```python
+ptu = PTU("scan.ptu", channels=2)     # only detector 2
+ptu.set_channels(None)                # all detectors again
+ptu.set_channels([1, 2])              # several, summed
+```
+
+The selection applies to every time trace, lifetime histogram, fit, lifetime
+trace and FLID; cached traces are rebuilt and a lifetime shift is applied
+again to the selection. Markers and laser triggers do not depend on it.
+Results of a selection carry `meta["channels"]` (fits: `fit["channels"]`).
+
+For analyses that correlate detectors (e.g. antibunching), the absolute
+arrival time of every photon is available at full resolution, independent of
+the selection:
+
+```python
+t1 = ptu.photon_times(1)              # seconds, detector 1
+t2 = ptu.photon_times(2)
+ptu.photon_channel                    # detector of every photon (record order)
+```
+
+T2 files give the time tags (unit `ptu.timetag_resolution`); T3 files the
+laser pulse number times the period plus the delay after the pulse. The
+toolbox has no correlation function yet.
 
 ## Time trace
 
@@ -713,6 +822,10 @@ an ROI's time window and count threshold (useful to build custom histograms).
 triggers = ptu.laser_triggers(marker_channel=4, reference=tt)
 markers  = ptu.get_markers(marker_channel=4)   # all marker times (s)
 ```
+
+Markers work the same for T3 and T2 files of every supported device (T2
+marker times are time tags; a PicoHarp 300 T2 marker is off by at most 15
+ticks = 60 ps, because the marker bits share the time-tag field).
 
 `laser_triggers` returns **every** marker on the channel as a chronological
 list of trigger points `[{"index", "time"}, ...]` – the format consumed by

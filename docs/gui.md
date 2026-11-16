@@ -67,6 +67,18 @@ Everything about one `.ptu` file in one tab: time trace, regions of interest
 `examples/example_ptu.py` and `examples/example_flid.py`). Click a group
 title on the left to fold it away.
 
+0. **File**: under the file name a line states the record format read from
+   the header (device, T3 or T2 mode, detectors). Files with several
+   detectors get a **Detector** selector: *All detectors* (summed, the
+   default) or one of them. It is applied with *Update time trace*, used by
+   everything computed from the trace (also in *Correlate*), listed in the
+   fit table and recorded in the exports; opening a file resets it. A **T2
+   file with laser pulses** on channel 0 behaves like a T3 file. A **T2 file
+   without laser pulses** (PicoHarp 300 with two detectors) has no lifetime
+   information: the time trace, triggers and *Correlate* work, while *Fit*,
+   *Compute lifetime trace*, *Compute FLIDs* and the lifetime shift are
+   greyed out and the plots say why. See
+   [ptu.md](ptu.md#record-formats-t3-and-t2).
 0. **Lifetime shift** (File group, default *Off*): a salvage for recordings
    with a wrong sync offset, where the decay starts late in the lifetime
    window and its tail continues at the window start. *Auto* rotates the

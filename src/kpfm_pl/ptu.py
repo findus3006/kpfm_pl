@@ -1,9 +1,14 @@
-"""Reader for PicoQuant PTU (TTTR T3) files.
+"""Reader for PicoQuant PTU (TTTR T3 and T2) files.
 
 Loads photon records and exposes them as binned time traces, lifetime
 histograms and FLID maps. All public methods return :class:`~kpfm_pl.core.Signal`
 or :class:`~kpfm_pl.core.Image` objects (or plain dicts) -- there is no plotting
 here; feed the returned arrays into matplotlib yourself.
+
+The record format is taken from the header (``TTResultFormat_TTTRRecType``):
+T3 and T2 records of the PicoHarp 300 and of the HydraHarp / TimeHarp 260 /
+MultiHarp / PicoHarp 330 family. T2 files are converted on load into the same
+internal format as T3 files, so everything downstream works alike.
 """
 
 from __future__ import annotations
@@ -11,7 +16,7 @@ from __future__ import annotations
 import struct
 import time as _time
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +42,38 @@ from .utils import (
 __all__ = ["PTU", "flid_map"]
 
 _WRAPAROUND = 65536
+#: Time-tag wraparound of the T2 records (PicoHarp 300; generic format V1, V2).
+_T2_WRAPAROUND_PICOHARP = 210698240
+_T2_WRAPAROUND_V1 = 33552000
+_T2_WRAPAROUND_V2 = 33554432
+#: Sync-counter wraparound of the generic (HydraHarp-family) T3 records.
+_T3_WRAPAROUND_GENERIC = 1024
+#: Records decoded at once (bounds the temporary arrays of large files).
+_CHUNK_RECORDS = 1 << 22
+#: Most lifetime bins the automatic lifetime binning allows.
+MAX_LIFETIME_BINS = 4096
+#: Sync intervals used to measure the laser period of a T2 file.
+_SYNC_SAMPLES = 1_000_000
+
+#: ``TTResultFormat_TTTRRecType`` -> (measurement mode, record layout, layout
+#: version, device). ``"generic"`` is the layout shared by the HydraHarp,
+#: TimeHarp 260, MultiHarp and PicoHarp 330.
+RECORD_TYPES: dict[int, tuple[str, str, int, str]] = {
+    0x00010303: ("T3", "picoharp", 1, "PicoHarp 300"),
+    0x00010203: ("T2", "picoharp", 1, "PicoHarp 300"),
+    0x00010304: ("T3", "generic", 1, "HydraHarp (V1)"),
+    0x00010204: ("T2", "generic", 1, "HydraHarp (V1)"),
+    0x01010304: ("T3", "generic", 2, "HydraHarp (V2)"),
+    0x01010204: ("T2", "generic", 2, "HydraHarp (V2)"),
+    0x00010305: ("T3", "generic", 2, "TimeHarp 260 N"),
+    0x00010205: ("T2", "generic", 2, "TimeHarp 260 N"),
+    0x00010306: ("T3", "generic", 2, "TimeHarp 260 P"),
+    0x00010206: ("T2", "generic", 2, "TimeHarp 260 P"),
+    0x00010307: ("T3", "generic", 2, "MultiHarp / PicoHarp 330"),
+    0x00010207: ("T2", "generic", 2, "MultiHarp / PicoHarp 330"),
+}
+#: Files without the record-type tag are read as PicoHarp 300 T3 (as always).
+_DEFAULT_RECORD_TYPE = 0x00010303
 #: Where ``set_lifetime_shift("auto")`` puts the histogram peak (ns after zero).
 AUTO_SHIFT_MARGIN_NS = 5.0
 
@@ -137,6 +174,90 @@ def _count_check(counts: np.ndarray, bintime: float, min_counts: float,
         "suggested_bintime": (None if passed
                               else _nice_ceil(bintime * min_counts / max(level, 1.0))),
     }
+
+
+def _decode_records(raw: np.ndarray, mode: str, layout: str, version: int,
+                    overflow: int) -> dict[str, Any]:
+    """Decode a block of 32-bit TTTR records (vectorised).
+
+    Follows PicoQuant's reference reader ``Read_PTU.py``. ``raw`` holds the
+    records as unsigned integers, ``overflow`` the counter offset carried in
+    from the records before this block.
+
+    Returns
+    -------
+    dict
+        ``channel`` (detector number of every photon, 1-based), ``counter``
+        (its sync number for T3, its time tag for T2, overflow corrected),
+        ``dtime`` (T3 only: lifetime bin, else ``None``), ``marker_bits`` and
+        ``marker_counter`` (the marker records), ``sync`` (T2, generic layout:
+        the time tags of the sync events) and ``overflow`` (the offset to
+        carry into the next block).
+    """
+    raw = np.asarray(raw, dtype=np.uint32)
+    dtime = None
+    if layout == "picoharp":
+        ch = (raw >> 28).astype(np.uint8)
+        special = ch == 0xF
+        if mode == "T3":
+            dtime = ((raw >> 16) & 0xFFF).astype(np.int64)
+            counter = (raw & 0xFFFF).astype(np.int64)
+            marker_bits = dtime                 # a special record's dtime holds the markers
+            wrap = _WRAPAROUND
+            channel = ch                        # routing channel, 1-based in the file
+        else:
+            counter = (raw & 0x0FFFFFFF).astype(np.int64)
+            # The lower 4 bits of a special record are the marker bits; they
+            # make its time tag wrong by at most 15 ticks, which is ignored.
+            marker_bits = counter & 0xF
+            wrap = _T2_WRAPAROUND_PICOHARP
+            channel = ch + 1                    # the two inputs are 0 and 1 in the file
+        is_overflow = special & (marker_bits == 0)
+        steps = is_overflow.astype(np.int64)
+        is_marker = special & ~is_overflow
+        is_sync = np.zeros(raw.shape, dtype=bool)
+    elif layout == "generic":
+        special = (raw >> 31).astype(bool)
+        ch = ((raw >> 25) & 0x3F).astype(np.uint8)
+        if mode == "T3":
+            dtime = ((raw >> 10) & 0x7FFF).astype(np.int64)
+            counter = (raw & 0x3FF).astype(np.int64)
+            wrap = _T3_WRAPAROUND_GENERIC
+        else:
+            counter = (raw & 0x1FFFFFF).astype(np.int64)
+            wrap = _T2_WRAPAROUND_V1 if version == 1 else _T2_WRAPAROUND_V2
+        is_overflow = special & (ch == 0x3F)
+        steps = is_overflow.astype(np.int64)
+        if version != 1:
+            # V2 stores the number of overflows in the counter field (0 = one).
+            steps[is_overflow] = np.maximum(counter[is_overflow], 1)
+        is_marker = special & (ch >= 1) & (ch <= 15)
+        marker_bits = ch.astype(np.int64)
+        # The sync is a regular time-tagged event in T2 (not recorded in T3).
+        is_sync = special & (ch == 0) if mode == "T2" else np.zeros(raw.shape, dtype=bool)
+        channel = ch + 1                        # input channels are 0-based in the file
+    else:
+        raise ValueError(f"Unknown record layout {layout!r}.")
+
+    counter = counter + (int(overflow) + np.cumsum(steps)) * wrap
+    photon = ~special
+    return {
+        "channel": channel[photon].astype(np.uint8),
+        "counter": counter[photon],
+        "dtime": None if dtime is None else dtime[photon],
+        "marker_bits": np.asarray(marker_bits)[is_marker].astype(np.int64),
+        "marker_counter": counter[is_marker],
+        "sync": counter[is_sync],
+        "overflow": int(overflow) + int(steps.sum()),
+    }
+
+
+def _auto_binning(units_per_period: float) -> int:
+    """Smallest power of two that leaves at most :data:`MAX_LIFETIME_BINS` lifetime bins."""
+    binning = 1
+    while int(units_per_period / binning) + 1 > MAX_LIFETIME_BINS:
+        binning *= 2
+    return binning
 
 
 def _validate_map_args(lifetime_bins, intensity_bins, lifetime_range, intensity_range) -> None:
@@ -267,7 +388,25 @@ def flid_map(trace: Signal, *, lifetime_bins: int = 100, intensity_bins: int = 1
 
 
 class PTU:
-    """Load a PicoQuant ``.ptu`` TTTR-T3 file.
+    """Load a PicoQuant ``.ptu`` TTTR file (T3 or T2 mode).
+
+    The header tells how the records are decoded
+    (:attr:`measurement_mode`, :attr:`device`, see :data:`RECORD_TYPES`):
+
+    * **T3** -- every photon carries the number of its laser pulse and its
+      delay after it (PicoHarp 300; HydraHarp, TimeHarp 260, MultiHarp,
+      PicoHarp 330).
+    * **T2** -- every event carries an absolute time tag. If the laser pulses
+      were recorded (the sync input, channel 0 of the HydraHarp / MultiHarp
+      family), the T3 information is recovered on load: the delay of a photon
+      is its time since the last laser pulse. The file then behaves like a
+      T3 file. Without them (PicoHarp 300: both inputs are detectors; or a
+      sync input that is not connected) there is no lifetime information:
+      time traces, markers and triggers work, lifetime methods raise a clear
+      error (:attr:`has_lifetime` is ``False``).
+
+    Detectors are numbered from 1 (:attr:`channels`); by default the photons
+    of all detectors are used together, see :meth:`set_channels`.
 
     Parameters
     ----------
@@ -277,10 +416,24 @@ class PTU:
         Dark counts per second, subtracted as a constant offset during lifetime
         fitting.
     smooth_rep_rate :
-        When ``True`` use the rounded laser repetition time for record decoding.
+        When ``True`` use the rounded laser repetition time for record decoding
+        (T3 files only).
     lifetime_shift :
         Optional circular shift of the lifetime axis, see
         :meth:`set_lifetime_shift` (``None``, the default, keeps the raw data).
+    channels :
+        Detector channel(s) to use, see :meth:`set_channels` (``None``, the
+        default: all detectors summed).
+    lifetime_binning :
+        Number of native time units combined into one lifetime bin (the
+        TCSPC resolution of a T3 file, the time-tag unit of a T2 file).
+        ``None`` (default) keeps the native bins of a PicoHarp 300 T3 file
+        and otherwise takes the smallest power of two that leaves at most
+        :data:`MAX_LIFETIME_BINS` bins per laser period.
+    sync_divider :
+        T2 files with recorded laser pulses: number of laser pulses per
+        recorded sync event. ``None`` (default) derives it from the sync
+        rate in the header (1 if every pulse was recorded).
     """
 
     #: Requested and applied lifetime shift, see :meth:`set_lifetime_shift`.
@@ -288,21 +441,59 @@ class PTU:
     lifetime_shift_ns: float = 0.0
     #: Lifetime bin holding the partial last bin of the period after a shift.
     lifetime_seam_bin: int | None = None
+    #: ``"T3"`` or ``"T2"``, from the header.
+    measurement_mode: str = "T3"
+    #: Device family named by the record type.
+    device: str = "PicoHarp 300"
+    #: Whether photons carry a lifetime (delay after the laser pulse).
+    has_lifetime: bool = True
+    #: Detector channels selected with :meth:`set_channels` (``None``: all).
+    selected_channels: tuple[int, ...] | None = None
+    #: Detector channels that hold photons in this file.
+    channels: tuple[int, ...] = ()
+    #: Time-tag unit of a T2 file in seconds (``None`` for T3).
+    timetag_resolution: float | None = None
+    #: Native time units per lifetime bin, see ``lifetime_binning``.
+    lifetime_binning: int = 1
+    #: Laser pulses per recorded sync event (T2 files with a laser sync).
+    sync_divider: int = 1
+    #: Sync events recorded in a T2 file.
+    sync_events: int = 0
+    # Seconds per unit of ``events[:, 0]`` and of the marker counts; ``None``
+    # means the laser period ``rep_time`` (T3 files).
+    _sync_unit: float | None = None
+    _marker_unit: float | None = None
+    _all_events: np.ndarray | None = None
+    _all_raw_dtime: np.ndarray | None = None
+    _all_channel: np.ndarray | None = None
 
     def __init__(self, filepath: str | Path, dark_counts: float = 0.0,
                  smooth_rep_rate: bool = False,
-                 lifetime_shift: float | str | None = None) -> None:
+                 lifetime_shift: float | str | None = None, *,
+                 channels: int | Sequence[int] | None = None,
+                 lifetime_binning: int | None = None,
+                 sync_divider: int | None = None) -> None:
         self.filepath = Path(filepath)
         self.dark_counts = float(dark_counts)
         self._tags: dict[str, Any] = {}
         self.marker: dict[int, list[int]] = {}
         self.events = np.empty((0, 3))
         self._raw_dtime = np.empty(0)
+        self._all_events = self.events
+        self._all_raw_dtime = self._raw_dtime
+        self._all_channel = np.empty(0, dtype=np.uint8)
         self._tt_cache: dict[str, Any] = {}
+        for name, value in (("lifetime_binning", lifetime_binning),
+                            ("sync_divider", sync_divider)):
+            if value is not None and (isinstance(value, (bool, np.bool_))
+                                      or not isinstance(value, (int, np.integer))
+                                      or value < 1):
+                raise ValueError(f"{name} must be a positive integer or None.")
 
         with open(self.filepath, "rb") as fh:
             self._read_header(fh)
-            self.is_cw = bool(np.isinf(self.coarse_rep_time))
+            self.is_cw = bool(self.measurement_mode == "T3"
+                              and np.isinf(self.coarse_rep_time))
             if self.is_cw:
                 # Continuous-wave file: no sync period, so records cannot be
                 # decoded into lifetime bins. Keep safe defaults so the object
@@ -312,7 +503,9 @@ class PTU:
                 self.lt_time = np.array([], dtype=float)
                 print(f"{self.filepath.stem}: continuous-wave data, no trigger present.")
                 return
-            self._read_records(fh, smooth_rep_rate)
+            self._read_records(fh, smooth_rep_rate, lifetime_binning, sync_divider)
+        if channels is not None:
+            self.set_channels(channels)
         if lifetime_shift is not None:
             self.set_lifetime_shift(lifetime_shift)
 
@@ -336,7 +529,31 @@ class PTU:
 
         self._tags = dict(tags)
         self.num_records = self._tags["TTResult_NumberOfRecords"]
-        self.coarse_rep_time = self._tags["MeasDesc_GlobalResolution"]
+        record_type = int(self._tags.get("TTResultFormat_TTTRRecType",
+                                         _DEFAULT_RECORD_TYPE)) & 0xFFFFFFFF
+        if record_type not in RECORD_TYPES:
+            known = ", ".join(f"0x{key:08X} ({value[3]} {value[0]})"
+                              for key, value in RECORD_TYPES.items())
+            raise ValueError(
+                f"{self.filepath}: unsupported TTTR record type 0x{record_type:08X}. "
+                f"Supported: {known}.")
+        self.record_type = record_type
+        self.measurement_mode, layout, version, self.device = RECORD_TYPES[record_type]
+        self._record_layout = (layout, version)
+        self.acquisition_time = self._tags["MeasDesc_AcquisitionTime"] * 1e-3
+        global_resolution = float(self._tags["MeasDesc_GlobalResolution"])
+        if self.measurement_mode == "T2":
+            # T2: the global resolution is the unit of the time tags; the
+            # laser period is measured from the recorded sync events.
+            if not np.isfinite(global_resolution) or global_resolution <= 0:
+                raise ValueError(
+                    f"{self.filepath}: invalid time-tag resolution {global_resolution!r} "
+                    "(MeasDesc_GlobalResolution) of a T2 file.")
+            self.timetag_resolution = global_resolution
+            self.coarse_rep_time = self.rep_time = float("inf")
+            self.resolution = global_resolution
+            return
+        self.coarse_rep_time = global_resolution
         if np.isinf(self.coarse_rep_time):
             # Continuous-wave file: keep the infinite rep time but still expose
             # the remaining header attributes so the object is usable.
@@ -345,7 +562,6 @@ class PTU:
             digits = int(-np.floor(np.log10(abs(self.coarse_rep_time))))
             self.rep_time = round(self.coarse_rep_time, digits)
         self.resolution = self._tags["MeasDesc_Resolution"]
-        self.acquisition_time = self._tags["MeasDesc_AcquisitionTime"] * 1e-3
 
     @staticmethod
     def _read_exact(fh, n: int, field: str) -> bytes:
@@ -408,51 +624,226 @@ class PTU:
         raise ValueError(f"Unknown PTU tag type: {typ}")
 
     # ----------------------------------------------------------------- records
-    def _read_records(self, fh, smooth_rep_rate: bool) -> None:
-        rep_time = self.rep_time if smooth_rep_rate else self.coarse_rep_time
-        self.rep_time = rep_time
+    def _record_count(self, fh) -> int:
+        """Number of records to read, bounded by the bytes left in the file."""
+        declared = int(self.num_records)
+        if declared < 0:
+            raise ValueError(f"{self.filepath}: invalid number of records {declared}.")
+        cur = fh.tell()
+        end = fh.seek(0, 2)
+        fh.seek(cur)
+        available = (end - cur) // 4
+        if available < declared:
+            warnings.warn(
+                f"{self.filepath.stem}: file ended earlier than expected "
+                f"({self.num_records} records declared in header).",
+                RuntimeWarning,
+                stacklevel=4,
+            )
+        return min(declared, available)
 
-        n_lt_bins = int(rep_time / self.resolution) + 1
-        if n_lt_bins > 4096:
-            n_lt_bins = 4096
-        self.n_lt_bins = n_lt_bins
-        self.lt_bins = np.arange(n_lt_bins)
+    def _read_records(self, fh, smooth_rep_rate: bool, lifetime_binning: int | None = None,
+                      sync_divider: int | None = None) -> None:
+        mode = self.measurement_mode
+        layout, version = self._record_layout
+        n_records = self._record_count(fh)
+
+        channels: list[np.ndarray] = []
+        counters: list[np.ndarray] = []
+        delays: list[np.ndarray] = []           # T3: lifetime bin; T2: ticks since the sync
+        marker_bits: list[np.ndarray] = []
+        marker_counts: list[np.ndarray] = []
+        overflow = 0
+        # T2: the sync events are not stored (there can be billions); each
+        # block only needs the last sync before it.
+        last_sync: int | None = None
+        first_sync: int | None = None
+        n_sync = 0
+        sync_diffs: list[np.ndarray] = []
+        n_diffs = 0
+        for begin in range(0, n_records, _CHUNK_RECORDS):
+            count = min(_CHUNK_RECORDS, n_records - begin)
+            raw = np.frombuffer(self._read_exact(fh, 4 * count, "records"), dtype="<u4")
+            part = _decode_records(raw, mode, layout, version, overflow)
+            overflow = part["overflow"]
+            channels.append(part["channel"])
+            counters.append(part["counter"])
+            marker_bits.append(part["marker_bits"])
+            marker_counts.append(part["marker_counter"])
+            if mode == "T3":
+                delays.append(part["dtime"])
+                continue
+            sync = np.sort(part["sync"])
+            if last_sync is not None:
+                sync = np.concatenate(([last_sync], sync))
+            # Time since the last laser pulse; -1 marks photons before the first one.
+            index = np.searchsorted(sync, part["counter"], side="right") - 1
+            delay = np.full(part["counter"].shape, -1, dtype=np.int64)
+            found = index >= 0
+            if sync.size:
+                delay[found] = part["counter"][found] - sync[index[found]]
+                if n_diffs < _SYNC_SAMPLES and sync.size > 1:
+                    sync_diffs.append(np.diff(sync)[:_SYNC_SAMPLES - n_diffs])
+                    n_diffs += sync_diffs[-1].size
+                if first_sync is None:
+                    first_sync = int(sync[0])
+                n_sync += sync.size - (last_sync is not None)
+                last_sync = int(sync[-1])
+            delays.append(delay)
+
+        def joined(parts: list[np.ndarray], dtype) -> np.ndarray:
+            return np.concatenate(parts) if parts else np.empty(0, dtype=dtype)
+
+        channel = joined(channels, np.uint8)
+        counter = joined(counters, np.int64)
+        delay = joined(delays, np.int64)
+        bits = joined(marker_bits, np.int64)
+        counts = joined(marker_counts, np.int64)
+        for value in dict.fromkeys(bits.tolist()):      # in order of first appearance
+            self.marker[int(value)] = counts[bits == value].tolist()
+
+        if mode == "T3":
+            note = self._finish_t3(channel, counter, delay, smooth_rep_rate, lifetime_binning)
+        else:
+            self.sync_events = n_sync
+            note = self._finish_t2(
+                channel, counter, delay, first_sync=first_sync, last_sync=last_sync,
+                sync_diffs=joined(sync_diffs, np.int64), lifetime_binning=lifetime_binning,
+                sync_divider=sync_divider)
+        self.events = self._all_events
+        self._raw_dtime = self._all_raw_dtime
+        self.channels = tuple(int(c) for c in np.unique(self._all_channel))
+        print(f"{self.filepath.stem}: {len(self.events)} photons, "
+              f"{sum(len(v) for v in self.marker.values())} markers.{note}")
+
+    def _set_lifetime_axis(self, n_lt_bins: int) -> None:
+        self.n_lt_bins = int(n_lt_bins)
+        self.lt_bins = np.arange(self.n_lt_bins)
         self.lt_time = self.lt_bins * self.resolution
 
-        ofl = 0
-        markers: list[tuple[int, int]] = []
-        events: list[np.ndarray] = []
-        for _ in range(self.num_records):
-            chunk = fh.read(4)
-            if len(chunk) < 4:
-                warnings.warn(
-                    f"{self.filepath.stem}: file ended earlier than expected "
-                    f"({self.num_records} records declared in header).",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-                break
-            record = struct.unpack("<I", chunk)[0]
-            channel = (record >> 28) & 0xF
-            dtime = (record >> 16) & 0xFFF
-            nsync = record & 0xFFFF
-            if channel == 0xF:  # special record
-                if dtime == 0:
-                    ofl += _WRAPAROUND
-                else:
-                    markers.append((dtime, ofl + nsync))
-            else:
-                if dtime >= len(self.lt_bins):
-                    continue
-                truesync = ofl + nsync
-                events.append((truesync, dtime, truesync * rep_time))
+    def _channel_note(self) -> str:
+        """Photons per detector for the load message (empty for a single channel 1)."""
+        found, counts = np.unique(self._all_channel, return_counts=True)
+        if found.size == 0 or (found.size == 1 and found[0] == 1):
+            return ""
+        return " Photons per channel: " + ", ".join(
+            f"{int(c)}: {int(n)}" for c, n in zip(found, counts)) + "."
 
-        for ch, sync in markers:
-            self.marker.setdefault(int(ch), []).append(int(sync))
-        self.events = np.array(events, dtype=float) if events else np.empty((0, 3))
-        self._raw_dtime = self.events[:, 1].copy()
-        print(f"{self.filepath.stem}: {len(self.events)} photons, "
-              f"{sum(len(v) for v in self.marker.values())} markers.")
+    def _finish_t3(self, channel: np.ndarray, truesync: np.ndarray, dtime: np.ndarray,
+                   smooth_rep_rate: bool, lifetime_binning: int | None) -> str:
+        """Store decoded T3 photons; returns a note for the load message."""
+        layout, _ = self._record_layout
+        rep_time = self.rep_time if smooth_rep_rate else self.coarse_rep_time
+        self.rep_time = rep_time
+        native = self.resolution
+        if lifetime_binning is None:
+            # PicoHarp 300 files keep their native bins (12-bit delay, as always).
+            binning = 1 if layout == "picoharp" else _auto_binning(rep_time / native)
+        else:
+            binning = int(lifetime_binning)
+        self.lifetime_binning = binning
+        self.resolution = native * binning
+        limit = (0x1000 if layout == "picoharp" else 0x8000)
+        self._set_lifetime_axis(min(int(rep_time / self.resolution) + 1, limit))
+        if binning > 1:
+            dtime = dtime // binning
+        keep = dtime < self.n_lt_bins
+        truesync, dtime = truesync[keep], dtime[keep]
+        self._all_channel = channel[keep]
+        self._all_events = np.column_stack(
+            (truesync.astype(float), dtime.astype(float), truesync * rep_time))
+        self._all_raw_dtime = self._all_events[:, 1].copy()
+        note = self._channel_note()
+        if layout != "picoharp" or binning > 1:
+            note += (f" {self.device} T3, {self.n_lt_bins} lifetime bins of "
+                     f"{self.resolution * 1e12:.4g} ps.")
+        return note
+
+    def _finish_t2(self, channel: np.ndarray, timetag: np.ndarray, delay: np.ndarray, *,
+                   first_sync: int | None, last_sync: int | None, sync_diffs: np.ndarray,
+                   lifetime_binning: int | None, sync_divider: int | None) -> str:
+        """Convert decoded T2 photons to the T3-like event table.
+
+        With recorded laser pulses the delay of every photon after its pulse
+        becomes the lifetime bin and the file behaves like a T3 file.
+        Without them ``events[:, 0]`` is the time tag itself and there is a
+        single (meaningless) lifetime bin.
+        """
+        tick = self.timetag_resolution
+        self._all_channel = channel
+        self._marker_unit = tick
+        time_s = timetag * tick
+        note = self._channel_note()
+
+        spacing = None                          # recorded sync interval in ticks
+        if sync_diffs.size:
+            median = float(np.median(sync_diffs))
+            regular = median > 0 and np.mean(np.abs(sync_diffs - median) <= 0.01 * median) >= 0.9
+            if regular:
+                near = np.abs(sync_diffs - median) <= 0.5 * median
+                spacing = float(np.mean(sync_diffs[near]))
+                # All sync events give a more precise mean, unless some are missing.
+                overall = (last_sync - first_sync) / max(self.sync_events - 1, 1)
+                if abs(overall / spacing - 1.0) < 1e-6:
+                    spacing = float(overall)
+            else:
+                warnings.warn(
+                    f"{self.filepath.stem}: the sync events (channel 0) are not periodic, "
+                    "so they are not used as laser pulses; no lifetimes.",
+                    RuntimeWarning, stacklevel=4)
+        if spacing is None:
+            # No laser pulses: time traces and triggers only.
+            self.has_lifetime = False
+            self._sync_unit = tick
+            self.rep_time = self.coarse_rep_time = float("inf")
+            self.resolution = tick
+            self._set_lifetime_axis(1)
+            self._all_events = np.column_stack(
+                (timetag.astype(float), np.zeros(timetag.size), time_s))
+            self._all_raw_dtime = self._all_events[:, 1].copy()
+            return (f"{note} {self.device} T2 without laser sync: time traces only, "
+                    "no lifetimes.")
+
+        if sync_divider is None:
+            # The header sync rate is that of the laser; a divider shows as a
+            # recorded interval of several laser periods.
+            rate = self._tags.get("TTResult_SyncRate")
+            ratio = spacing * tick * float(rate) if rate else 1.0
+            divider = max(int(round(ratio)), 1)
+            if divider > 1 and abs(ratio - divider) > 0.05:
+                warnings.warn(
+                    f"{self.filepath.stem}: the recorded sync interval is {ratio:.3f} laser "
+                    "periods of the header sync rate; assuming every pulse was recorded "
+                    "(pass sync_divider= to override).", RuntimeWarning, stacklevel=4)
+                divider = 1
+        else:
+            divider = int(sync_divider)
+        self.sync_divider = divider
+        period = spacing / divider              # laser period in ticks
+        self.rep_time = self.coarse_rep_time = period * tick
+        binning = (_auto_binning(period) if lifetime_binning is None
+                   else int(lifetime_binning))
+        self.lifetime_binning = binning
+        self.resolution = tick * binning
+        self._set_lifetime_axis(int(period / binning) + 1)
+
+        # Photons before the first recorded pulse take their delay from it;
+        # by periodicity the (negative) time folds to the right lifetime.
+        early = delay < 0
+        if early.any():
+            delay = delay.copy()
+            delay[early] = timetag[early] - first_sync
+        micro = np.mod(delay.astype(float), period)
+        dtime = np.minimum(np.floor(micro / binning), self.n_lt_bins - 1)
+        # The pulse number on an ideal grid: times a period it is the arrival
+        # time to within one period, as for a T3 file.
+        truesync = np.floor(timetag / period)
+        self._all_events = np.column_stack((truesync, dtime, time_s))
+        self._all_raw_dtime = self._all_events[:, 1].copy()
+        divided = f", sync divider {divider}" if divider > 1 else ""
+        return (f"{note} {self.device} T2 with laser sync: period "
+                f"{self.rep_time * 1e9:.6g} ns{divided}, {self.n_lt_bins} lifetime bins of "
+                f"{self.resolution * 1e12:.4g} ps.")
 
     # ------------------------------------------------------------------ public
     @property
@@ -461,8 +852,98 @@ class PTU:
         return dict(self._tags)
 
     def get_events(self) -> np.ndarray:
-        """Raw photon events, shape ``(N, 3)`` = ``[truesync, dtime, time_s]``."""
+        """Photon events of the selected channels, shape ``(N, 3)`` = ``[truesync, dtime, time_s]``.
+
+        ``truesync`` is the number of the laser pulse, ``dtime`` the lifetime
+        bin and ``time_s`` the arrival time in seconds. T2 files are converted
+        to the same layout: with recorded laser pulses ``dtime`` is the binned
+        delay after the last pulse and ``time_s`` the exact time tag; without
+        them ``truesync`` is the time tag itself and ``dtime`` is 0.
+        """
         return self.events
+
+    def set_channels(self, channels: int | Sequence[int] | None = None) -> tuple[int, ...]:
+        """Choose the detector channel(s) whose photons are analysed.
+
+        All time traces, lifetime histograms, fits and FLIDs use the photons
+        of the selected detectors together. Markers and laser triggers do not
+        depend on the selection, and a lifetime shift is applied again
+        (``"auto"`` is determined from the selected photons).
+
+        Parameters
+        ----------
+        channels :
+            One detector number, several, or ``None`` for all detectors of
+            the file (:attr:`channels`, numbered from 1).
+
+        Returns
+        -------
+        tuple of int
+            The channels in use. All cached traces are discarded.
+        """
+        self._require_pulsed()
+        if channels is None:
+            chosen = None
+        else:
+            values = np.atleast_1d(np.asarray(channels))
+            if values.size == 0 or not np.issubdtype(values.dtype, np.integer):
+                raise ValueError("channels must be detector numbers (integers) or None.")
+            chosen = tuple(sorted({int(c) for c in values}))
+            missing = [c for c in chosen if c not in self.channels]
+            if missing:
+                raise ValueError(
+                    f"{self.filepath.stem}: no photons on channel(s) {missing}; "
+                    f"the file has channel(s) {list(self.channels)}.")
+        if chosen is None:
+            self.events, self._raw_dtime = self._all_events, self._all_raw_dtime
+        else:
+            keep = np.isin(self._all_channel, chosen)
+            self.events, self._raw_dtime = self._all_events[keep], self._all_raw_dtime[keep]
+        self.selected_channels = chosen
+        # Matrices and traces were built from the old selection.
+        self._bintime = None
+        self._tt_cache = {}
+        if self.has_lifetime:
+            # Restores the raw lifetimes of a table shared with the full data
+            # and re-applies the requested shift to the selection.
+            self.set_lifetime_shift(self.lifetime_shift)
+        return self.channels if chosen is None else chosen
+
+    @property
+    def photon_channel(self) -> np.ndarray:
+        """Detector channel of every photon of the file (all channels, in record order)."""
+        return self._all_channel
+
+    def photon_times(self, channel: int | None = None) -> np.ndarray:
+        """Absolute arrival time of every photon in seconds, at full resolution.
+
+        The raw material of correlation analyses between detectors (e.g.
+        antibunching): ``photon_times(1)`` and ``photon_times(2)`` are the
+        photon streams of the two detectors. Independent of
+        :meth:`set_channels` and of a lifetime shift.
+
+        Parameters
+        ----------
+        channel :
+            Detector number, or ``None`` for the photons of all detectors
+            (in record order; pair them with :attr:`photon_channel`).
+
+        Returns
+        -------
+        ndarray
+            T2 files: the time tags (unit :attr:`timetag_resolution`). T3
+            files: laser pulse number times the laser period plus the delay
+            after the pulse (to the lifetime resolution).
+        """
+        self._require_pulsed()
+        if self.measurement_mode == "T2":
+            times = self._all_events[:, 2]
+        else:
+            times = (self._all_events[:, 0] * self.rep_time
+                     + self._all_raw_dtime * self.resolution)
+        if channel is None:
+            return times.copy()
+        return times[self._all_channel == int(channel)]
 
     def set_lifetime_shift(self, shift: float | str | None) -> float:
         """Circularly shift every photon's lifetime (micro) time to earlier times.
@@ -497,7 +978,7 @@ class PTU:
         seam bins out (:meth:`seam_bins`).
         All cached traces are discarded.
         """
-        self._require_pulsed()
+        self._require_lifetime()
         period_bins = self.rep_time / self.resolution
         wrap = int(np.ceil(period_bins - 1e-6))
         if wrap > self.n_lt_bins:
@@ -610,6 +1091,12 @@ class PTU:
                 "excluded_ns": np.asarray(t_ns, dtype=float)[seam],
                 "seam_points": int(np.count_nonzero(seam))}
 
+    def _channel_report(self) -> dict[str, Any]:
+        """``{"channels": [...]}`` when detectors were selected, else empty."""
+        if self.selected_channels is None:
+            return {}
+        return {"channels": list(self.selected_channels)}
+
     def _prerise_bins(self, t_ns: np.ndarray, window: np.ndarray, gap: float,
                       seam: np.ndarray | None = None) -> np.ndarray:
         """Bins before the rising edge that are fitted together with the tail.
@@ -647,10 +1134,21 @@ class PTU:
                 "(T3) data."
             )
 
+    def _require_lifetime(self) -> None:
+        """Reject lifetime analysis on files whose photons have no lifetime."""
+        self._require_pulsed()
+        if not self.has_lifetime:
+            raise ValueError(
+                f"{self.filepath.stem}: T2 file without laser pulses (no laser sync on "
+                "channel 0), so the photons have no lifetime information; only time "
+                "traces, markers and triggers are available."
+            )
+
     def _build_matrix(self, bintime: float) -> None:
         """Build the (time-bin x lifetime-bin) photon count matrix."""
         n_tt = int(np.ceil(self.acquisition_time / bintime))
-        sync_per_bin = bintime / self.rep_time
+        # events[:, 0] counts laser periods (T2 without a laser sync: time tags).
+        sync_per_bin = bintime / (self._sync_unit or self.rep_time)
         tt_idx = (self.events[:, 0] / sync_per_bin).astype(int)
         # The matrix is sized from the header acquisition time, but tt_idx
         # comes from the photon syncs: with smooth_rep_rate=True (rounded rep
@@ -718,6 +1216,8 @@ class PTU:
             "acquisition_duration": selected_duration,
             "average_counts": trace.sum() / selected_duration if selected_duration else 0.0,
         }
+        if self.selected_channels is not None:
+            meta["channels"] = list(self.selected_channels)
 
         if not laser_pulse:
             nz = np.nonzero(trace)[0]
@@ -764,7 +1264,7 @@ class PTU:
         Pass ``bintime`` with an explicit matrix to retain the acquisition
         duration needed for dark-count correction during fitting.
         """
-        self._require_pulsed()
+        self._require_lifetime()
         if matrix is None:
             if not self._tt_cache:
                 self.time_trace()
@@ -784,6 +1284,8 @@ class PTU:
         meta: dict[str, Any] = {"time_bin_count": int(matrix.shape[0])}
         if self.lifetime_shift_ns:
             meta["lifetime_shift_ns"] = self.lifetime_shift_ns
+        if self.selected_channels is not None:
+            meta["channels"] = list(self.selected_channels)
         if bintime is not None:
             meta.update({
                 "bintime": float(bintime),
@@ -875,6 +1377,7 @@ class PTU:
         if roi is not None:
             x_min, x_max = roi.get("x_min"), roi.get("x_max")
             y_min, y_max = roi.get("y_min"), roi.get("y_max")
+        self._require_lifetime()
         if min_counts is not None and (not np.isfinite(min_counts) or min_counts < 0):
             raise ValueError("min_counts must be a non-negative number or None.")
         if not 0 < coverage <= 1:
@@ -1155,10 +1658,13 @@ class PTU:
             raise ValueError("bins must be a positive integer.")
 
     def _trace_meta(self, sel: dict[str, Any], method: str) -> dict[str, Any]:
-        return {"bintime": sel["bintime"], "method": method, "roi": sel["bounds"],
+        meta = {"bintime": sel["bintime"], "method": method, "roi": sel["bounds"],
                 "counts": sel["counts"], "laser_pulse": sel["laser_pulse"],
                 "lifetime_shift_ns": self.lifetime_shift_ns,
                 "count_check": sel["count_check"]}
+        if self.selected_channels is not None:
+            meta["channels"] = list(self.selected_channels)
+        return meta
 
     def lifetime_trace(self, roi: dict[str, float] | None = None, *,
                        x_min: float | None = None, x_max: float | None = None,
@@ -1522,7 +2028,7 @@ class PTU:
         ``on`` and ``off`` are fractions of the time-trace maximum. Returns a dict
         with ``"on"`` and ``"off"`` :class:`Signal` histograms.
         """
-        self._require_pulsed()
+        self._require_lifetime()
         if not self._tt_cache:
             self.time_trace()
         trace = self._tt_cache["trace"]
@@ -1657,7 +2163,7 @@ class PTU:
         ``full_curve`` (on ``irf_t_ns``, the period's time axis) and
         ``reconvolution: True``; ``quality["n_params"]`` counts δ, B and s.
         """
-        self._require_pulsed()
+        self._require_lifetime()
         _check_mean_lifetime(mean_lifetime)
         if irf is not None:
             if normalize:
@@ -1708,6 +2214,7 @@ class PTU:
                     "left_bound_ns": float(t_ns[tail][0]), "weighting": weighting,
                     "lifetime_shift_ns": self.lifetime_shift_ns,
                     "exclude_seam": bool(exclude_seam), **self._seam_report(t_ns, seam),
+                    **self._channel_report(),
                     "fit_background": bool(fit_background),
                     "background": float(out.get("offset", offset)) * norm,
                     "background_err": float(out.get("offset_err", 0.0)) * norm,
@@ -1760,9 +2267,9 @@ class PTU:
         :class:`PTU` must have the same TCSPC resolution and laser period;
         every input must have :attr:`n_lt_bins` entries.
         """
-        self._require_pulsed()
+        self._require_lifetime()
         if isinstance(irf, PTU):
-            irf._require_pulsed()
+            irf._require_lifetime()
             name = irf.filepath.name
             if not np.isclose(irf.resolution, self.resolution, rtol=1e-6, atol=0.0):
                 raise ValueError(
@@ -1833,7 +2340,8 @@ class PTU:
                     "left_bound_ns": float(t_p[mask][0]), "weighting": weighting,
                     "lifetime_shift_ns": self.lifetime_shift_ns, "irf_t_ns": t_p,
                     "period": self.rep_time * 1e9 if decay_correction else None,
-                    "exclude_seam": bool(exclude_seam), **self._seam_report(t_ns, seam)})
+                    "exclude_seam": bool(exclude_seam), **self._seam_report(t_ns, seam),
+                    **self._channel_report()})
         if isinstance(irf, PTU):
             out["irf_source"] = str(irf.filepath)
         return out
@@ -1867,7 +2375,8 @@ class PTU:
         """
         self._require_pulsed()
         if self.marker.get(marker_channel):
-            times = np.asarray(self.marker[marker_channel], dtype=float) * self.rep_time
+            times = (np.asarray(self.marker[marker_channel], dtype=float)
+                     * (self._marker_unit or self.rep_time))
         elif self._tt_cache.get("triggers"):
             # Legacy laser_pulse=False trace: its two edges act as triggers.
             times = np.array([point["time"] for point in self._tt_cache["triggers"]])
@@ -1888,7 +2397,7 @@ class PTU:
         """All marker times (seconds) on ``marker_channel``."""
         self._require_pulsed()
         if marker_channel in self.marker:
-            return np.array(self.marker[marker_channel]) * self.rep_time
+            return np.array(self.marker[marker_channel]) * (self._marker_unit or self.rep_time)
         warnings.warn(
             f"{self.filepath.stem}: marker channel {marker_channel} not found.",
             RuntimeWarning,
