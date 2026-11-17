@@ -154,7 +154,120 @@ ptu.photon_channel                    # detector of every photon (record order)
 
 T2 files give the time tags (unit `ptu.timetag_resolution`); T3 files the
 laser pulse number times the period plus the delay after the pulse. The
-toolbox has no correlation function yet.
+second-order correlation of two detectors is described in the next section.
+
+## Second-order correlation g2 (antibunching)
+
+With a 50/50 beam splitter in front of two detectors (Hanbury Brown–Twiss
+setup) the correlation of their photon streams shows whether the light
+comes from a single quantum emitter. A single emitter cannot emit two photons
+at once, so coincidences at zero delay are missing: **antibunching**.
+
+```python
+ptu = PTU("emitter_t2.ptu")        # T2 file, detectors on channels 1 and 2
+g2 = ptu.g2()                      # Signal: coincidences against the lag
+print(g2.meta["g2_0"], g2.meta["g2_0_err"])
+```
+
+Only **T2 files** are supported: they store the time tag of every photon at
+the full timing resolution of the hardware. A T3 file raises a `ValueError`.
+
+**What is counted.** For every photon of detector `a` and every photon of
+detector `b` within `±max_lag` of it, the time difference `τ = t_b − t_a` is
+added to a histogram (all pairs, not only the next photon, so the
+correlogram does not drop off at longer lags). Positive lags mean that the
+photon of `b` came later. `g2.x` is the lag in s (bin centres, lag 0 in the
+middle of a bin), `g2.y` the number of coincidences per lag bin.
+
+**Normalisation.** `g2.meta["g2"]` is the correlogram divided by the
+coincidences expected for uncorrelated light, `N_a N_b Δτ / T` (`N`: photons
+per detector, `Δτ`: lag bin, `T`: duration of the selected photons). It is 1
+for uncorrelated light at all lags.
+
+**g2(0) with pulsed excitation.** The coincidences form peaks spaced by the
+laser period: the side peaks hold pairs of photons from different laser
+pulses, the centre peak pairs from the same pulse. `g2(0)` is the area of the
+centre peak divided by the mean area of the side peaks:
+
+| `g2(0)` | Meaning |
+|---|---|
+| 0 | ideal single-photon emitter |
+| < 0.5 | a single emitter (two or more equal emitters give at least 0.5) |
+| `1 − 1/N` | `N` equal, independent emitters |
+| 1 | uncorrelated (classical) light, e.g. laser light |
+
+The laser period comes from the laser sync of the file (MultiHarp, channel
+0). A file without a sync (PicoHarp 300 T2) needs `period=` in s. Every side
+peak whose whole window lies inside the lag range is used (with the default
+`max_lag` of 5.5 periods: five on each side). The error is the Poisson error
+of the areas.
+
+**g2(0) with continuous excitation.** Without a period the correlogram has no
+peaks; `g2(0)` is the normalised `g2` at the delay (the lag bin there, or the
+mean within `±window`). Its dip has the width of the excited-state lifetime
+(at low excitation), so choose a lag bin well below it.
+
+**Which photons.** As for the FLID, the photons are chosen by time bins of a
+trace, here the trace of the two detectors (`detector_trace`, width
+`bintime`): the bins inside the time window `[x_min, x_max)` whose counts lie
+in `[y_min, y_max)`. A count range picks the on state of a blinking emitter,
+where the background of the off periods would otherwise fill the centre
+peak; `roi=` takes a box drawn on the trace.
+
+```python
+trace = ptu.detector_trace(bintime=0.01, channels=(1, 2))    # photons per 10 ms
+on = ptu.g2(bintime=0.01, y_min=0.6 * trace.y.max())        # the on state only
+roi = ptu.g2({"x_min": 10, "x_max": 60, "y_min": 50, "y_max": 400}, bintime=0.01)
+ptu.g2(period=100e-9)                                         # PicoHarp 300 T2: 10 MHz
+```
+
+`detector_trace` and `g2` neither use nor change the detector selection
+(`set_channels`) or the time trace of the lifetime analysis.
+
+| Parameter | Default | Meaning |
+|-----------|---------|---------|
+| `roi`, `x_min`, `x_max`, `y_min`, `y_max` | `None` | photons of the selected time bins (see above); all `None`: the whole file |
+| `bintime` | `0.05` | width of the trace bins the region is chosen on (s); keep it much longer than the lags |
+| `channels` | `(1, 2)` | the two detectors `(a, b)` |
+| `max_lag` | 5.5 periods, else 500 ns | largest lag (s) |
+| `lag_bin` | period / 200, else 1 ns | width of one lag bin (s), rounded to whole time tags |
+| `period` | from the sync | laser period (s) for the pulsed `g2(0)`; `None` without a sync: continuous |
+| `delay` | automatic | lag of the centre peak (s): detector and cable delays. Pulsed: found from the peak comb (all peaks folded onto one period), so it works even without a centre peak; continuous: 0 |
+| `window` | half a period / half a lag bin | half-width of the area around each peak (pulsed) or around the delay (continuous) |
+| `progress` | `None` | callback `progress(done, total)`; raise from it to cancel |
+
+The result's `meta` holds `g2`, `g2_0`, `g2_0_err`, `method` (`"pulsed"` or
+`"continuous"`), `centre_area`, `side_areas` (`{k: area}` for the side
+peaks `k = ±1, ±2, …`), `mean_side_area`, `n_side_peaks` (pulsed), `period`,
+`delay`, `window`, `lag_bin`, `max_lag`, `photons` and `rates` per detector,
+`duration`, `selected_bins`, `roi` and `bintime`.
+
+Notes:
+
+- **Background.** Uncorrelated background photons (dark counts, stray light)
+  add coincidences to every peak alike and raise `g2(0)` above the value of
+  the emitter. The default window of half a period integrates the background
+  between the peaks as well; a narrower `window` (a few lifetimes) leaves
+  most of it out.
+- **Edges of the region.** Photon pairs that cross from a selected into an
+  unselected time bin are lost, about `max_lag / bintime` of the
+  coincidences. That is negligible for bins of milliseconds and lags of
+  microseconds.
+- **Detector artefacts.** Dead time removes coincidences of one detector with
+  itself only, which are not counted. Crosstalk between the two detectors
+  (a breakdown flash of one detector seen by the other) shows as narrow
+  peaks at a fixed lag next to zero.
+- T2 decoding is so far tested on synthetic files only (see
+  [Record formats](#record-formats-t3-and-t2)).
+
+The pair counting and `g2(0)` are also available on their own, for arrays
+of integer time tags: `utils.photon_correlation(a, b, max_lag, bin_width)`,
+`utils.peak_delay(lags, counts, period)` and
+`utils.pulsed_g2_zero(lags, counts, period, delay=, window=)`.
+
+References: R. Hanbury Brown & R. Q. Twiss, *Nature* 177, 27 (1956);
+B. Lounis & W. E. Moerner, *Nature* 407, 491 (2000); P. Michler et al.,
+*Science* 290, 2282 (2000).
 
 ## Time trace
 

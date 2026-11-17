@@ -26,6 +26,7 @@ from .context import AppContext, AppState
 from .logcapture import LogBus, install
 from .tabs.correlate_tab import CorrelateTab
 from .tabs.database_tab import DatabaseTab
+from .tabs.g2_tab import G2Tab
 from .tabs.jpk_shift_tab import JPKShiftTab
 from .tabs.jpk_tab import JPKTab
 from .tabs.ptu_tab import PTUTab
@@ -34,7 +35,7 @@ from .workers import JobRunner
 __all__ = ["MainWindow", "run"]
 
 #: Tabs in display order.
-TAB_CLASSES = (PTUTab, CorrelateTab, JPKTab, JPKShiftTab, DatabaseTab)
+TAB_CLASSES = (PTUTab, G2Tab, CorrelateTab, JPKTab, JPKShiftTab, DatabaseTab)
 
 _LEVEL_COLOURS = {"info": None, "warning": "#b36b00", "error": "#c00000",
                   "good": "#2e7d32", "bad": "#c00000", "neutral": "#707070"}
@@ -46,6 +47,8 @@ Hover over any field for an explanation.</p>
 <li><b>PL lifetime (PTU)</b>: time trace of one .ptu file (window by time
 or laser trigger), regions of interest drawn on it, lifetime fits with fit
 quality, lifetime trace and FLID maps of the regions.</li>
+<li><b>Antibunching (g2)</b>: second-order correlation of two detectors of a T2
+file (whole window, on state or ROI) with g2(0).</li>
 <li><b>Correlate</b>: align a KPFM signal (.txt) with a PL time trace (.ptu)
 on their laser triggers.</li>
 <li><b>AFM (JPK)</b>: view calibrated AFM channels.</li>

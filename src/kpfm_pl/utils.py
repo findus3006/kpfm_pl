@@ -30,6 +30,9 @@ __all__ = [
     "image_shift",
     "nearest_index",
     "trigger_points",
+    "photon_correlation",
+    "peak_delay",
+    "pulsed_g2_zero",
 ]
 
 
@@ -488,3 +491,179 @@ def trigger_points(times: np.ndarray, axis: np.ndarray) -> list[TriggerPoint]:
             continue
         points.append({"index": index, "time": float(axis[index])})
     return points
+
+
+# ------------------------------------------------------------ photon correlation
+def photon_correlation(a: np.ndarray, b: np.ndarray, max_lag: float, bin_width: int, *,
+                       progress=None, max_pairs: int = 2_000_000,
+                       ) -> tuple[np.ndarray, np.ndarray]:
+    """Histogram of the arrival-time differences ``b - a`` of two photon streams.
+
+    Every pair of one photon of ``a`` and one of ``b`` whose time difference
+    lies within about ``±max_lag`` adds one count to the lag bin of that
+    difference. For two detectors behind a beam splitter this is the
+    unnormalised second-order correlation ``g2(τ)``. All pairs are counted
+    ("multi-stop"), not only the next photon after each start, so the
+    result does not drop off at long lags.
+
+    Parameters
+    ----------
+    a, b :
+        Integer arrival times (time tags) of the two streams, in the same
+        unit. They are sorted if necessary.
+    max_lag :
+        Largest lag (same unit) of the histogram; it is rounded up to whole
+        bins.
+    bin_width :
+        Width of one lag bin (same unit, at least 1). Bin ``k`` is centred at
+        ``k * bin_width``, so lag 0 lies in the middle of the centre bin.
+    progress :
+        Optional callback ``progress(done, total)`` over the photons of
+        ``a``; an exception raised by it aborts the calculation.
+    max_pairs :
+        Pairs handled at once (bounds the memory).
+
+    Returns
+    -------
+    lags, counts :
+        Bin centres (same unit as the input) and coincidences per bin, both
+        of length ``2 * ceil(max_lag / bin_width) + 1``.
+    """
+    width = int(bin_width)
+    if width < 1:
+        raise ValueError("bin_width must be at least one time unit.")
+    if not np.isfinite(max_lag) or max_lag <= 0:
+        raise ValueError("max_lag must be a positive number.")
+    n_side = int(np.ceil(max_lag / width))
+    a = np.asarray(a, dtype=np.int64)
+    b = np.asarray(b, dtype=np.int64)
+    if a.size > 1 and np.any(np.diff(a) < 0):
+        a = np.sort(a)
+    if b.size > 1 and np.any(np.diff(b) < 0):
+        b = np.sort(b)
+    half = width // 2
+    # Bin k holds the lags k*width - half ... k*width - half + width - 1.
+    lag_lo = -n_side * width - half
+    lag_hi = n_side * width - half + width - 1
+    counts = np.zeros(2 * n_side + 1, dtype=np.int64)
+    lo = np.searchsorted(b, a + lag_lo, side="left")
+    hi = np.searchsorted(b, a + lag_hi, side="right")
+    n_pairs = hi - lo
+    mean_pairs = float(np.mean(n_pairs)) if n_pairs.size else 0.0
+    block = max(1, int(max_pairs / max(mean_pairs, 1.0)))
+    for start in range(0, a.size, block):
+        if progress is not None:
+            progress(start, a.size)
+        stop = min(start + block, a.size)
+        n = n_pairs[start:stop]
+        total = int(n.sum())
+        if total == 0:
+            continue
+        owner = np.repeat(np.arange(stop - start), n)
+        first = np.cumsum(n) - n
+        partner = lo[start:stop][owner] + (np.arange(total) - first[owner])
+        lags = b[partner] - a[start:stop][owner]
+        counts += np.bincount((lags + half) // width + n_side, minlength=counts.size)
+    if progress is not None:
+        progress(a.size, a.size)
+    return np.arange(-n_side, n_side + 1, dtype=np.int64) * width, counts
+
+
+def peak_delay(lags: np.ndarray, counts: np.ndarray, period: float) -> float:
+    """Position of the peak comb of a pulsed correlogram, in ``(-period/2, period/2]``.
+
+    With pulsed excitation the coincidences form peaks at ``delay + k·period``
+    (``delay``: the difference of the detector and cable delays). All peaks
+    are folded onto one period and the delay is the centre of the folded
+    maximum, so it is found even when the centre peak is missing
+    (antibunching).
+    """
+    lags = np.asarray(lags, dtype=float)
+    counts = np.asarray(counts, dtype=float)
+    if lags.size < 2 or not np.isfinite(period) or period <= 0:
+        raise ValueError("Need at least two lag bins and a positive period.")
+    step = float(np.median(np.diff(lags)))
+    n_bins = max(int(round(period / step)), 4)
+    phase = np.mod(lags, period)
+    index = np.minimum((phase / period * n_bins).astype(int), n_bins - 1)
+    folded = np.bincount(index, weights=counts, minlength=n_bins)
+    # Circular smoothing over three bins keeps a single noisy bin from winning.
+    smoothed = folded + np.roll(folded, 1) + np.roll(folded, -1)
+    delay = (int(np.argmax(smoothed)) + 0.5) * period / n_bins
+    return float(delay - period if delay > period / 2 else delay)
+
+
+def pulsed_g2_zero(lags: np.ndarray, counts: np.ndarray, period: float, *,
+                   delay: float | None = None, window: float | None = None) -> dict:
+    """``g2(0)`` for pulsed excitation from the areas of the correlogram peaks.
+
+    The centre peak (lag ``delay``) holds the coincidences of two photons
+    from the same laser pulse, the side peaks (``delay ± k·period``) those of
+    photons from different pulses. ``g2(0)`` is the centre area divided by
+    the mean side-peak area: 0 for an ideal single-photon emitter, 1 for
+    uncorrelated (classical) light, ``1 - 1/N`` for ``N`` equal independent
+    emitters. Only side peaks whose whole window lies inside the lag range
+    are used.
+
+    Parameters
+    ----------
+    lags, counts :
+        The correlogram (:func:`photon_correlation`); ``lags``, ``period``,
+        ``delay`` and ``window`` in the same unit.
+    period :
+        Laser repetition period.
+    delay :
+        Position of the centre peak; ``None`` finds it (:func:`peak_delay`).
+    window :
+        Half-width of the area around each peak. ``None`` uses half a period,
+        so every coincidence belongs to one peak (robust for long lifetimes;
+        includes the background between the peaks).
+
+    Returns
+    -------
+    dict
+        ``g2_0`` and its Poisson error ``g2_0_err``, ``centre_area``,
+        ``side_areas`` (``{k: area}`` for ``k = ±1, ±2, ...``),
+        ``mean_side_area``, ``n_side_peaks``, ``delay`` and ``window``.
+    """
+    lags = np.asarray(lags, dtype=float)
+    counts = np.asarray(counts, dtype=float)
+    if not np.isfinite(period) or period <= 0:
+        raise ValueError("period must be a positive number.")
+    if delay is None:
+        delay = peak_delay(lags, counts, period)
+    window = period / 2.0 if window is None else float(window)
+    if not 0 < window <= period / 2.0 * (1 + 1e-12):
+        raise ValueError("window must lie in (0, period/2].")
+    step = float(np.median(np.diff(lags)))
+    lowest, highest = lags[0] - step / 2, lags[-1] + step / 2
+    tolerance = 1e-9 * period
+
+    def area(centre: float) -> float:
+        inside = (lags >= centre - window) & (lags < centre + window)
+        return float(counts[inside].sum())
+
+    side: dict[int, float] = {}
+    k = 1
+    while True:
+        found = False
+        for kk in (k, -k):
+            centre = delay + kk * period
+            if centre - window >= lowest - tolerance and centre + window <= highest + tolerance:
+                side[kk] = area(centre)
+                found = True
+        if not found:
+            break
+        k += 1
+    if not side:
+        raise ValueError("The lag range covers no whole side peak: choose a maximum lag "
+                         "of at least 1.5 laser periods.")
+    centre_area = area(delay)
+    mean_side = float(np.mean(list(side.values())))
+    if mean_side <= 0:
+        raise ValueError("The side peaks hold no coincidences, so g2(0) is undefined.")
+    g2 = centre_area / mean_side
+    error = g2 * np.sqrt(1.0 / max(centre_area, 1.0) + 1.0 / sum(side.values()))
+    return {"g2_0": float(g2), "g2_0_err": float(error), "centre_area": centre_area,
+            "side_areas": dict(sorted(side.items())), "mean_side_area": mean_side,
+            "n_side_peaks": len(side), "delay": float(delay), "window": float(window)}

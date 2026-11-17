@@ -36,7 +36,9 @@ from .utils import (
     TriggerPoint,
     fit_window_mask,
     lifetime_from_truncated_mean,
+    photon_correlation,
     prerise_mask,
+    pulsed_g2_zero,
     trigger_points,
 )
 
@@ -983,6 +985,212 @@ class PTU:
         if channel is None:
             return times.copy()
         return times[self._all_channel == int(channel)]
+
+    def _detector_list(self, channels: int | Sequence[int] | None) -> list[int]:
+        """Detector numbers of ``channels`` (``None``: all), checked against the file."""
+        if channels is None:
+            return list(self.channels)
+        values = [int(c) for c in np.atleast_1d(np.asarray(channels))]
+        missing = [c for c in values if c not in self.channels]
+        if missing:
+            raise ValueError(f"{self.filepath.stem}: no photons on channel(s) {missing}; "
+                             f"the file has channel(s) {list(self.channels)}.")
+        return values
+
+    def detector_trace(self, bintime: float = 50e-3,
+                       channels: int | Sequence[int] | None = None) -> Signal:
+        """Photons per time bin of the given detectors, from their exact arrival times.
+
+        Unlike :meth:`time_trace` this neither uses nor changes the detector
+        selection (:meth:`set_channels`) or the cached time trace, so it can
+        be called alongside a lifetime analysis. It is the trace on which the
+        regions of :meth:`g2` are chosen.
+
+        Parameters
+        ----------
+        bintime :
+            Width of each time bin in seconds; the bins start at 0 and cover
+            the whole acquisition (the last one may be shorter).
+        channels :
+            Detector number(s) to count, or ``None`` for all detectors.
+
+        Returns
+        -------
+        Signal
+            ``x``: left edge of each bin (s), ``y``: photons in the bin.
+            ``meta`` holds ``bintime``, ``bin_durations`` and ``channels``.
+        """
+        self._require_pulsed()
+        if not np.isfinite(bintime) or bintime <= 0:
+            raise ValueError("bintime must be a positive finite number.")
+        chosen = self._detector_list(channels)
+        times = self.photon_times()[np.isin(self._all_channel, chosen)]
+        duration = float(self.acquisition_time)
+        if times.size:
+            duration = max(duration, float(times.max()))
+        n_bins = max(int(np.ceil(duration / bintime)), 1)
+        index = np.minimum((times / bintime).astype(np.int64), n_bins - 1)
+        counts = np.bincount(index, minlength=n_bins).astype(float)
+        left = np.arange(n_bins) * bintime
+        durations = np.minimum(left + bintime, duration) - left
+        return Signal(left, counts, label=f"{self.filepath.stem} detectors "
+                                          f"{', '.join(map(str, chosen))}",
+                      units={"x": "s", "y": "counts"},
+                      meta={"bintime": float(bintime), "bin_durations": durations,
+                            "channels": chosen})
+
+    def g2(self, roi: dict[str, float] | None = None, *,
+           x_min: float | None = None, x_max: float | None = None,
+           y_min: float | None = None, y_max: float | None = None,
+           bintime: float = 50e-3, channels: Sequence[int] = (1, 2),
+           max_lag: float | None = None, lag_bin: float | None = None,
+           period: float | None = None, delay: float | None = None,
+           window: float | None = None,
+           progress: Callable[[int, int], Any] | None = None) -> Signal:
+        """Second-order correlation ``g2(τ)`` between two detectors (antibunching).
+
+        Every photon pair of the two detectors within ``±max_lag`` is counted
+        by the time difference ``t_b - t_a`` (Hanbury Brown–Twiss setup: one
+        beam splitter, two detectors). Only T2 files are supported: their
+        time tags have the full timing resolution of the hardware.
+
+        Parameters
+        ----------
+        roi, x_min, x_max, y_min, y_max, bintime :
+            Which photons are used: the time bins of :meth:`detector_trace`
+            (width ``bintime``, photons of both detectors) inside the time
+            window ``[x_min, x_max)`` whose counts lie in ``[y_min, y_max)``,
+            as for :meth:`flid` (``roi`` overrides the explicit bounds). A
+            count range selects e.g. the on state of a blinking emitter.
+            All ``None``: the whole file.
+        channels :
+            The two detectors ``(a, b)``; positive lags mean the photon of
+            ``b`` came later.
+        max_lag :
+            Largest lag in s. Default: 5.5 laser periods with a laser period
+            (centre peak plus five side peaks on each side), else 500 ns.
+        lag_bin :
+            Width of one lag bin in s, rounded to whole time tags. Default:
+            1/200 of the laser period, else 1 ns.
+        period :
+            Laser repetition period in s for the pulsed ``g2(0)``. Default:
+            the period measured from the laser sync of the file; files
+            without one (PicoHarp 300 T2) need it here. Without any period
+            the ``g2(0)`` of continuous excitation is computed (see below).
+        delay :
+            Lag of the centre peak in s (detector and cable delays). ``None``:
+            found from the peak comb with a period, 0 without one.
+        window :
+            Half-width in s of the area around each peak (pulsed; default half
+            a period) or around ``delay`` (continuous; default half a lag
+            bin, i.e. the bin at ``delay``).
+        progress :
+            Optional callback ``progress(done, total)``; raise from it to
+            cancel.
+
+        Returns
+        -------
+        Signal
+            ``x``: lag (s, bin centres), ``y``: coincidences per lag bin.
+            ``meta`` holds ``g2`` (the normalised correlation: coincidences
+            divided by ``N_a N_b Δτ / T`` expected for uncorrelated light,
+            with ``N`` photons per detector and ``T`` the selected duration),
+            ``g2_0`` ± ``g2_0_err`` and ``method`` (``"pulsed"``: centre-peak
+            area over the mean side-peak area, plus ``centre_area``,
+            ``side_areas``, ``mean_side_area``, ``n_side_peaks``;
+            ``"continuous"``: mean normalised ``g2`` within ``window`` of
+            ``delay``), ``period``, ``delay``, ``window``, ``lag_bin``,
+            ``max_lag``, ``photons`` per detector, ``rates`` (counts/s),
+            ``duration``, ``selected_bins``, ``roi`` and ``bintime``.
+
+        Notes
+        -----
+        Photons are taken from the selected time bins only, so pairs that
+        straddle the edge of a selected bin into an unselected one are lost;
+        this removes about ``max_lag / bintime`` of the coincidences at the
+        edges and is negligible for bins much longer than the lags.
+        """
+        self._require_pulsed()
+        if self.measurement_mode != "T2":
+            raise ValueError(f"{self.filepath.stem}: g2 needs a T2 file (time tags of "
+                             f"every photon); this is a {self.measurement_mode} file.")
+        pair = self._detector_list(channels)
+        if len(pair) != 2 or pair[0] == pair[1]:
+            raise ValueError("channels must name two different detectors, e.g. (1, 2).")
+        tick = float(self.timetag_resolution)
+        if period is None and self.has_lifetime and np.isfinite(self.rep_time):
+            period = float(self.rep_time)
+        if period is not None and (not np.isfinite(period) or period <= 0):
+            raise ValueError("period must be a positive number of seconds or None.")
+        if max_lag is None:
+            max_lag = 5.5 * period if period is not None else 500e-9
+        if lag_bin is None:
+            lag_bin = period / 200.0 if period is not None else 1e-9
+        if not np.isfinite(max_lag) or max_lag <= 0 or not np.isfinite(lag_bin) or lag_bin <= 0:
+            raise ValueError("max_lag and lag_bin must be positive numbers of seconds.")
+        width = max(int(round(lag_bin / tick)), 1)
+
+        # Time bins of the selection, on the trace of both detectors.
+        if roi is not None:
+            x_min, x_max = roi.get("x_min"), roi.get("x_max")
+            y_min, y_max = roi.get("y_min"), roi.get("y_max")
+        trace = self.detector_trace(bintime, pair)
+        left = np.asarray(trace.x, dtype=float)
+        durations = np.asarray(trace.meta["bin_durations"], dtype=float)
+        counts = np.asarray(trace.y, dtype=float)
+        xmn = 0.0 if x_min is None else float(x_min)
+        xmx = np.inf if x_max is None else float(x_max)
+        ymn = -np.inf if y_min is None else float(y_min)
+        ymx = np.inf if y_max is None else float(y_max)
+        selected = ((left + durations > xmn) & (left < xmx)
+                    & (counts >= ymn) & (counts < ymx))
+        if not selected.any():
+            raise ValueError("The selected region contains no time bins.")
+        duration = float(durations[selected].sum())
+
+        streams = []
+        for channel in pair:
+            times = self.photon_times(channel)
+            index = np.minimum((times / bintime).astype(np.int64), selected.size - 1)
+            streams.append(np.rint(times[selected[index]] / tick).astype(np.int64))
+        n_a, n_b = (int(s.size) for s in streams)
+        if n_a == 0 or n_b == 0:
+            raise ValueError("One of the detectors has no photons in the selected region.")
+        lag_ticks, coincidences = photon_correlation(
+            streams[0], streams[1], max_lag / tick, width, progress=progress)
+        lags = lag_ticks * tick
+        expected = n_a * n_b * width * tick / duration
+        g2 = coincidences / expected
+
+        result: dict[str, Any]
+        if period is not None:
+            result = pulsed_g2_zero(lags, coincidences, period, delay=delay, window=window)
+            result["method"] = "pulsed"
+        else:
+            centre = 0.0 if delay is None else float(delay)
+            half = width * tick / 2.0 if window is None else float(window)
+            inside = np.abs(lags - centre) <= half * (1 + 1e-9)
+            if not inside.any():
+                raise ValueError("The window around the delay holds no lag bin.")
+            total = float(coincidences[inside].sum())
+            value = float(np.mean(g2[inside]))
+            result = {"method": "continuous", "g2_0": value,
+                      "g2_0_err": value / np.sqrt(total) if total > 0
+                      else 1.0 / (expected * inside.sum()),
+                      "delay": centre, "window": half}
+        bounds = {"x_min": x_min, "x_max": x_max, "y_min": y_min, "y_max": y_max}
+        meta = {**result, "g2": g2, "expected_per_bin": float(expected),
+                "period": period, "lag_bin": width * tick, "max_lag": float(lags[-1]),
+                "channels": pair, "photons": {pair[0]: n_a, pair[1]: n_b},
+                "rates": {pair[0]: n_a / duration, pair[1]: n_b / duration},
+                "duration": duration, "selected_bins": int(selected.sum()),
+                "roi": bounds, "bintime": float(bintime)}
+        print(f"{self.filepath.stem}: g2 of detectors {pair[0]} and {pair[1]} from "
+              f"{n_a} + {n_b} photons in {duration:.4g} s: g2(0) = {result['g2_0']:.3f} "
+              f"± {result['g2_0_err']:.3f} ({result['method']}).")
+        return Signal(lags, coincidences.astype(float),
+                      label=f"{self.filepath.stem} g2 ({pair[0]}×{pair[1]})",
+                      units={"x": "s", "y": "coincidences"}, meta=meta)
 
     def set_lifetime_shift(self, shift: float | str | None) -> float:
         """Circularly shift every photon's lifetime (micro) time to earlier times.

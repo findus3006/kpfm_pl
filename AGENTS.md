@@ -48,6 +48,7 @@ src/kpfm_pl/
         logcapture.py   print()/warnings -> log panel
         models/         Qt-free workflow logic, one module per tab
         tabs/           one widget per workflow (ptu = PL lifetime incl. ROIs/FLID,
+                        g2 = antibunching of two T2 detectors,
                         correlate, jpk, jpk_shift = drift between up to 4 scans,
                         database); rois.py = RoiEditor
 src/examples/       runnable scripts + a `Test data/` folder of sample files
@@ -171,8 +172,10 @@ docs/               per-module manuals (ptu, zurich, jpk, match, database, plott
   `tests/ptu_writer.py`) until real files are available.
 - **PTU detector selection** (`set_channels`) swaps `events`/`_raw_dtime` for
   a subset of `_all_events`/`_all_raw_dtime` and re-applies the lifetime
-  shift; `photon_times`/`photon_channel` always cover all photons (kept for
-  a future antibunching analysis).
+  shift; `photon_times`/`photon_channel` always cover all photons. `PTU.g2`
+  and `PTU.detector_trace` work from them and must stay independent of
+  `set_channels` and of the cached time trace (the *Antibunching* tab
+  shares the reader with the *PL lifetime* tab).
 - **PTU seam bins** (`seam_bins`): bins not fully inside one laser period are
   left out of every lifetime fit by default (`exclude_seam`). Use that one
   mask; do not add per-fit special cases again.

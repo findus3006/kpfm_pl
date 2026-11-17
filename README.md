@@ -57,7 +57,8 @@ is created at install time, so an install from before the GUI existed lacks
 it.
 
 Each tab is one workflow: **PL lifetime (PTU)** (time trace, ROIs, lifetime
-fits, lifetime trace and FLIDs), **Correlate** (KPFM ↔ PL), **AFM (JPK)**,
+fits, lifetime trace and FLIDs), **Antibunching (g2)** (correlation of two
+detectors of a T2 file, g2(0)), **Correlate** (KPFM ↔ PL), **AFM (JPK)**,
 **AFM shift** (drift between up to four scans, manual and by
 cross-correlation) and **Database**. Parameters sit on the left, with
 an explanation on hover, and plots on the right. Every plot can be saved as
@@ -106,6 +107,8 @@ irf = ptu.fit_lifetime(ptu.lifetime_histogram(), n_exp=2, irf=PTU("irf.ptu"))  #
 # The record format (T3/T2, device) is read from the header. Two detectors:
 ptu.set_channels(2)                  # analyse detector 2 only (None = all, summed)
 t1, t2 = ptu.photon_times(1), ptu.photon_times(2)   # photon arrival times in s
+g2 = ptu.g2(channels=(1, 2))         # T2: second-order correlation (antibunching)
+print(g2.meta["g2_0"], g2.meta["g2_0_err"])         # < 0.5: a single emitter
 
 lt = ptu.lifetime_trace(bintime=0.5, n_exp=1)  # Signal: fitted lifetime (ns) per time bin
 arrival = ptu.arrival_time_trace(bintime=0.5)  # Signal: lifetime from the mean arrival time (no fit)
@@ -220,7 +223,7 @@ jpks = pick_folder(r"D:\Measurements")               # all .jpk files below a ch
 
 | Module | Contents | Manual |
 |--------|----------|--------|
-| [`ptu`](src/kpfm_pl/ptu.py) | `PTU`: time traces, lifetime histograms and fits, lifetime traces, FLID, markers | [ptu.md](docs/ptu.md) |
+| [`ptu`](src/kpfm_pl/ptu.py) | `PTU`: time traces, lifetime histograms and fits, lifetime traces, FLID, markers, second-order correlation g2 (T2) | [ptu.md](docs/ptu.md) |
 | [`zurich`](src/kpfm_pl/zurich.py) | `Zurich`: lock-in streams, bin averaging, laser triggers, peak detection | [zurich.md](docs/zurich.md) |
 | [`jpk`](src/kpfm_pl/jpk.py) | `JPK`: calibrated AFM channels, line levelling, force conversion | [jpk.md](docs/jpk.md) |
 | [`match`](src/kpfm_pl/match.py) | `Match`: trigger alignment and shared-grid resampling of KPFM and PL | [match.md](docs/match.md) |
@@ -229,7 +232,7 @@ jpks = pick_folder(r"D:\Measurements")               # all .jpk files below a ch
 | [`selector`](src/kpfm_pl/selector.py) | `InteractiveBoxSelector`, `SingleBoxSelector`, `DraggableCircle` | [plotting.md](docs/plotting.md) |
 | [`fitting`](src/kpfm_pl/fitting.py) | `MultiExpFit` (used by `PTU`; least squares or Poisson MLE with a fallback to least squares when it does not converge, optional fitted offset, incomplete-decay correction), `IRFReconvolutionFit` (fit with a measured IRF; `prepare_irf`, `exp_kernel`, `irf_fwhm`), `poisson_chi_squared` (fit quality and BIC of photon counts), `poisson_deviance`, `fit_warnings` (signs of over-fitting), `mean_lifetime` (τ_int/τ_amp), `amplitude_fractions`, `intensity_fractions`; `gaussian2d`, `fit_gaussian2d`, `peak_power_density` for laser spot profiles | docstrings |
 | [`io`](src/kpfm_pl/io.py) | `pick_files`, `pick_folder` (tkinter dialogs), `sort_measurement_files` | docstrings |
-| [`utils`](src/kpfm_pl/utils.py) | smoothing, resampling, fit-window selection, AFM levelling, image shift, trigger points | docstrings |
+| [`utils`](src/kpfm_pl/utils.py) | smoothing, resampling, fit-window selection, AFM levelling, image shift, trigger points, photon correlation and g2(0) | docstrings |
 | [`core`](src/kpfm_pl/core.py) | `Signal`, `Image` | – |
 | [`gui`](src/kpfm_pl/gui) | optional PySide6 desktop GUI (`kpfm-pl-gui`); not imported by the core | [gui.md](docs/gui.md) |
 

@@ -291,6 +291,46 @@ The suggested file names start with the full name of the source file.
 Continuous-wave files have no lifetime information; the tab says so and
 disables the analysis.
 
+## Antibunching (g2)
+
+The second-order correlation g2(τ) of two detectors behind a beam splitter,
+to show that the light comes from a single emitter (see
+[ptu.md](ptu.md#second-order-correlation-g2-antibunching) for the method). It
+works on the PTU file loaded in *PL lifetime*, which must be a **T2 file**
+with photons on at least two detectors; otherwise the tab says why and stays
+disabled.
+
+1. **Detectors and trace**: choose *Detector A* (start) and *Detector B*
+   (stop); positive lags mean the photon of B came later. The trace shows the
+   photons of both detectors per *Bin time*. It is independent of the
+   detector selection and the time trace of *PL lifetime*. Changing the bin
+   time rescales the count range of existing ROIs.
+2. **Regions of interest**: draw boxes on the trace (left-drag) or type them
+   in, as in *PL lifetime*. A box selects the time bins inside its time
+   window and count range.
+3. **Correlation**: *Photons of* chooses the whole time window (*From*/*To*),
+   the **on state** (bins with at least *On state ≥* % of the largest count
+   in that window, e.g. the bright periods of a blinking emitter, shown as a
+   dotted line on the trace) or one ROI. The lag settings are automatic by
+   default:
+   - *Max lag* 5.5 laser periods (centre peak plus five side peaks on each
+     side), or 500 ns without a period;
+   - *Lag bin* 1/200 of the period, or 1 ns;
+   - *Laser period* from the laser sync of the file. For a **PicoHarp 300 T2
+     file** (no sync) enter it here, otherwise g2(0) of continuous
+     excitation is computed and the log says so;
+   - *Delay* (detector and cable delays) found from the peak comb;
+   - *Peak window ±* half a period.
+4. **Compute g2** runs in the background (*Cancel* stops it). The plot shows
+   the coincidences against the lag, with the centre peak (red) and the side
+   peaks used (blue); *Plot* switches to the normalised g2 (1 = uncorrelated
+   light). The table gives **g2(0)** ± error, the method, the region, the
+   duration, photons and count rates per detector, the peak areas, period,
+   delay, window and lag settings. g2(0) < 0.5 shows a single emitter.
+
+Exports: the trace, and the correlogram as coincidences and normalised g2
+against the lag in ns, with all settings and results.
+
 ## Correlate (KPFM ↔ PL)
 
 Align a Zurich lock-in export (`.txt`, KPFM signal and laser trigger) with a

@@ -129,3 +129,45 @@ def decay_events(rng, *, period=20000, n_pulses=40000, n_photons=30000, tau=600.
     # sync events first at equal times, as the hardware would report them
     events.sort(key=lambda event: (event[0], event[1] != "sync"))
     return events, photons
+
+
+def antibunching_events(rng, *, period=10000, n_pulses=200000, brightness=0.05,
+                        single=True, tau=500.0, rise=1000, background=0.0, sync=True,
+                        dark_pulses=None):
+    """Pulsed light on a 50/50 beam splitter with two detectors (channels 1 and 2).
+
+    Every laser pulse (every ``period`` ticks) yields photons ``tau`` ticks
+    (exponential) after ``rise``: with ``single`` a single-photon emitter (at
+    most one photon per pulse, with probability ``brightness``), otherwise
+    Poisson light with mean ``brightness`` photons per pulse. Each photon goes
+    to detector 1 or 2 at random. ``background`` adds uncorrelated counts per
+    pulse and detector. Pulses in ``dark_pulses`` (a boolean mask, e.g. a
+    blinking off state) emit nothing. With ``sync`` every pulse is recorded
+    as a sync event. Returns ``(events, ticks)`` with ``ticks`` = ``{1: ..., 2: ...}``.
+    """
+    if single:
+        n = (rng.random(n_pulses) < brightness).astype(np.int64)
+    else:
+        n = rng.poisson(brightness, n_pulses)
+    if dark_pulses is not None:
+        n[np.asarray(dark_pulses, dtype=bool)] = 0
+    pulse = np.repeat(np.arange(n_pulses), n)
+    tick = pulse * period + rise + rng.exponential(tau, pulse.size).astype(np.int64)
+    detector = rng.integers(1, 3, pulse.size)
+    if background:
+        n_bg = rng.poisson(background * n_pulses * 2)
+        tick = np.concatenate((tick, rng.integers(0, n_pulses * period, n_bg)))
+        detector = np.concatenate((detector, rng.integers(1, 3, n_bg)))
+    order = np.argsort(tick, kind="stable")
+    tick, detector = tick[order], detector[order]
+    # two photons cannot share a time tag on one detector (dead time)
+    keep = np.ones(tick.size, dtype=bool)
+    for d in (1, 2):
+        idx = np.flatnonzero(detector == d)
+        keep[idx[1:][np.diff(tick[idx]) == 0]] = False
+    tick, detector = tick[keep], detector[keep]
+    events = [(int(t), "photon", int(d)) for t, d in zip(tick, detector)]
+    if sync:
+        events += [(int(k) * period, "sync", 0) for k in range(n_pulses)]
+        events.sort(key=lambda event: (event[0], event[1] != "sync"))
+    return events, {d: tick[detector == d] for d in (1, 2)}
