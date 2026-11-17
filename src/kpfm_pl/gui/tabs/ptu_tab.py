@@ -13,6 +13,7 @@ import dataclasses
 from pathlib import Path
 
 import numpy as np
+from matplotlib.colors import to_hex
 from matplotlib.patches import Rectangle
 from matplotlib.transforms import blended_transform_factory
 from matplotlib.widgets import SpanSelector
@@ -48,6 +49,7 @@ _END_KINDS = (("end", "End of file"), ("time", "Time"), ("trigger", "Trigger"))
 #: Row labels of the fit-results table (keys of ``models.ptu.fit_summary``).
 _SUMMARY_LABELS = {
     "offset": "Offset",
+    "statistic": "Fit statistic",
     "reduced_chi_squared": "χ²ᵣ (Poisson)",
     "bic": "BIC",
     "r_squared": "R²",
@@ -114,6 +116,10 @@ _NO_LIFETIME_MESSAGE = ("This T2 file holds no laser pulses (no laser sync on ch
                         "lifetime trace and FLIDs need the laser pulses.")
 _A_FIT_TOOLTIP = ("Amplitude of the fitted curve, before the incomplete-decay correction "
                   "(includes the tails of earlier pulses).")
+#: Header tooltips of the component table (titles of ``model.COMPONENT_COLUMNS``).
+_COLUMN_TOOLTIPS = {"τ (ns)": _TAU_TOOLTIP + "\nThe last row holds the mean lifetime.",
+                    "A (%)": _A_PCT_TOOLTIP, "I (%)": _I_PCT_TOOLTIP,
+                    "A (counts)": _A_TOOLTIP, "A fitted (counts)": _A_FIT_TOOLTIP}
 #: Colours of the BIC verdicts (``BicComparison.colour``).
 _VERDICT_COLOURS = {"good": "#2e7d32", "bad": "#c00000", "neutral": "#707070"}
 
@@ -394,12 +400,23 @@ class PTUTab(BaseTab):
         layout.addWidget(self.options_label)
         self._show_options()
         self.fit_button = self.add_button(layout, "Fit lifetime", self.run_fit, primary=True)
+        # Results: one row per component (τ, fractions, amplitudes), then a
+        # parameter/value list of the fit quality, background and window.
+        layout.addWidget(QLabel("<b>Components</b>"))
+        self.component_table = QTableWidget(0, 1)
+        self.component_table.setHorizontalHeaderLabels(["Component"])
+        self.component_table.verticalHeader().setVisible(False)
+        self.component_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        layout.addWidget(self.component_table)
+        layout.addWidget(QLabel("<b>Fit</b>"))
         self.fit_table = QTableWidget(0, 2)
         self.fit_table.setHorizontalHeaderLabels(["Parameter", "Value"])
         self.fit_table.horizontalHeader().setStretchLastSection(True)
         self.fit_table.verticalHeader().setVisible(False)
-        self.fit_table.setMinimumHeight(200)
+        self.fit_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.fit_table.setMinimumHeight(160)
         layout.addWidget(self.fit_table)
+        self._fit_height(self.component_table)
 
     def _build_lifetime_group(self) -> None:
         layout = self.add_group("Lifetime trace", collapsible=True, collapsed=True)
@@ -813,6 +830,12 @@ class PTUTab(BaseTab):
     def _show_options(self) -> None:
         self.options_label.setText(f"Advanced: {describe_options(self.fit_options)}")
 
+    def _log_weighting_fallback(self, per_bin: bool = False) -> None:
+        """Say in the log when the chosen weighting is replaced (MLE with a robust loss)."""
+        note = self.fit_options.fallback_note(per_bin)
+        if note:
+            self.ctx.log.warning(note)
+
     def edit_fit_options(self) -> None:
         dialog = FitOptionsDialog(self.fit_options, self)
         if dialog.exec():
@@ -898,7 +921,7 @@ class PTUTab(BaseTab):
         self.trace = self.lifetime = self.preview_hist = self.flid_result = None
         self.preview_payload = None
         self.fits = []
-        self.fit_table.setRowCount(0)
+        self._clear_fit_tables()
         # The lifetime shift is a per-file salvage: every file starts without it.
         self.shift_form.set_value("kind", "off")
         self._applied_shift = None
@@ -980,7 +1003,7 @@ class PTUTab(BaseTab):
         self._draw_trace()
         # A new trace (other bin time or window) invalidates the previous fit.
         self.fits = []
-        self.fit_table.setRowCount(0)
+        self._clear_fit_tables()
         lifetime = self.trace.has_lifetime
         for button in (self.fit_button, self.lt_button, self.flid_button):
             button.setEnabled(lifetime)
@@ -1003,6 +1026,7 @@ class PTUTab(BaseTab):
         states, fit = self.state_params(), self.fit_params()
         rois, options = list(self.rois), self.fit_options
         irf, irf_params = self.irf, self.irf_params()
+        self._log_weighting_fallback()
 
         def job(progress):
             if fit.source == "each":
@@ -1031,6 +1055,9 @@ class PTUTab(BaseTab):
                                  comparison.colour)
             for warning in result.fit.get("warnings", []):
                 self.ctx.log.warning(f"{name}, {result.params.n_exp} exp: {warning}")
+            fallback = model.mle_fallback_text(result.fit)
+            if fallback:
+                self.ctx.log.warning(f"{name}, {result.params.n_exp} exp: {fallback}")
         self._previous_fits = list(results)
         self.fits = results
         first = results[0]
@@ -1051,18 +1078,76 @@ class PTUTab(BaseTab):
             return f"ROI {result.roi_index + 1}"
         return (result.histogram.label or "Lifetime fit").split(" (")[0]
 
+    def _clear_fit_tables(self) -> None:
+        for table in (self.component_table, self.fit_table):
+            table.setRowCount(0)
+        self._fit_height(self.component_table)
+
+    @staticmethod
+    def _fit_height(table: QTableWidget, max_rows: int = 12) -> None:
+        """Size ``table`` to its rows (at most ``max_rows`` visible, then it scrolls)."""
+        rows = min(table.rowCount(), max_rows)
+        height = table.horizontalHeader().height() + 2 * table.frameWidth() + 2
+        height += sum(table.rowHeight(r) for r in range(rows)) if rows else 0
+        if table.rowCount() > max_rows:
+            height += table.horizontalScrollBar().sizeHint().height()
+        table.setFixedHeight(max(height, table.horizontalHeader().height() + 8))
+
     def _show_fit_table(self) -> None:
-        table = self.fit_table
         summaries = [model.fit_summary(r.fit) for r in self.fits]
+        self._show_component_table(summaries)
+        self._show_quality_table(summaries)
+
+    def _show_component_table(self, summaries: list[dict]) -> None:
+        """One row per component (τ, A %, I %, amplitudes), then the mean lifetime.
+
+        With several ROI fits the rows are grouped per ROI, labelled and
+        coloured like the ROI.
+        """
+        table = self.component_table
+        columns = model.component_columns(summaries)
+        table.clear()
+        table.setColumnCount(1 + len(columns))
+        table.setHorizontalHeaderLabels(["Component", *columns])
+        for col, title in enumerate(columns, 1):
+            table.horizontalHeaderItem(col).setToolTip(_COLUMN_TOOLTIPS.get(title, ""))
+        several = len(self.fits) > 1
+        entries = [(result, summary, row) for result, summary in zip(self.fits, summaries)
+                   for row in model.component_rows(summary)]
+        table.setRowCount(len(entries))
+        for r, (result, summary, row) in enumerate(entries):
+            name = row.label
+            if several and result.roi_index is not None:
+                name = f"ROI {result.roi_index + 1} · {row.label}"
+            label = QTableWidgetItem(name)
+            if row.mean:
+                label.setToolTip(_TAU_INT_TOOLTIP if "int" in row.label else _TAU_AMP_TOOLTIP)
+                font = label.font()
+                font.setBold(True)
+                label.setFont(font)
+            if several and result.roi_index is not None:
+                label.setForeground(QBrush(QColor(to_hex(roi_colour(result.roi_index)))))
+            table.setItem(r, 0, label)
+            for col, title in enumerate(columns, 1):
+                key = row.keys.get(title)
+                item = QTableWidgetItem("" if key is None else model.summary_text(summary, key))
+                if key is not None:
+                    item.setToolTip(_summary_tooltip(key))
+                if row.mean:
+                    item.setFont(label.font())
+                table.setItem(r, col, item)
+        table.resizeColumnsToContents()
+        self._fit_height(table)
+
+    def _show_quality_table(self, summaries: list[dict]) -> None:
+        """Parameter/value list of everything not per component (one column per fit)."""
+        table = self.fit_table
         headers = (["Value"] if len(self.fits) == 1
                    else [f"ROI {r.roi_index + 1}" for r in self.fits])
         table.clear()
         table.setColumnCount(1 + len(headers))
         table.setHorizontalHeaderLabels(["Parameter", *headers])
-        # Errors are shown with their value ("value ± error"), not in rows of their own.
-        all_keys = list(dict.fromkeys(k for s in summaries for k in s))
-        errors = {model.error_key(k) for k in all_keys}
-        keys = [k for k in all_keys if k not in errors]
+        keys = model.quality_keys(summaries)
         table.setRowCount(len(keys))
         for row, key in enumerate(keys):
             label = QTableWidgetItem(_summary_label(key))
@@ -1073,21 +1158,20 @@ class PTUTab(BaseTab):
             for col, (summary, result) in enumerate(zip(summaries, self.fits), 1):
                 value = summary.get(key)
                 colour = None
-                if model.error_key(key) in summary and value is not None:
-                    text = model.format_uncertainty(value, summary[model.error_key(key)])
-                elif key == "bic" and value is not None:
-                    comparison = result.extra.get("bic_comparison")
+                comparison = result.extra.get("bic_comparison") if key == "bic" else None
+                if key == "bic" and value is not None:
                     text = comparison.short_text() if comparison else f"{value:.1f}"
                     if comparison is not None:
                         colour = QColor(_VERDICT_COLOURS[comparison.colour])
                 else:
-                    text = "" if value is None else (f"{value:.4g}" if isinstance(value, float)
-                                                     else str(value))
+                    text = model.summary_text(summary, key)
                 if key == "reduced_chi_squared":
                     colour = _chi_colour(value)
+                elif key == "statistic" and "not converge" in text:
+                    colour = QColor("#b36b00")
                 item = QTableWidgetItem(text)
-                if key == "bic" and result.extra.get("bic_comparison") is not None:
-                    item.setToolTip(result.extra["bic_comparison"].text())
+                if comparison is not None:
+                    item.setToolTip(comparison.text())
                 elif tip:
                     item.setToolTip(tip)
                 if colour is not None:
@@ -1103,6 +1187,7 @@ class PTUTab(BaseTab):
         fit, lt = self.fit_params(), self.lt_params()
         rois, options = list(self.rois), self.fit_options
         irf_kwargs = self._irf_for_bins(handle)
+        self._log_weighting_fallback(per_bin=True)
 
         def job(progress):
             signal = model.compute_lifetime_trace(handle, params, fit, lt, progress,
@@ -1115,6 +1200,9 @@ class PTUTab(BaseTab):
 
     def _lifetime_done(self, value) -> None:
         self.lifetime = value
+        fallback = model.bin_fallback_text(value[0])
+        if fallback:
+            self.ctx.log.warning(f"Lifetime trace: {fallback}")
         self._draw_lifetime()
         self.plots.setCurrentWidget(self.lt_plot)
 
@@ -1136,6 +1224,8 @@ class PTUTab(BaseTab):
             return
         rois, options = list(self.rois), self.fit_options
         irf_kwargs = self._irf_for_bins(handle) if flid.method != "mean_arrival" else None
+        if flid.method != "mean_arrival":
+            self._log_weighting_fallback(per_bin=True)
         self.run_job(f"FLIDs of {handle.name}",
                      lambda progress: flid_model.compute_flids(handle, params, flid, rois,
                                                                progress, options,
@@ -1161,6 +1251,10 @@ class PTUTab(BaseTab):
             advice = flid_model.count_check_text(entry.count_check)
             if advice:
                 self.ctx.log.warning(f"{name}: {advice}")
+            fitted = entry.traces.get("fit")
+            fallback = model.bin_fallback_text(fitted) if fitted is not None else None
+            if fallback:
+                self.ctx.log.warning(f"{name}: {fallback}")
         self._refresh_export_rois()
         self._draw_flids()
         self.plots.setCurrentWidget(self.flid_plot)

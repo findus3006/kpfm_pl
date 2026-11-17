@@ -581,14 +581,16 @@ def _synthetic_ptu(matrix: np.ndarray, *, bintime: float,
 
 def test_fit_lifetime_reports_poisson_quality_and_weighting(ptu):
     hist = ptu.lifetime_histogram()
-    plain = ptu.fit_lifetime(hist, n_exp=1)
+    default = ptu.fit_lifetime(hist, n_exp=1)
+    assert default["weighting"] == "mle" and default["statistic"] == "poisson_mle"
+    plain = ptu.fit_lifetime(hist, n_exp=1, weighting="none")
     q = plain["quality"]
     assert {"reduced_chi_squared", "chi_squared", "dof", "weighted_residuals"} <= set(q)
     assert len(q["weighted_residuals"]) == len(plain["t_fit"])
     assert q["dof"] == len(plain["t_fit"]) - 2
     assert plain["weighting"] == "none"
     # chi-squared is computed on raw counts, so normalising does not change it much
-    norm = ptu.fit_lifetime(hist, n_exp=1, normalize=True)
+    norm = ptu.fit_lifetime(hist, n_exp=1, normalize=True, weighting="none")
     assert norm["quality"]["reduced_chi_squared"] == pytest.approx(q["reduced_chi_squared"],
                                                                    rel=0.05)
     weighted = ptu.fit_lifetime(hist, n_exp=1, weighting="poisson")
@@ -605,8 +607,22 @@ def test_weighting_is_validated(ptu):
         ptu.fit_lifetime(hist, n_exp=1, weighting="poisson", weights=np.ones(3))
     with pytest.raises(ValueError, match="weighting"):
         ptu.lifetime_trace(bintime=50.0, weighting="sqrt")
-    with pytest.raises(ValueError, match="loss"):
-        ptu.fit_lifetime(hist, n_exp=1, weighting="mle", loss="soft_l1")
+
+
+
+def test_mle_falls_back_to_least_squares_with_a_robust_loss_or_weights(ptu):
+    hist = ptu.lifetime_histogram()
+    with pytest.warns(RuntimeWarning, match="robust loss"):
+        robust = ptu.fit_lifetime(hist, n_exp=1, loss="soft_l1")          # default "mle"
+    assert robust["weighting"] == "poisson" and robust["statistic"] == "least_squares"
+    n_fit = len(ptu.fit_lifetime(hist, n_exp=1, weighting="none")["t_fit"])
+    with pytest.warns(RuntimeWarning, match="explicit weights"):
+        weighted = ptu.fit_lifetime(hist, n_exp=1, weighting="mle", weights=np.ones(n_fit))
+    assert weighted["weighting"] == "none"
+    with pytest.warns(RuntimeWarning, match="robust loss"):
+        trace = ptu.lifetime_trace(bintime=50.0, loss="huber", weighting="mle",
+                                   min_counts=None)
+    assert trace.meta["weighting"] == "poisson"
 
 
 def test_fit_lifetime_reports_bic_warnings_and_period_correction(ptu):
@@ -796,6 +812,46 @@ def test_lifetime_trace_passes_mle_and_period_per_bin(monkeypatch):
     assert seen[0]["count_scale"] == pytest.approx(16.0)
     np.testing.assert_allclose(trace.meta["amplitudes_fit"], 2.0)
     np.testing.assert_allclose(trace.meta["amplitudes"], 1.0)
+
+
+def test_default_weightings_mle_for_the_fit_poisson_per_bin(ptu):
+    from kpfm_pl.ptu import DEFAULT_BIN_WEIGHTING, DEFAULT_WEIGHTING
+
+    assert (DEFAULT_WEIGHTING, DEFAULT_BIN_WEIGHTING) == ("mle", "poisson")
+    trace = ptu.lifetime_trace(bintime=50.0, min_counts=None)
+    assert trace.meta["weighting"] == "poisson" and not trace.meta["mle_fallback"].any()
+
+
+def test_lifetime_trace_mle_falls_back_per_bin(monkeypatch):
+    from kpfm_pl import MLEFallbackWarning, fitting
+
+    p = _periodic_ptu([20.0], [5000.0], background=0.0, rows=3)
+    common = dict(bintime=1.0, n_exp=1, mode="manual", start=0.0, min_counts=None)
+    poisson = p.lifetime_trace(weighting="poisson", **common)
+    monkeypatch.setattr(fitting, "_MLE_MAX_ITER", 0)        # no MLE can converge
+    with pytest.warns(MLEFallbackWarning, match="3 of 3") as record:
+        trace = p.lifetime_trace(weighting="mle", **common)
+    assert len(record) == 1                                  # one summary, not one per bin
+    assert trace.meta["weighting"] == "mle" and trace.meta["mle_fallback"].all()
+    np.testing.assert_allclose(trace.y, poisson.y, rtol=1e-9)
+
+
+def test_fit_lifetime_reports_an_mle_fallback_as_poisson(monkeypatch):
+    from kpfm_pl import MLEFallbackWarning, fitting
+
+    p = _periodic_ptu([20.0], [5000.0], background=0.0, rows=3)
+    hist = p.lifetime_histogram(p._matrix, bintime=1.0)
+    fit = p.fit_lifetime(hist, n_exp=1)
+    assert fit["weighting"] == "mle" and fit["mle_converged"] is True
+    assert fit["quality"]["bic_statistic"] == "deviance"
+    monkeypatch.setattr(fitting, "_MLE_MAX_ITER", 0)
+    with pytest.warns(MLEFallbackWarning, match="weighting='poisson'"):
+        fallen = p.fit_lifetime(hist, n_exp=1)
+    assert fallen["weighting"] == "poisson" and fallen["mle_converged"] is False
+    assert fallen["statistic"] == "least_squares"
+    assert fallen["quality"]["bic_statistic"] == "chi_squared"
+    poisson = p.fit_lifetime(hist, n_exp=1, weighting="poisson")
+    np.testing.assert_allclose(fallen["tau"], poisson["tau"], rtol=1e-9)
 
 
 def test_lifetime_trace_passes_poisson_weights_per_bin(monkeypatch):
@@ -1252,7 +1308,13 @@ def test_irf_reconvolution_leaves_out_the_seam_bins():
     p, irf = _irf_ptu()
     p.rep_time = 499.5 * 0.1e-9                     # the last bin is only half covered
     hist = p.lifetime_histogram(p._matrix, bintime=1.0)
-    fit = p.fit_lifetime(hist, n_exp=1, irf=irf)
+    # The background is fixed far too low (0 instead of 50 per bin), so the
+    # MLE does not converge and falls back to Poisson least squares (this
+    # took minutes and returned tau = 512 ns before the guard).
+    with pytest.warns(RuntimeWarning, match="did not converge"):
+        fit = p.fit_lifetime(hist, n_exp=1, irf=irf)
+    assert fit["weighting"] == "poisson" and fit["mle_converged"] is False
+    assert fit["tau"][0] == pytest.approx(3.0, rel=0.05)
     assert fit["seam_points"] == 1 and len(fit["t_fit"]) == 499
     assert fit["seam_ns"] == pytest.approx(fit["shifted_histogram_x"][499])
     np.testing.assert_allclose(fit["excluded_ns"], [fit["seam_ns"]])

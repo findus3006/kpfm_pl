@@ -26,6 +26,7 @@ from .core import Image, Signal
 from .fitting import (
     MEAN_LIFETIMES,
     IRFReconvolutionFit,
+    MLEFallbackWarning,
     MultiExpFit,
     mean_lifetime,
     poisson_chi_squared,
@@ -96,6 +97,42 @@ _TAG_TYPES = {k: struct.unpack(">i", v.to_bytes(4, "big"))[0] for k, v in _TAG_T
 
 #: Accepted ``weighting`` values of the lifetime fits.
 WEIGHTINGS = ("none", "poisson", "mle")
+#: ``weighting`` of :meth:`PTU.fit_lifetime` unless another one is passed.
+DEFAULT_WEIGHTING = "mle"
+#: ``weighting`` of the per-bin fits (:meth:`PTU.lifetime_trace`,
+#: :meth:`PTU.flid`) unless another one is passed: as good as the MLE with
+#: about 100 photons per bin or more, and several times faster.
+DEFAULT_BIN_WEIGHTING = "poisson"
+
+
+def _resolve_weighting(weighting: str, fit_kwargs: dict[str, Any], name: str = "") -> str:
+    """The ``weighting`` a lifetime fit will actually use.
+
+    The Poisson maximum-likelihood fit (``"mle"``, the default) has no
+    robust loss and sets its own weights. Combined with a robust ``loss`` it
+    therefore falls back to ``"poisson"`` (weighted least squares), and with
+    explicit ``weights`` to ``"none"`` (least squares with those weights);
+    both are reported as a ``RuntimeWarning``.
+    """
+    if weighting not in WEIGHTINGS:
+        raise ValueError(f"weighting must be one of {WEIGHTINGS}, not {weighting!r}.")
+    if weighting != "mle":
+        return weighting
+    prefix = f"{name}: " if name else ""
+    loss = fit_kwargs.get("loss", "linear")
+    if fit_kwargs.get("weights") is not None:
+        warnings.warn(
+            f"{prefix}the Poisson maximum-likelihood fit (weighting='mle') sets its own "
+            "weights; the explicit weights are used in a least-squares fit instead "
+            "(weighting='none').", RuntimeWarning, stacklevel=3)
+        return "none"
+    if loss != "linear":
+        warnings.warn(
+            f"{prefix}the Poisson maximum-likelihood fit (weighting='mle') has no robust "
+            f"loss; loss={loss!r} is fitted by Poisson-weighted least squares instead "
+            "(weighting='poisson').", RuntimeWarning, stacklevel=3)
+        return "poisson"
+    return "mle"
 
 
 def _poisson_weights(weighting: str, counts: np.ndarray, scale: float,
@@ -116,9 +153,11 @@ def _poisson_weights(weighting: str, counts: np.ndarray, scale: float,
     if "weights" in fit_kwargs:
         raise ValueError(f"Pass either weighting={weighting!r} or explicit weights, not both.")
     if weighting == "mle":
-        if fit_kwargs.get("loss", "linear") != "linear":
-            raise ValueError("weighting='mle' requires loss='linear'.")
-        return {**fit_kwargs, "statistic": "poisson_mle", "count_scale": float(scale)}
+        # A robust loss or explicit weights never get here: see _resolve_weighting.
+        # The callers report a fallback to least squares themselves (once per
+        # call, with the file name), so the fit itself stays quiet.
+        return {**fit_kwargs, "statistic": "poisson_mle", "count_scale": float(scale),
+                "warn_fallback": False}
     weights = scale / np.sqrt(np.maximum(np.asarray(counts, dtype=float), 1.0))
     return {**fit_kwargs, "weights": weights}
 
@@ -1463,7 +1502,7 @@ class PTU:
         self, sel: dict[str, Any], *, n_exp: int = 1, bins: int = 1,
         mode: str = "fraction", fraction: float = 0.95,
         smoothing: float = 2.0, start: float = 0.0,
-        end: float | None = None, weighting: str = "none",
+        end: float | None = None, weighting: str = DEFAULT_BIN_WEIGHTING,
         decay_correction: bool = True,
         irf: dict[str, Any] | None = None,
         prerise: bool = False, prerise_gap: float = 2.0,
@@ -1471,8 +1510,12 @@ class PTU:
         exclude_seam: bool = True,
         progress: Callable[[int, int], Any] | None = None,
         **fit_kwargs,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Fit lifetimes per selected time bin; ``(taus, amps, amps_fit)`` keep all bin positions.
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Fit lifetimes per selected time bin; ``(taus, amps, amps_fit, fallback)``.
+
+        All arrays keep every bin position. ``fallback`` marks the bins whose
+        Poisson MLE did not converge and that hold the Poisson least-squares
+        result instead (always ``False`` for the least-squares weightings).
 
         ``amps`` are the per-pulse amplitudes (corrected for the incomplete
         decay of earlier pulses when ``decay_correction``, see
@@ -1532,6 +1575,7 @@ class PTU:
         taus = np.full((len(time), n_exp), np.nan, dtype=float)
         amps = np.full((len(time), n_exp), np.nan, dtype=float)
         amps_fit = np.full((len(time), n_exp), np.nan, dtype=float)
+        fallback = np.zeros(len(time), dtype=bool)
         n_binned = len(mask)
         period_ns = self._period_ns() if decay_correction else None
         rows = np.flatnonzero(selected)
@@ -1567,9 +1611,10 @@ class PTU:
                     taus[index] = fitted_taus
                     amps[index] = fitted_amps
                     amps_fit[index] = raw_amps
+                    fallback[index] = getattr(fit, "mle_converged", None) is False
         if progress is not None:
             progress(rows.size, rows.size)
-        return taus, amps, amps_fit
+        return taus, amps, amps_fit, fallback
 
     def _fit_time_bin_lifetimes_irf(
         self, sel: dict[str, Any], irf: dict[str, Any], *, n_exp: int, bins: int,
@@ -1577,7 +1622,7 @@ class PTU:
         decay_correction: bool, exclude_seam: bool = True,
         progress: Callable[[int, int], Any] | None = None,
         **fit_kwargs,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Reconvolution fit of every selected time bin (see :meth:`lifetime_trace`)."""
         time, matrix, selected = sel["time"], sel["matrix"], sel["selected"]
         bintime = sel["bintime"]
@@ -1611,6 +1656,7 @@ class PTU:
 
         taus = np.full((len(time), n_exp), np.nan, dtype=float)
         amps = np.full((len(time), n_exp), np.nan, dtype=float)
+        fallback = np.zeros(len(time), dtype=bool)
         rows = np.flatnonzero(selected)
         for done, index in enumerate(rows):
             if progress is not None:
@@ -1639,15 +1685,18 @@ class PTU:
                 if np.all(np.isfinite(fitted_taus)) and np.all(np.isfinite(fitted_amps)):
                     taus[index] = fitted_taus
                     amps[index] = fitted_amps
+                    fallback[index] = getattr(fit, "mle_converged", None) is False
         if progress is not None:
             progress(rows.size, rows.size)
         # The periodic kernel already gives per-pulse amplitudes; nothing to undo.
-        return taus, amps, amps.copy()
+        return taus, amps, amps.copy(), fallback
 
     def _validate_fit_args(self, n_exp: int, bins: int, weighting: str,
                            fit_kwargs: dict[str, Any],
-                           mean_lifetime: str = "intensity") -> None:
+                           mean_lifetime: str = "intensity") -> str:
+        """Validate the per-bin fit arguments; returns the weighting actually used."""
         # Validate before the (slow) loop rather than at the first fit.
+        weighting = _resolve_weighting(weighting, fit_kwargs, self.filepath.stem)
         _poisson_weights(weighting, np.ones(1), 1.0, fit_kwargs)
         _check_mean_lifetime(mean_lifetime)
         if (isinstance(n_exp, (bool, np.bool_))
@@ -1656,6 +1705,7 @@ class PTU:
         if (isinstance(bins, (bool, np.bool_))
                 or not isinstance(bins, (int, np.integer)) or bins < 1):
             raise ValueError("bins must be a positive integer.")
+        return weighting
 
     def _trace_meta(self, sel: dict[str, Any], method: str) -> dict[str, Any]:
         meta = {"bintime": sel["bintime"], "method": method, "roi": sel["bounds"],
@@ -1674,7 +1724,7 @@ class PTU:
                        smoothing: float = 2.0, start: float = 0.0,
                        end: float | None = None,
                        laser_pulse: bool | None = None,
-                       weighting: str = "none",
+                       weighting: str = DEFAULT_BIN_WEIGHTING,
                        min_counts: float | None = 100, coverage: float = 0.9,
                        auto_bintime: bool = False,
                        mean_lifetime: str = "intensity",
@@ -1709,8 +1759,14 @@ class PTU:
         recent :meth:`time_trace` call.  Pass the option explicitly when no
         time trace has been generated first.
 
-        ``weighting`` (``"none"``, ``"poisson"`` or ``"mle"``) is applied to
-        every per-bin fit as in :meth:`fit_lifetime`. ``progress`` is an optional
+        ``weighting`` (``"poisson"``, the default, ``"mle"`` or ``"none"``) is
+        applied to every per-bin fit as in :meth:`fit_lifetime`. Poisson
+        least squares is fast and close to the maximum likelihood from about
+        100 photons per bin; the Poisson MLE (``"mle"``) takes several times
+        longer. Bins where the MLE does not converge get the Poisson
+        least-squares result instead: ``meta["mle_fallback"]`` marks them and
+        one :class:`~kpfm_pl.fitting.MLEFallbackWarning` gives their number.
+        ``meta["weighting"]`` is the weighting used. ``progress`` is an optional
         callback ``progress(done, total)`` called before each per-bin fit and
         once at the end; raise an exception from it to abort the computation
         (see :meth:`flid`). ``min_counts``, ``coverage`` and ``auto_bintime``
@@ -1740,7 +1796,7 @@ class PTU:
         one), as in :meth:`fit_lifetime`. ``meta["seam_points"]`` is their
         number.
         """
-        self._validate_fit_args(n_exp, bins, weighting, fit_kwargs, mean_lifetime)
+        weighting = self._validate_fit_args(n_exp, bins, weighting, fit_kwargs, mean_lifetime)
         irf_options = None
         if irf is not None:
             irf_options = {"irf": irf, "shift": irf_shift, "background_rate": background_rate,
@@ -1752,7 +1808,7 @@ class PTU:
             bintime=bintime, laser_pulse=laser_pulse, min_counts=min_counts,
             coverage=coverage, auto_bintime=auto_bintime,
         )
-        taus, amps, amps_fit = self._fit_time_bin_lifetimes(
+        taus, amps, amps_fit, fallback = self._fit_time_bin_lifetimes(
             sel, n_exp=n_exp, bins=bins, mode=mode, fraction=fraction,
             smoothing=smoothing, start=start, end=end, weighting=weighting,
             decay_correction=decay_correction, irf=irf_options, prerise=prerise,
@@ -1762,13 +1818,22 @@ class PTU:
         )
         tail_prerise = bool(prerise) and irf is None
         n_seam = int(np.count_nonzero(self._seam_mask(self.n_lt_bins, exclude_seam)))
+        n_fallback = int(np.count_nonzero(fallback))
+        if n_fallback:
+            n_fitted = int(np.count_nonzero(np.isfinite(taus[:, 0])))
+            warnings.warn(
+                f"{self.filepath.stem}: the Poisson maximum-likelihood fit did not converge "
+                f"in {n_fallback} of {n_fitted} fitted time bins; the Poisson least-squares "
+                "result is used there (meta['mle_fallback']).",
+                MLEFallbackWarning, stacklevel=2)
         return Signal(
             sel["time"], _weighted_mean_lifetime(taus, amps, mean_lifetime),
             label=f"{self.filepath.stem} mean lifetime",
             units={"x": "s", "y": "ns"},
             meta={**self._trace_meta(sel, "fit"), "n_exp": n_exp, "lt_bins": bins,
                   "taus": taus, "amplitudes": amps, "amplitudes_fit": amps_fit,
-                  "weighting": weighting, "mean_lifetime": mean_lifetime,
+                  "weighting": weighting, "mle_fallback": fallback,
+                  "mean_lifetime": mean_lifetime,
                   "decay_correction": bool(decay_correction),
                   "reconvolution": irf is not None, "irf_shift_ns": irf_shift,
                   "prerise": tail_prerise,
@@ -1884,7 +1949,7 @@ class PTU:
              intensity_range: tuple[float, float] | None = None,
              mode: str = "fraction", fraction: float = 0.95, smoothing: float = 2.0,
              start: float = 0.0, end: float | None = None, sigma: float = 1.5,
-             isolated: bool = False, weighting: str = "none",
+             isolated: bool = False, weighting: str = DEFAULT_BIN_WEIGHTING,
              method: str = "fit", truncation_correction: bool = True,
              min_counts: float | None = 100, coverage: float = 0.9,
              auto_bintime: bool = False,
@@ -1934,9 +1999,9 @@ class PTU:
             When ``True`` return one :class:`Image` per exponential component;
             otherwise return a single map of the per-bin mean lifetime.
         weighting :
-            ``"none"`` (default), ``"poisson"`` weighting or ``"mle"``
-            (Poisson maximum likelihood) for the per-bin fits, as in
-            :meth:`fit_lifetime`.
+            ``"poisson"`` (default, Poisson-weighted least squares), ``"mle"``
+            (Poisson maximum likelihood, several times slower) or ``"none"``
+            for the per-bin fits, see :meth:`lifetime_trace`.
         method :
             ``"fit"`` (default) fits every bin; ``"mean_arrival"`` uses the
             mean photon arrival time instead (:meth:`arrival_time_trace`, no
@@ -2065,7 +2130,7 @@ class PTU:
     def fit_lifetime(self, histogram: Signal, n_exp: int = 2, *, mode: str = "fraction",
                      fraction: float = 0.95, smoothing: float = 2.0,
                      start: float = 0.0, end: float | None = None,
-                     normalize: bool = False, weighting: str = "none",
+                     normalize: bool = False, weighting: str = DEFAULT_WEIGHTING,
                      diagnostics: dict[str, float] | None = None,
                      mean_lifetime: str = "intensity", decay_correction: bool = True,
                      irf: PTU | Signal | np.ndarray | None = None,
@@ -2082,13 +2147,20 @@ class PTU:
         the :meth:`~kpfm_pl.fitting.MultiExpFit.to_dict` payload augmented with the
         time/intensity arrays actually fitted.
 
-        ``weighting="poisson"`` weights every histogram bin by its photon
-        counting noise ``1 / sqrt(max(counts, 1))`` instead of the default
-        unweighted least squares (``"none"``); a robust ``loss``'s
-        ``f_scale`` is then in units of that standard deviation.
-        ``weighting="mle"`` fits by Poisson maximum likelihood instead, which
-        stays unbiased at low photon numbers (works with ``normalize`` too;
-        requires the linear ``loss``). Either way, ``out["quality"]``
+        ``weighting="mle"`` (default) fits by Poisson maximum likelihood,
+        which stays unbiased at low photon numbers (works with ``normalize``
+        too). ``weighting="poisson"`` is least squares with every histogram
+        bin weighted by its photon counting noise
+        ``1 / sqrt(max(counts, 1))``; a robust ``loss``'s ``f_scale`` is then
+        in units of that standard deviation. ``"none"`` is unweighted least
+        squares. The maximum likelihood has no robust loss and sets its own
+        weights: with a robust ``loss`` the fit falls back to ``"poisson"``,
+        with explicit ``weights`` to ``"none"``, and says so in a
+        ``RuntimeWarning``. An MLE that does not converge also falls back to
+        the Poisson least-squares fit (``out["mle_converged"]`` is then
+        ``False``, with an :class:`~kpfm_pl.fitting.MLEFallbackWarning`).
+        ``out["weighting"]`` is the weighting actually used. Either way,
+        ``out["quality"]``
         additionally holds the Poisson goodness of fit from
         :func:`~kpfm_pl.fitting.poisson_chi_squared` (``reduced_chi_squared``,
         ``chi_squared``, ``dof``, ``deviance``, ``weighted_residuals`` on
@@ -2165,6 +2237,7 @@ class PTU:
         """
         self._require_lifetime()
         _check_mean_lifetime(mean_lifetime)
+        weighting = _resolve_weighting(weighting, fit_kwargs, self.filepath.stem)
         if irf is not None:
             if normalize:
                 raise ValueError("normalize is not available with an IRF: the reconvolution "
@@ -2204,6 +2277,7 @@ class PTU:
         fit = MultiExpFit(t_model[mask], y_fit, n_exp, offset,
                           period=self._period_ns() if decay_correction else None,
                           fit_offset=fit_background, **fit_kwargs)
+        weighting = self._mle_outcome(fit, weighting)
         out = fit.to_dict()
         self._finish_fit(out, fit, y[mask], norm, 2 * n_exp + int(bool(fit_background)),
                          weighting=weighting, diagnostics=diagnostics,
@@ -2221,6 +2295,22 @@ class PTU:
                     "prerise": bool(prerise), "prerise_points": int(np.count_nonzero(pre)),
                     "prerise_gap_ns": float(prerise_gap) if prerise else None})
         return out
+
+    def _mle_outcome(self, fit: MultiExpFit, weighting: str) -> str:
+        """The weighting a finished fit used; warns when the MLE fell back.
+
+        A Poisson MLE that did not converge returns the Poisson least-squares
+        fit (:class:`~kpfm_pl.fitting.MultiExpFit`), so the result is
+        reported as ``"poisson"``: its BIC comes from the chi-squared and it
+        is not compared with MLE fits.
+        """
+        if weighting == "mle" and getattr(fit, "mle_converged", None) is False:
+            warnings.warn(
+                f"{self.filepath.stem}: the Poisson maximum-likelihood fit did not converge; "
+                "the Poisson least-squares fit (weighting='poisson') is reported instead. "
+                "Check the fit window and the background.", MLEFallbackWarning, stacklevel=3)
+            return "poisson"
+        return weighting
 
     def _dark_offset(self, histogram: Signal) -> float:
         """Dark counts per lifetime bin over the histogram's acquisition duration."""
@@ -2332,6 +2422,7 @@ class PTU:
             periodic=decay_correction, background=self._dark_offset(histogram),
             fit_background=fit_background, scatter=fit_scatter, shift=irf_shift,
             irf_background=irf_background, **fit_kwargs)
+        weighting = self._mle_outcome(fit, weighting)
         out = fit.to_dict()
         self._finish_fit(out, fit, y_p[mask], 1.0, fit._n_params(), weighting=weighting,
                          diagnostics=diagnostics, mean_lifetime=mean_lifetime,

@@ -23,7 +23,8 @@ from typing import Any
 import numpy as np
 from scipy.optimize import curve_fit, least_squares
 
-__all__ = ["MultiExpFit", "IRFReconvolutionFit", "prepare_irf", "irf_fwhm", "exp_kernel",
+__all__ = ["MultiExpFit", "IRFReconvolutionFit", "MLEFallbackWarning",
+           "prepare_irf", "irf_fwhm", "exp_kernel",
            "poisson_chi_squared", "poisson_deviance", "fit_warnings",
            "amplitude_fractions", "intensity_fractions", "mean_lifetime",
            "gaussian2d", "fit_gaussian2d", "peak_power_density"]
@@ -34,12 +35,19 @@ STATISTICS = ("least_squares", "poisson_mle")
 MEAN_LIFETIMES = ("intensity", "amplitude")
 #: Iterations of the iteratively reweighted least squares behind the Poisson MLE.
 _MLE_MAX_ITER = 30
+#: Function evaluations allowed per reweighting pass of the MLE. A pass that
+#: needs more does not converge (the 20000 of a plain fit took minutes).
+_MLE_PASS_NFEV = 2000
 #: Relative parameter change below which the MLE iterations stop.
 _MLE_RTOL = 1e-7
 #: Smallest expected count used for the MLE weights 1/sqrt(model). Bins with
 #: fewer expected counts carry almost no information; the floor keeps their
 #: weight finite.
 _MLE_MODEL_FLOOR = 0.1
+
+
+class MLEFallbackWarning(RuntimeWarning):
+    """The Poisson MLE did not converge; the Poisson least-squares fit is used instead."""
 
 
 def _safe_ratio(numerator: np.ndarray, denominator: np.ndarray) -> np.ndarray:
@@ -135,7 +143,14 @@ class MultiExpFit:
         least squares with weights ``1 / sqrt(model)``, whose fixed point is
         exactly the maximum-likelihood estimate. Least squares underestimates
         lifetimes at low photon numbers; the MLE does not. Requires the linear
-        ``loss`` and no explicit ``weights``.
+        ``loss`` and no explicit ``weights``. The iterations start from the
+        Poisson-weighted least-squares fit (weights ``1/sqrt(max(counts, 1))``).
+        If they do not converge (a reweighting pass needing more than
+        :data:`_MLE_PASS_NFEV` evaluations, or no stable result after
+        :data:`_MLE_MAX_ITER` passes), the fit falls back to that
+        least-squares result: :attr:`mle_converged` is ``False``,
+        :attr:`statistic` becomes ``"least_squares"`` and a
+        :class:`MLEFallbackWarning` is issued (unless ``warn_fallback=False``).
     count_scale :
         Factor converting ``y`` (and the model) into photon counts, e.g. the
         normalisation peak of a normalised histogram. Only used by
@@ -149,6 +164,11 @@ class MultiExpFit:
         :meth:`intensity_weighted_lifetime` report the per-pulse amplitudes
         ``A = A_fit * (1 - exp(-period/tau))``; the fitted ones stay
         available as ``A_fit``. ``None`` (default) applies no correction.
+    warn_fallback :
+        Issue a :class:`MLEFallbackWarning` when the Poisson MLE falls back to
+        least squares (default). Callers fitting many histograms (e.g. one
+        per time bin) can switch it off and report :attr:`mle_converged`
+        themselves.
     """
 
     def __init__(
@@ -168,6 +188,7 @@ class MultiExpFit:
         count_scale: float = 1.0,
         period: float | None = None,
         fit_offset: bool = False,
+        warn_fallback: bool = True,
     ) -> None:
         self.t = np.asarray(t, dtype=float)
         self.y = np.asarray(y, dtype=float)
@@ -192,6 +213,11 @@ class MultiExpFit:
         if period is not None and (not np.isfinite(period) or period <= 0):
             raise ValueError("period must be a positive finite number or None.")
         self.statistic = statistic
+        #: Requested statistic; :attr:`statistic` is the one actually used.
+        self.requested_statistic = statistic
+        #: Whether the Poisson MLE converged (``None`` for least squares).
+        self.mle_converged: bool | None = None
+        self.warn_fallback = bool(warn_fallback)
         self.count_scale = float(count_scale)
         self.period = None if period is None else float(period)
         self.bounds: tuple[np.ndarray, np.ndarray] | None = None
@@ -287,10 +313,10 @@ class MultiExpFit:
             )
             return None
 
-    def _least_squares(self, p0, bounds):
+    def _least_squares(self, p0, bounds, max_nfev: int = 20000):
         return least_squares(
             self._residuals, p0, jac=self._jacobian, args=(self.t, self.y),
-            bounds=bounds, loss=self.loss, f_scale=self.f_scale, max_nfev=20000,
+            bounds=bounds, loss=self.loss, f_scale=self.f_scale, max_nfev=max_nfev,
         )
 
     def _fit_poisson_mle(self, p0, bounds):
@@ -301,24 +327,46 @@ class MultiExpFit:
         the gradient equals that of the Poisson deviance, so the result is the
         maximum-likelihood estimate (Dembinski, Schmelling & Waldi,
         arXiv:1807.07911). The first pass uses the Neyman weights
-        ``1/sqrt(max(counts, 1))``.
+        ``1/sqrt(max(counts, 1))``, i.e. it is the Poisson-weighted
+        least-squares fit.
+
+        Guard: when a reweighting pass hits :data:`_MLE_PASS_NFEV`
+        evaluations or the parameters are not stable after
+        :data:`_MLE_MAX_ITER` passes, the iterations have not converged. The
+        first-pass (Poisson least-squares) result and weights are then
+        returned, :attr:`mle_converged` is ``False`` and :attr:`statistic`
+        becomes ``"least_squares"``.
         """
         scale = self.count_scale
-        self.weights = scale / np.sqrt(np.maximum(self.y * scale, 1.0))
-        result = self._least_squares(p0, bounds)
+        neyman = scale / np.sqrt(np.maximum(self.y * scale, 1.0))
+        self.weights = neyman
+        first = result = self._least_squares(p0, bounds)
+        converged = False
         for _ in range(_MLE_MAX_ITER):
             expected = self.model(self.t, result.x) * scale
             self.weights = scale / np.sqrt(np.maximum(expected, _MLE_MODEL_FLOOR))
-            new = self._least_squares(result.x, bounds)
+            new = self._least_squares(result.x, bounds, max_nfev=_MLE_PASS_NFEV)
+            if new.status == 0:          # evaluation budget used up: not converging
+                break
             # Relative change per parameter; amplitudes at 0 are compared with
             # the largest amplitude, lifetimes with the largest lifetime.
             size = np.abs(result.x)
             tolerance = _MLE_RTOL * np.maximum(size, 1e-6 * self._size_floor(size))
-            converged = np.all(np.abs(new.x - result.x) <= tolerance)
+            converged = bool(np.all(np.abs(new.x - result.x) <= tolerance))
             result = new
             if converged:
                 break
-        return result
+        self.mle_converged = converged
+        if converged:
+            return result
+        self.weights = neyman
+        self.statistic = "least_squares"
+        if self.warn_fallback:
+            warnings.warn(
+                "The Poisson maximum-likelihood fit did not converge; the Poisson-weighted "
+                "least-squares fit (weights 1/sqrt(counts)) is used instead.",
+                MLEFallbackWarning, stacklevel=4)
+        return first
 
     def _size_floor(self, size: np.ndarray) -> np.ndarray:
         """Scale of each parameter for the MLE convergence test (zeros allowed)."""
@@ -608,7 +656,10 @@ class MultiExpFit:
         values (see ``period``); ``A_fit``/``A_fit_err``/``tau_int_fit``/
         ``tau_amp_fit`` are the uncorrected values of the fitted curve.
         ``offset``/``offset_err`` are the constant offset and its standard
-        error (0 unless ``fit_offset``).
+        error (0 unless ``fit_offset``). ``statistic`` is the statistic
+        actually used and ``mle_converged`` whether the Poisson MLE converged
+        (``None`` for a least-squares fit; ``False`` after the fallback to
+        least squares).
         """
         params = self.parameters()
         n = self.n_exp
@@ -638,6 +689,7 @@ class MultiExpFit:
             "tau_amp_fit": self.mean_lifetime("amplitude", corrected=False)[0],
             "period": self.period,
             "statistic": self.statistic,
+            "mle_converged": self.mle_converged,
             "offset": offset,
             "offset_err": offset_err,
             "fit_offset": self.fit_offset,
@@ -802,7 +854,7 @@ class IRFReconvolutionFit(MultiExpFit):
         quarter period).
     irf_background :
         Passed to :func:`prepare_irf`.
-    p0, bounds, loss, f_scale, weights, constrain_sum_A, statistic, count_scale :
+    p0, bounds, loss, f_scale, weights, constrain_sum_A, statistic, count_scale, warn_fallback :
         As for :class:`MultiExpFit` (``weights`` over the fitted bins).
     """
 
@@ -817,7 +869,8 @@ class IRFReconvolutionFit(MultiExpFit):
                  bounds: tuple[np.ndarray, np.ndarray] | None = None,
                  loss: str = "linear", f_scale: float = 1.0,
                  weights: np.ndarray | None = None, constrain_sum_A: bool = False,
-                 statistic: str = "least_squares", count_scale: float = 1.0) -> None:
+                 statistic: str = "least_squares", count_scale: float = 1.0,
+                 warn_fallback: bool = True) -> None:
         counts = np.asarray(counts, dtype=float)
         n = counts.size
         if np.size(irf) != n:
@@ -855,7 +908,7 @@ class IRFReconvolutionFit(MultiExpFit):
         super().__init__(grid_t[mask], counts[mask], n_exp, offset=self._background0,
                          p0=p0, bounds=bounds, loss=loss, f_scale=f_scale, weights=weights,
                          constrain_sum_A=constrain_sum_A, statistic=statistic,
-                         count_scale=count_scale, period=None)
+                         count_scale=count_scale, period=None, warn_fallback=warn_fallback)
 
     # -- parameter layout ----------------------------------------------------------
     def _extras(self) -> list[str]:

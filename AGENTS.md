@@ -140,6 +140,8 @@ docs/               per-module manuals (ptu, zurich, jpk, match, database, plott
 - The example scripts double as living documentation; keep them runnable
   against the files in `examples/Test data/`. A legacy script `example_correlate_legacy.py` 
   is provided to verify the functionality of the legacy files.
+- The docs are supposed to be manuals for a user that knows about the scientific context
+  but not the code. Dont treat them like a developer notes.
 
 ## Gotchas specific to this codebase
 

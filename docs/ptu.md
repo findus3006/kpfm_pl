@@ -315,7 +315,7 @@ extrapolated to the maximum, not to the excitation time.
 | `"manual"` | keep `start <= t <= end` (ns), `end=None` = last sample |
 
 Additional keywords: `smoothing` (Gaussian sigma for edge finding),
-`normalize` (scale the fitted curve peak to 1), `weighting` (see below),
+`normalize` (scale the fitted curve peak to 1), `weighting` (default `"mle"`, see below),
 `diagnostics` (thresholds of the over-fitting warnings, see below),
 `fit_background` and `prerise`/`prerise_gap` (see
 [Background and the bins before the rise](#background-and-the-bins-before-the-rise)),
@@ -328,9 +328,19 @@ deviations.
 
 | `weighting` | Fit statistic |
 |---|---|
-| `"none"` (default) | unweighted least squares |
+| `"mle"` (default) | Poisson maximum likelihood (minimises the Poisson deviance). Least squares underestimates lifetimes where bins hold few photons (long tails); the MLE does not. Works with `normalize` |
 | `"poisson"` | least squares with every bin weighted by its photon-counting noise `1/sqrt(max(counts, 1))` (Neyman χ²) |
-| `"mle"` | Poisson maximum likelihood (minimises the Poisson deviance). Least squares underestimates lifetimes where bins hold few photons (long tails, per-bin fits); the MLE does not. Works with `normalize`; needs the linear `loss` |
+| `"none"` | unweighted least squares |
+
+The maximum likelihood has no robust loss and chooses its own weights. With
+a robust `loss` the fit therefore uses `"poisson"` instead, with explicit
+`weights` it uses `"none"`; a warning says so. If the maximum likelihood does
+not converge (typically a badly specified model, e.g. a fixed background far
+below the real one), the fit shows the Poisson least-squares result instead,
+warns with an `MLEFallbackWarning` and reports `fit["mle_converged"] = False`
+and `fit["weighting"] = "poisson"`. Its BIC is then computed from χ², so it
+is not compared with maximum-likelihood fits. `fit["weighting"]` is always the
+statistic actually used.
 
 On the test file `ptu_test1_…` the tail holds about 10 counts per bin; a
 simulation with its decay gives a long lifetime of 28.6 ns with `"poisson"`
@@ -360,7 +370,7 @@ The returned dict contains:
 | `curve` | model evaluated on the fitted grid |
 | `quality` | `{residuals, cost, success, message, r_squared}` plus the Poisson goodness of fit `{reduced_chi_squared, chi_squared, dof, deviance, weighted_residuals}` and the model selection `{bic, bic_statistic, n_points, n_params}` |
 | `warnings` | list of over-fitting warnings (empty if none) |
-| `weighting`, `statistic` | the `weighting` used and the resulting `MultiExpFit` statistic |
+| `weighting`, `statistic`, `mle_converged` | the `weighting` actually used, the resulting `MultiExpFit` statistic, and whether the maximum likelihood converged (`None` for least squares, `False` after the fallback described above) |
 | `label` | LaTeX legend string of the fitted model |
 | `success` | whether the optimiser converged |
 | `shifted_histogram_x` | full lifetime axis shifted so the peak is at 0 ns |
@@ -601,7 +611,12 @@ lt = ptu.lifetime_trace(bintime=0.5, n_exp=2, bins=10)
 the fitted lifetime in ns: for `n_exp > 1`, the intensity-weighted mean
 `sum(A_i tau_i^2) / sum(A_i tau_i)` (or the amplitude-weighted
 `sum(A_i tau_i) / sum(A_i)` with `mean_lifetime="amplitude"`), as in the
-[FLID map](#flid-map). `decay_correction` works as in `fit_lifetime`;
+[FLID map](#flid-map). The per-bin fits use `weighting="poisson"` by default
+(not the maximum likelihood of `fit_lifetime`): with about 100 photons per
+time bin or more it gives nearly the same lifetimes and is several times
+faster. `weighting="mle"` is available; bins where it does not converge get
+the Poisson least-squares value and are marked in `meta["mle_fallback"]`,
+with one warning giving their number. `decay_correction` works as in `fit_lifetime`;
 `prerise`/`prerise_gap` and `background_rate` are described in
 [Background and the bins before the rise](#background-and-the-bins-before-the-rise).
 Its `x`
@@ -731,7 +746,7 @@ Key parameters:
 | `mode`/`fraction`/`smoothing`/`start`/`end` | – | fit-window selection, as in `fit_lifetime` |
 | `sigma` | `1.5` | Gaussian smoothing of the 2-D histogram (`0` disables) |
 | `isolated` | `False` | when `True`, return one `Image` per exponential; otherwise a single map of the intensity-weighted mean lifetime |
-| `weighting` | `"none"` | `"poisson"` weights every per-bin fit by photon noise, `"mle"` fits each bin by Poisson maximum likelihood (recommended for few photons per bin), as in `fit_lifetime` (also for `lifetime_trace`) |
+| `weighting` | `"poisson"` | statistic of the per-bin fits, see [Lifetime trace](#lifetime-trace): `"poisson"` (photon-noise weights, fast), `"mle"` (Poisson maximum likelihood, several times slower) or `"none"` (plain least squares) |
 | `mean_lifetime` | `"intensity"` | mean lifetime of a bin with `n_exp > 1`: `"intensity"` (`tau_int`) or `"amplitude"` (`tau_amp`); fitted maps only (also for `lifetime_trace`) |
 | `decay_correction` | `True` | correct the per-bin amplitudes for the incomplete decay of earlier pulses, as in `fit_lifetime` (also for `lifetime_trace`) |
 | `prerise`/`prerise_gap` | `False`/`2.0` | also fit the bins more than `prerise_gap` ns before the histogram maximum in the per-bin tail fits, as in `fit_lifetime` (also for `lifetime_trace`; fitted maps only) |

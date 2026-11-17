@@ -50,6 +50,14 @@ def _combo_texts(form, key):
     return [combo.itemText(i) for i in range(combo.count())]
 
 
+def _components(tab):
+    """``{(row label, column title): text}`` of the component table."""
+    table = tab.component_table
+    titles = [table.horizontalHeaderItem(c).text() for c in range(table.columnCount())]
+    return {(table.item(r, 0).text(), titles[c]): table.item(r, c).text()
+            for r in range(table.rowCount()) for c in range(1, table.columnCount())}
+
+
 def test_time_window_between_two_triggers(window, qtbot, tab):
     times = tab.trace.trigger_times
     assert _combo_texts(tab.trace_form, "start_trigger") == [
@@ -87,6 +95,11 @@ def test_rois_feed_the_fit_sources_and_each_roi_is_fitted(window, qtbot, tab, tm
     assert headers == ["Parameter", "ROI 1", "ROI 2"]
     rows = [tab.fit_table.item(r, 0).text() for r in range(tab.fit_table.rowCount())]
     assert "χ²ᵣ (Poisson)" in rows and "R²" in rows
+    # the component table groups its rows per ROI, in the ROI colours
+    cells = _components(tab)
+    assert ("ROI 1 · 1", "τ (ns)") in cells and ("ROI 2 · Mean τ_int", "τ (ns)") in cells
+    label = tab.component_table.item(0, 0)
+    assert label.text() == "ROI 1 · 1" and label.foreground().color().name() == "#1f77b4"
     # histogram + residual panel
     assert len(tab.hist_plot.figure.axes) == 2
 
@@ -137,7 +150,7 @@ def test_adding_a_component_is_judged_by_bic(window, qtbot, tab):
     assert comparison.previous_n_exp == 1 and comparison.verdict == "better"
     assert comparison.delta < -10
     rows = {tab.fit_table.item(r, 0).text(): r for r in range(tab.fit_table.rowCount())}
-    assert "BIC" in rows and "A1 (fitted)" in rows
+    assert "BIC" in rows and ("1", "A fitted (counts)") in _components(tab)
     item = tab.fit_table.item(rows["BIC"], 1)
     assert "Δ" in item.text() and item.foreground().color().name() == "#2e7d32"
     assert any("ΔBIC" in text and level == "good" for text, level in messages)
@@ -203,12 +216,18 @@ def test_advanced_fit_settings_dialog_round_trip(window, qtbot, tab):
     options = model.FitOptions()
     options.tau_min[0], options.tau_max[0] = 2.0, 2.5
     options.weighting = "poisson"
+    options.bin_weighting = "mle"
     options.constrain_sum_A = True
     dialog = FitOptionsDialog(options)
     qtbot.addWidget(dialog)
+    assert dialog.form.value("weighting") == "poisson"
+    assert dialog.form.value("bin_weighting") == "mle"
     back = dialog.options()
     assert back.tau_min[0] == 2.0 and back.tau_max[0] == 2.5 and back.tau_min[1] is None
-    assert back.weighting == "poisson" and back.constrain_sum_A
+    assert back.weighting == "poisson" and back.bin_weighting == "mle" and back.constrain_sum_A
+    summary = describe_options(back)
+    assert "lifetime fit: Poisson least squares" in summary and "trace/FLID: Poisson MLE" in summary
+    assert describe_options(model.FitOptions()) == "defaults"
     assert "sum(A)" in describe_options(back)
     # fractions are entered in percent and come back as fractions
     tuned = model.FitOptions(bic_threshold=6.0, min_fraction=0.02, merge_rel=0.05,
@@ -236,6 +255,27 @@ def test_advanced_fit_settings_dialog_round_trip(window, qtbot, tab):
     _wait(window, qtbot, lambda: tab.fit is not None)
     assert 2.0 <= tab.fit.fit["tau"][0] <= 2.5
     assert tab.fit.fit["weighting"] == "poisson"
+    rows = {tab.fit_table.item(r, 0).text(): r for r in range(tab.fit_table.rowCount())}
+    assert tab.fit_table.item(rows["Fit statistic"], 1).text() == "Poisson least squares"
+
+
+def test_mle_fallback_is_logged_every_time(window, qtbot, tab, monkeypatch):
+    from kpfm_pl import fitting
+
+    messages = []
+    window.ctx.log.message.connect(lambda text, level: messages.append((text, level)))
+    monkeypatch.setattr(fitting, "_MLE_MAX_ITER", 0)        # no MLE can converge
+    tab.fit_form.set_value("n_exp", 1)
+    for attempt in range(2):                                # not swallowed the second time
+        previous = tab.fit
+        tab.run_fit()
+        _wait(window, qtbot, lambda: tab.fit is not previous)
+        logged = [t for t, level in messages if "did not converge" in t and level == "warning"]
+        assert len(logged) == attempt + 1
+    assert tab.fit.fit["weighting"] == "poisson" and tab.fit.fit["mle_converged"] is False
+    rows = {tab.fit_table.item(r, 0).text(): r for r in range(tab.fit_table.rowCount())}
+    assert "MLE did not converge" in tab.fit_table.item(rows["Fit statistic"], 1).text()
+    assert "MLE did not converge" in tab.hist_plot.figure.axes[0].get_title()
 
 
 def test_lifetime_shift_is_applied_per_file(window, qtbot, tab):
@@ -281,16 +321,22 @@ def test_fit_table_and_title_show_tau_int_with_error(window, qtbot, tab):
     tab.fit_form.set_value("n_exp", 2)
     tab.run_fit()
     _wait(window, qtbot, lambda: tab.fit is not None)
-    rows = [tab.fit_table.item(r, 0).text() for r in range(tab.fit_table.rowCount())]
-    assert "τ_int (ns)" in rows and "tau_int_err_ns" not in rows
-    value = tab.fit_table.item(rows.index("τ_int (ns)"), 1).text()
-    assert "±" in value
+    # one row per component, then the mean lifetime in the τ column
+    table = tab.component_table
+    assert [table.item(r, 0).text() for r in range(table.rowCount())] == ["1", "2", "Mean τ_int"]
+    titles = [table.horizontalHeaderItem(c).text() for c in range(table.columnCount())]
+    assert titles == ["Component", "τ (ns)", "A (%)", "I (%)", "A (counts)", "A fitted (counts)"]
+    cells = _components(tab)
+    assert "±" in cells[("Mean τ_int", "τ (ns)")] and cells[("Mean τ_int", "A (%)")] == ""
     assert "τ_int = " in tab.hist_plot.figure.axes[0].get_title()
     # amplitude and intensity percentages with errors, counts for reference
-    for row in ("A1 (%)", "I2 (%)", "A1 (counts)", "A1 (fitted)", "τ1 (ns)"):
-        assert row in rows
-        assert "±" in tab.fit_table.item(rows.index(row), 1).text() or row == "A1 (fitted)"
-    assert not any("err" in r for r in rows)
+    for row, column in (("1", "A (%)"), ("2", "I (%)"), ("1", "A (counts)"), ("1", "τ (ns)")):
+        assert "±" in cells[(row, column)]
+    assert cells[("1", "A fitted (counts)")]
+    # the second table holds no per-component values and no error rows
+    rows = [tab.fit_table.item(r, 0).text() for r in range(tab.fit_table.rowCount())]
+    assert not any(r.startswith(("τ", "A1", "I1")) or "err" in r for r in rows)
+    assert {"Offset", "χ²ᵣ (Poisson)", "BIC", "Fit start (ns)"} <= set(rows)
     assert "normalize" not in tab.fit_form.fields
 
     # amplitude-weighted mean, no incomplete-decay correction
@@ -298,8 +344,10 @@ def test_fit_table_and_title_show_tau_int_with_error(window, qtbot, tab):
     previous = tab.fit
     tab.run_fit()
     _wait(window, qtbot, lambda: tab.fit is not previous)
-    rows = [tab.fit_table.item(r, 0).text() for r in range(tab.fit_table.rowCount())]
-    assert "τ_amp (ns)" in rows and "τ_int (ns)" not in rows and "A1 (fitted)" not in rows
+    labels = [table.item(r, 0).text() for r in range(table.rowCount())]
+    assert labels[-1] == "Mean τ_amp"
+    titles = [table.horizontalHeaderItem(c).text() for c in range(table.columnCount())]
+    assert "A fitted (counts)" not in titles
     assert "τ_amp = " in tab.hist_plot.figure.axes[0].get_title()
 
 

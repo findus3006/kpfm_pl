@@ -34,6 +34,7 @@ from .database import (
 )
 from .fitting import (
     IRFReconvolutionFit,
+    MLEFallbackWarning,
     MultiExpFit,
     amplitude_fractions,
     exp_kernel,
@@ -84,6 +85,7 @@ __all__ = [
     "Match",
     "MultiExpFit",
     "IRFReconvolutionFit",
+    "MLEFallbackWarning",
     "prepare_irf",
     "irf_fwhm",
     "exp_kernel",

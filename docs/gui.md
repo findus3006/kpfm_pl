@@ -170,12 +170,18 @@ title on the left to fold it away.
      covariance), rounded to the relevant digits, in the table and the plot
      title. The lifetime trace and the FLID maps use the same mean for
      several exponentials.
-   - **Per component**: τ ± error, **A (%)** = Aᵢ / Σ Aⱼ (amplitude
-     fraction) and **I (%)** = Aᵢτᵢ / Σ Aⱼτⱼ (intensity fraction, share of the
-     photons), both with errors, and **A (counts)**, the amplitude in counts
-     per bin.
-   - **Fit quality**: the table lists the lifetimes, amplitudes and
-     **χ²ᵣ** (reduced chi-squared with Poisson weights), also shown in the
+   - **Results tables**: the *Components* table has one row per
+     exponential, with τ ± error, **A (%)** = Aᵢ / Σ Aⱼ (amplitude fraction),
+     **I (%)** = Aᵢτᵢ / Σ Aⱼτⱼ (intensity fraction, share of the photons),
+     both with errors, **A (counts)**, the amplitude in counts per bin, and
+     *A fitted (counts)* (see *Incomplete decay* below). Its last row is the
+     mean lifetime (τ_int or τ_amp) in the τ column. With *Each ROI
+     separately* the rows are grouped per ROI and labelled in the ROI colour.
+     The *Fit* table below lists everything else: fit statistic, offset,
+     χ²ᵣ, BIC, R², convergence, fit window and, where used, bins before the
+     rise, seam bins, lifetime shift, detectors and the IRF parameters (one
+     column per ROI). Hover over a row or column title for its meaning.
+   - **Fit quality**: **χ²ᵣ** (reduced chi-squared with Poisson weights), also shown in the
      plot title. χ²ᵣ ≈ 1 (green) means the fit describes the histogram within
      photon noise; clearly larger values (orange) mean systematic deviations,
      e.g. one exponential too few. R² is listed too, but is close to 1 for
@@ -198,16 +204,25 @@ title on the left to fold it away.
    - **Incomplete decay**: by default the amplitudes are per-pulse values,
      corrected for the photons of earlier laser pulses when the decay has not
      reached the noise floor within one period (A = A_fit·(1 − exp(−T/τ)));
-     the percentages and the mean lifetime use them. *A1 (fitted), …* are the
-     amplitudes of the plotted curve. The lifetimes need no correction.
+     the percentages and the mean lifetime use them. *A fitted (counts)* are
+     the amplitudes of the plotted curve. The lifetimes need no correction.
      Switch it off with *Incomplete decay* in *Advanced fit settings* (then
-     the *(fitted)* rows disappear). See [ptu.md](ptu.md#lifetime-fitting).
+     the *A fitted* column disappears). See [ptu.md](ptu.md#lifetime-fitting).
    - **Advanced fit settings…**: initial guesses and lower/upper bounds of
      every lifetime τ (ns) and amplitude A (fraction of the histogram peak),
-     the **weighting** (*Poisson*, recommended for TCSPC data: the low-count
-     tail is no longer ignored; *Poisson MLE*, maximum likelihood, unbiased
-     even with few photons per bin, best for the lifetime trace and FLID
-     fits) and robust losses against outliers. Ticked fields are used,
+     the **fit statistic**, separately for the *Lifetime fit* (default
+     *Poisson MLE*, maximum likelihood, unbiased even where the histogram
+     holds few photons per bin) and for the per-bin fits of *Lifetime trace /
+     FLID* (default *Poisson least squares*, several times faster and close to
+     the maximum likelihood from about 100 photons per time bin; *Poisson MLE*
+     can be chosen), and robust losses against outliers. A robust loss cannot
+     be combined with the maximum likelihood: those fits then use Poisson
+     least squares and the log says so. If the maximum likelihood does not
+     converge (typically a fixed background far below the real one), the
+     lifetime fit shows the Poisson least-squares result, the *Fit statistic*
+     row and the plot title say "MLE did not converge" and the log warns
+     every time; for the lifetime trace and the FLIDs the log gives the number
+     of time bins concerned. Ticked fields are used,
      unticked ones are automatic. The settings apply to the lifetime fit,
      the lifetime trace and the FLID fits; the line under the button
      summarises them. *Amplitudes and mean lifetime* chooses τ_int or τ_amp

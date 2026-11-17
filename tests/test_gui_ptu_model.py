@@ -225,12 +225,63 @@ def test_roi_lifetime_trace_uses_trace_bin_time(handle):
                                      rois=[ROI_A])
 
 
+def test_summary_is_split_into_components_and_fit_rows():
+    summary = {"tau1_ns": 3.0, "tau1_err_ns": 0.1, "A1_pct": 60.0, "A1_pct_err": 1.0,
+               "A1": 10.0, "tau2_ns": 20.0, "tau2_err_ns": 0.5, "A2_pct": 40.0, "A2": 7.0,
+               "tau_int_ns": 15.0, "tau_int_err_ns": 0.2, "offset": 1.5,
+               "reduced_chi_squared": 1.1, "success": True, "fit_points": 120}
+    rows = model.component_rows(summary)
+    assert [r.label for r in rows] == ["1", "2", "Mean τ_int"]
+    assert rows[0].keys == {"τ (ns)": "tau1_ns", "A (%)": "A1_pct", "A (counts)": "A1"}
+    assert rows[-1].mean and rows[-1].keys == {"τ (ns)": "tau_int_ns"}
+    assert model.component_columns([summary]) == ["τ (ns)", "A (%)", "A (counts)"]
+    assert model.quality_keys([summary]) == ["offset", "reduced_chi_squared", "success",
+                                             "fit_points"]
+    assert model.summary_text(summary, "tau1_ns") == "3.00 ± 0.10"
+    assert model.summary_text(summary, "success") == "True"
+    assert model.summary_text(summary, "fit_points") == "120"
+
+
 # -------------------------------------------------------------- fit options
 def test_default_fit_options_change_nothing():
-    # The GUI default is Poisson weighting; without it nothing is overridden.
-    assert model.FitOptions().fit_kwargs(2, 1000.0) == {"weighting": "poisson"}
-    plain = model.FitOptions(weighting="none")
-    assert plain.is_default() and plain.fit_kwargs(2, 1000.0) == {}
+    # The GUI defaults are the backend defaults: the Poisson MLE for the lifetime
+    # fit, Poisson least squares per bin. Nothing is overridden.
+    default = model.FitOptions()
+    assert (default.weighting, default.bin_weighting) == ("mle", "poisson")
+    assert default.is_default()
+    assert default.fit_kwargs(2, 1000.0) == {} and default.fit_kwargs(2, per_bin=True) == {}
+    assert model.FitOptions(weighting="none").fit_kwargs(2, 1000.0) == {"weighting": "none"}
+
+
+def test_lifetime_fit_and_per_bin_fits_have_their_own_weighting():
+    options = model.FitOptions(weighting="poisson", bin_weighting="mle")
+    assert not options.is_default()
+    assert options.fit_kwargs(1, 100.0) == {"weighting": "poisson"}
+    assert options.fit_kwargs(1, per_bin=True) == {"weighting": "mle"}
+    robust = model.FitOptions(bin_weighting="mle", loss="huber")
+    assert robust.fallback_note() is not None                     # the lifetime fit's MLE
+    assert "trace / FLID" in robust.fallback_note(per_bin=True)
+    # the fallback is Poisson least squares: the per-bin default, so not passed at all
+    assert "weighting" not in robust.fit_kwargs(1, per_bin=True)
+    assert robust.fit_kwargs(1, 100.0)["weighting"] == "poisson"
+    with pytest.raises(ValueError, match="bin_weighting"):
+        model.FitOptions(bin_weighting="sqrt").validate()
+
+
+def test_mle_fallbacks_are_reported_for_fits_and_bins():
+    from kpfm_pl import Signal
+
+    assert model.mle_fallback_text({"mle_converged": True}) is None
+    assert "did not converge" in model.mle_fallback_text({"mle_converged": False})
+    assert model.statistic_text({"weighting": "mle", "mle_converged": True}) == "Poisson MLE"
+    assert model.statistic_text({"weighting": "poisson", "mle_converged": False}) == \
+        "Poisson least squares (MLE did not converge)"
+    assert "MLE did not converge" in model.quality_text({"mle_converged": False})
+    trace = Signal(np.arange(4.0), np.array([1.0, np.nan, 2.0, 3.0]),
+                   meta={"mle_fallback": np.array([True, False, False, True])})
+    assert "2 of 3" in model.bin_fallback_text(trace)
+    trace.meta["mle_fallback"][:] = False
+    assert model.bin_fallback_text(trace) is None
 
 
 def test_fit_options_build_scaled_bounds_and_guesses():
@@ -357,8 +408,13 @@ def test_fit_options_pass_warning_thresholds_and_validate(handle):
     assert any("collapsed" in w for w in result.fit["warnings"])
     summary = model.fit_summary(result.fit)
     assert {"bic", "A1_fit", "A2_fit"} <= set(summary)
-    with pytest.raises(ValueError, match="MLE"):
-        model.FitOptions(weighting="mle", loss="huber").validate()
+    # MLE with a robust loss is allowed: the fits fall back to Poisson least squares.
+    robust = model.FitOptions(weighting="mle", loss="huber", f_scale=2.0)
+    robust.validate()
+    assert robust.effective_weighting() == "poisson" and "least squares" in robust.fallback_note()
+    assert robust.fit_kwargs(2, 1000.0) == {"weighting": "poisson", "loss": "huber",
+                                            "f_scale": 2.0}
+    assert model.FitOptions().fallback_note() is None
     with pytest.raises(ValueError, match="threshold"):
         model.FitOptions(bic_threshold=-1).validate()
 

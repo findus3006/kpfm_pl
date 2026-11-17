@@ -26,6 +26,7 @@ from typing import Any
 import numpy as np
 
 from ...core import Image, Signal
+from ...fitting import MLEFallbackWarning
 from ...ptu import flid_map
 from ..export import ExportPayload, build_metadata, describe_meta
 from .files import LoadedFile
@@ -334,7 +335,7 @@ def compute_flids(handle: LoadedFile, trace_params: TraceParams, params: FlidPar
     methods = params.methods()
     options = options or FitOptions()
     options.validate()
-    fit_kwargs = options.fit_kwargs(params.n_exp)
+    fit_kwargs = options.fit_kwargs(params.n_exp, per_bin=True)
     with handle.lock:
         trace = compute_trace(handle, trace_params)
         intensity_range = params.intensity_range(trace.signal)
@@ -372,6 +373,8 @@ def compute_flids(handle: LoadedFile, trace_params: TraceParams, params: FlidPar
                 with warnings.catch_warnings():
                     warnings.filterwarnings("ignore", message=r".* photons \(",
                                             category=RuntimeWarning)
+                    # ... and the MLE fallbacks per ROI (meta["mle_fallback"]).
+                    warnings.simplefilter("ignore", MLEFallbackWarning)
                     for part, method in zip(parts, methods):
                         if method == "fit":
                             traces[method] = ptu.lifetime_trace(

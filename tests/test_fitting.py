@@ -274,6 +274,42 @@ def test_poisson_mle_with_count_scale_matches_raw_counts():
                                                              rel=1e-4)
 
 
+def test_poisson_mle_reports_convergence():
+    rng = np.random.default_rng(6)
+    t = np.linspace(0.0, 30.0, 300)
+    counts = rng.poisson(_single_exp(t, 200.0, 4.0, 1.0)).astype(float)
+    mle = MultiExpFit(t, counts, 1, offset=1.0, statistic="poisson_mle")
+    assert mle.mle_converged is True and mle.statistic == "poisson_mle"
+    assert mle.to_dict()["mle_converged"] is True
+    plain = MultiExpFit(t, counts, 1, offset=1.0)
+    assert plain.mle_converged is None and plain.to_dict()["mle_converged"] is None
+
+
+def test_poisson_mle_falls_back_to_poisson_least_squares(monkeypatch):
+    from kpfm_pl import MLEFallbackWarning, fitting
+
+    rng = np.random.default_rng(7)
+    t = np.linspace(0.0, 30.0, 300)
+    counts = rng.poisson(_single_exp(t, 200.0, 4.0, 1.0)).astype(float)
+    neyman = MultiExpFit(t, counts, 1, offset=1.0,
+                         weights=1.0 / np.sqrt(np.maximum(counts, 1.0)))
+    # No reweighting pass may finish: the iterations cannot converge.
+    monkeypatch.setattr(fitting, "_MLE_MAX_ITER", 0)
+    with pytest.warns(MLEFallbackWarning, match="did not converge"):
+        fit = MultiExpFit(t, counts, 1, offset=1.0, statistic="poisson_mle")
+    assert fit.success and fit.mle_converged is False
+    assert fit.statistic == "least_squares" and fit.requested_statistic == "poisson_mle"
+    np.testing.assert_allclose(fit.result.x, neyman.result.x, rtol=1e-10)
+    # the covariance belongs to the Poisson least-squares fit as well
+    np.testing.assert_allclose(fit.covariance(), neyman.covariance(), rtol=1e-8)
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        quiet = MultiExpFit(t, counts, 1, offset=1.0, statistic="poisson_mle",
+                            warn_fallback=False)
+    assert quiet.mle_converged is False
+
+
 def test_poisson_mle_argument_checks():
     t = np.linspace(0.0, 10.0, 50)
     y = _single_exp(t, 10.0, 2.0)

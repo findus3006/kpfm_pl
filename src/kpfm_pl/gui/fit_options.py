@@ -1,7 +1,7 @@
 """Dialog for the advanced lifetime-fit settings (:class:`FitOptions`).
 
-Initial guesses and bounds per exponential component, Poisson weighting (or
-the Poisson MLE) and a robust loss. The settings are shared by the lifetime
+Initial guesses and bounds per exponential component, the fit statistic
+(Poisson MLE by default, or least squares) and a robust loss. The settings are shared by the lifetime
 fit, the lifetime trace and the FLIDs of the *PL lifetime* tab. The BIC
 threshold and the over-fitting warning thresholds only apply to the lifetime
 fit.
@@ -22,7 +22,9 @@ from PySide6.QtWidgets import (
 from .forms import OptionalFloat, ParamForm
 from .models.ptu import (
     BIC_THRESHOLD,
+    BIN_DEFAULT_WEIGHTING,
     DIAGNOSTIC_DEFAULTS,
+    FIT_DEFAULT_WEIGHTING,
     LOSSES,
     MAX_COMPONENTS,
     MEAN_LIFETIMES,
@@ -63,10 +65,16 @@ def describe_options(options: FitOptions) -> str:
         used = [i + 1 for i, v in enumerate(getattr(options, attr)) if v is not None]
         if used:
             parts.append(f"{title} ({', '.join(map(str, used))})")
-    if options.weighting != "none":
-        parts.append(f"{options.weighting} weighting")
+    names = {"mle": "Poisson MLE", "poisson": "Poisson least squares",
+             "none": "plain least squares"}
+    if options.weighting != FIT_DEFAULT_WEIGHTING:
+        parts.append(f"lifetime fit: {names[options.weighting]}")
+    if options.bin_weighting != BIN_DEFAULT_WEIGHTING:
+        parts.append(f"trace/FLID: {names[options.bin_weighting]}")
     if options.loss != "linear":
         parts.append(f"{options.loss} loss (scale {options.f_scale:g})")
+        if "mle" in (options.weighting, options.bin_weighting):
+            parts.append("MLE replaced by Poisson least squares")
     if options.constrain_sum_A:
         parts.append("sum(A) ≤ 1 (per-bin fits)")
     if options.mean_lifetime != "intensity":
@@ -114,25 +122,45 @@ class FitOptionsDialog(QDialog):
         layout.addLayout(grid)
 
         f = self.form = ParamForm()
-        f.add_choice("weighting", "Weighting", WEIGHTINGS, "none",
-                     tooltip="None: every histogram bin counts equally (standard least "
-                             "squares).\nPoisson: bins are weighted by their photon "
-                             "counting noise 1/√counts, so the low-count tail is not "
-                             "ignored. Usually the better choice for TCSPC data.\n"
-                             "Poisson MLE: maximum-likelihood fit of the photon counts. "
-                             "Least squares underestimates lifetimes where a bin holds "
-                             "few photons (long tails, per-bin fits of the lifetime "
-                             "trace/FLID); the MLE does not. Needs the linear loss. The "
-                             "BIC then uses the Poisson deviance instead of χ².")
+        f.add_heading("Fit statistic",
+                      tooltip="How the deviation between data and model is measured. "
+                              "Separate for the lifetime fit and for the many small "
+                              "per-bin fits of the lifetime trace and the FLIDs.")
+        f.add_choice("weighting", "Lifetime fit", WEIGHTINGS, FIT_DEFAULT_WEIGHTING,
+                     tooltip="Poisson MLE (default): maximum-likelihood fit of the photon "
+                             "counts. Correct also where the histogram holds few photons "
+                             "per bin (long tails), where least squares underestimates "
+                             "the lifetimes. The BIC then uses the Poisson deviance "
+                             "instead of χ². If the MLE does not converge (e.g. a fixed "
+                             "background far too low), the Poisson least-squares fit is "
+                             "shown instead and the log says so.\n"
+                             "Poisson least squares: bins are weighted by their photon "
+                             "counting noise 1/√counts.\n"
+                             "None: every histogram bin counts equally (plain least "
+                             "squares), so the low-count tail is nearly ignored.")
+        f.add_choice("bin_weighting", "Lifetime trace / FLID", WEIGHTINGS,
+                     BIN_DEFAULT_WEIGHTING,
+                     tooltip="The per-bin fits of the lifetime trace and the FLIDs.\n"
+                             "Poisson least squares (default): fast and close to the "
+                             "maximum likelihood from about 100 photons per time bin.\n"
+                             "Poisson MLE: unbiased also with few photons per bin, but "
+                             "several times slower. Bins where it does not converge get "
+                             "the Poisson least-squares value; the log gives their "
+                             "number.\n"
+                             "None: plain least squares, biased towards short lifetimes "
+                             "at low counts.")
+        f.add_heading("Loss and constraint")
         f.add_choice("loss", "Loss", LOSSES, "linear",
-                     tooltip="Linear: standard least squares. The others are robust "
-                             "losses that reduce the influence of outliers (e.g. "
-                             "afterpulsing spikes).")
+                     tooltip="Linear: the standard fit. The others are robust losses that "
+                             "reduce the influence of outliers (e.g. afterpulsing "
+                             "spikes). They are a least-squares concept: with Poisson MLE "
+                             "selected, the fits then use Poisson least squares and the "
+                             "log says so.")
         f.add_float("f_scale", "Loss scale", 1.0, minimum=1e-4, maximum=1e4, step=0.1,
                     decimals=4,
                     tooltip="Residual size where a robust loss starts to down-weight "
-                            "points: in Poisson standard deviations with Poisson "
-                            "weighting, otherwise as a fraction of the histogram peak.")
+                            "points: in Poisson standard deviations, or as a fraction of "
+                            "the histogram peak with weighting 'None'.")
         f.add_bool("constrain_sum_A", "Constraint", False, text="sum(A) ≤ 1",
                    tooltip="Keep the amplitudes of all components below one peak in total, "
                            "so they stay fractions of the decay. Applied only to the "
@@ -221,7 +249,8 @@ class FitOptionsDialog(QDialog):
     def set_options(self, options: FitOptions) -> None:
         for (attr, i), cell in self.cells.items():
             cell.set_value(getattr(options, attr)[i])
-        values = {"weighting": options.weighting, "loss": options.loss,
+        values = {"weighting": options.weighting, "bin_weighting": options.bin_weighting,
+                  "loss": options.loss,
                   "f_scale": options.f_scale, "constrain_sum_A": options.constrain_sum_A,
                   "mean_lifetime": options.mean_lifetime,
                   "decay_correction": options.decay_correction,

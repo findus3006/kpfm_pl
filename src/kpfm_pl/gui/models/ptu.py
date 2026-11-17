@@ -16,6 +16,7 @@ an ROI (histograms, ROI lifetime traces, FLIDs) uses the trace's bin time.
 from __future__ import annotations
 
 import dataclasses
+import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -24,6 +25,7 @@ from typing import Any
 import numpy as np
 
 from ...core import Signal
+from ...fitting import MLEFallbackWarning
 from ...utils import TriggerPoint, trigger_points
 from ..export import ExportPayload, build_metadata, describe_meta
 from .files import LoadedFile
@@ -57,6 +59,14 @@ __all__ = [
     "compute_roi_fits",
     "compute_lifetime_trace",
     "fit_summary",
+    "COMPONENT_COLUMNS",
+    "ComponentRow",
+    "component_columns",
+    "component_rows",
+    "quality_keys",
+    "summary_text",
+    "mle_fallback_text",
+    "bin_fallback_text",
     "bin_runs",
     "BicComparison",
     "same_fit_data",
@@ -78,8 +88,12 @@ HISTOGRAM_SOURCES = (("all", "Whole time trace"), ("on", "On state"), ("off", "O
 ROI_SOURCES = (("rois", "All ROIs combined"), ("each", "Each ROI separately"))
 FIT_MODES = (("fraction", "Falling edge (fraction)"), ("inflection", "Inflection point"),
              ("manual", "Manual (start/end)"))
-WEIGHTINGS = (("none", "None (least squares)"), ("poisson", "Poisson (1/√counts)"),
-              ("mle", "Poisson MLE (maximum likelihood)"))
+WEIGHTINGS = (("mle", "Poisson MLE (maximum likelihood)"),
+              ("poisson", "Poisson least squares (1/√counts)"),
+              ("none", "None (plain least squares)"))
+#: Backend defaults (``PTU.fit_lifetime`` / ``PTU.lifetime_trace`` and ``PTU.flid``).
+FIT_DEFAULT_WEIGHTING = "mle"
+BIN_DEFAULT_WEIGHTING = "poisson"
 #: Defaults of the over-fitting warnings (``fitting.fit_warnings``).
 DIAGNOSTIC_DEFAULTS = {"amp_sigma": 2.0, "min_fraction": 0.01, "merge_sigma": 2.0,
                        "merge_rel": 0.1, "bound_rel": 0.01, "period_fraction": 0.5}
@@ -184,10 +198,16 @@ class FitOptions:
     work for raw-count fits and for the normalised per-bin fits. Entries
     beyond the fit's ``n_exp`` are ignored.
 
-    ``weighting`` and ``loss`` select Poisson weighting and a robust loss
-    (``scipy.optimize.least_squares``). ``f_scale`` is the residual size where
-    a robust loss starts to down-weight outliers: in Poisson standard
-    deviations with Poisson weighting, otherwise as a fraction of the peak.
+    ``weighting`` selects the fit statistic of the lifetime fit (Poisson
+    maximum likelihood by default), ``bin_weighting`` that of the per-bin
+    fits of the lifetime trace and the FLIDs (Poisson-weighted least squares
+    by default, several times faster); both follow the backend defaults.
+    ``loss`` selects a robust loss (``scipy.optimize.least_squares``). The
+    maximum likelihood has no robust loss: with one, those fits use
+    Poisson-weighted least squares (:meth:`effective_weighting`). ``f_scale``
+    is the residual size where a robust loss starts to down-weight outliers:
+    in Poisson standard deviations, or as a fraction of the peak without
+    weighting.
 
     ``constrain_sum_A`` enforces ``sum(A) <= 1``. It is only applied to
     normalised fits (``amplitude_scale == 1``), where the amplitudes are
@@ -215,7 +235,8 @@ class FitOptions:
     amp_guess: list[float | None] = field(default_factory=_components)
     amp_min: list[float | None] = field(default_factory=_components)
     amp_max: list[float | None] = field(default_factory=_components)
-    weighting: str = "poisson"
+    weighting: str = "mle"
+    bin_weighting: str = "poisson"
     loss: str = "linear"
     f_scale: float = 1.0
     constrain_sum_A: bool = False
@@ -230,7 +251,29 @@ class FitOptions:
     period_fraction: float = DIAGNOSTIC_DEFAULTS["period_fraction"]
 
     def is_default(self) -> bool:
-        return not self.fit_kwargs(MAX_COMPONENTS)
+        return (not self.fit_kwargs(MAX_COMPONENTS)
+                and not self.fit_kwargs(MAX_COMPONENTS, per_bin=True))
+
+    def chosen_weighting(self, per_bin: bool = False) -> str:
+        """The selected weighting of the lifetime fit or (``per_bin``) the trace/FLID fits."""
+        return self.bin_weighting if per_bin else self.weighting
+
+    def effective_weighting(self, per_bin: bool = False) -> str:
+        """The weighting the fits will use (``PTU.fit_lifetime``'s fallback).
+
+        The Poisson MLE has no robust loss: combined with one, the backend
+        fits by Poisson-weighted least squares and says so in the log.
+        """
+        chosen = self.chosen_weighting(per_bin)
+        return "poisson" if chosen == "mle" and self.loss != "linear" else chosen
+
+    def fallback_note(self, per_bin: bool = False) -> str | None:
+        """Log message when the chosen weighting cannot be used (``None`` otherwise)."""
+        if self.effective_weighting(per_bin) == self.chosen_weighting(per_bin):
+            return None
+        which = "lifetime trace / FLID fits" if per_bin else "lifetime fit"
+        return (f"Poisson MLE has no robust loss: the {which} use(s) Poisson-weighted least "
+                f"squares with the {self.loss} loss instead (Advanced fit settings).")
 
     def diagnostics(self) -> dict[str, float]:
         """Thresholds for ``PTU.fit_lifetime(diagnostics=...)``."""
@@ -252,9 +295,6 @@ class FitOptions:
                                      "bounds.")
         if self.f_scale <= 0:
             raise ValueError("The robust-loss scale must be positive.")
-        if self.weighting == "mle" and self.loss != "linear":
-            raise ValueError("Poisson MLE needs the linear loss (a robust loss is a "
-                             "least-squares concept).")
         if self.mean_lifetime not in MEAN_SYMBOLS:
             raise ValueError(f"Unknown mean lifetime {self.mean_lifetime!r}.")
         if self.bic_threshold < 0:
@@ -262,13 +302,18 @@ class FitOptions:
         for key in DIAGNOSTIC_DEFAULTS:
             if getattr(self, key) < 0:
                 raise ValueError(f"The warning threshold {key} must not be negative.")
+        for name in ("weighting", "bin_weighting"):
+            if getattr(self, name) not in dict(WEIGHTINGS):
+                raise ValueError(f"Unknown {name} {getattr(self, name)!r}.")
 
-    def fit_kwargs(self, n_exp: int, amplitude_scale: float = 1.0) -> dict[str, Any]:
-        """Keyword arguments for ``fit_lifetime``/``lifetime_trace``/``flid``.
+    def fit_kwargs(self, n_exp: int, amplitude_scale: float = 1.0, *,
+                   per_bin: bool = False) -> dict[str, Any]:
+        """Keyword arguments for ``fit_lifetime`` or (``per_bin``) ``lifetime_trace``/``flid``.
 
         Only settings that differ from the defaults are returned, so default
         options reproduce the plain backend call. ``amplitude_scale`` is the
         histogram peak in the units of the fitted data (1 for normalised fits).
+        ``per_bin`` selects :attr:`bin_weighting` instead of :attr:`weighting`.
 
         ``constrain_sum_A`` only enters the kwargs when ``amplitude_scale`` is
         1: on raw counts the amplitudes are not fractions of the peak, so the
@@ -292,11 +337,14 @@ class FitOptions:
             # NaN entries are filled with MultiExpFit's automatic guess.
             kwargs["p0"] = np.array(scaled(self.amp_guess, scale, np.nan)
                                     + scaled(self.tau_guess, 1.0, np.nan))
-        if self.weighting != "none":
-            kwargs["weighting"] = self.weighting
+        # Passing the fallback explicitly keeps the backend from warning
+        # again; the tab logs fallback_note() on every run instead.
+        weighting = self.effective_weighting(per_bin)
+        if weighting != (BIN_DEFAULT_WEIGHTING if per_bin else FIT_DEFAULT_WEIGHTING):
+            kwargs["weighting"] = weighting
         if self.loss != "linear":
             kwargs["loss"] = self.loss
-            kwargs["f_scale"] = float(self.f_scale) * (1.0 if self.weighting == "poisson"
+            kwargs["f_scale"] = float(self.f_scale) * (1.0 if weighting == "poisson"
                                                        else scale)
         if constrained:
             kwargs["constrain_sum_A"] = True
@@ -667,11 +715,15 @@ def _fit_histogram(handle: LoadedFile, histogram: Signal, fit: FitParams,
                          "on/off thresholds or the ROI.")
     # Raw counts; amplitude options are fractions of the peak.
     scale = float(np.max(y))
-    return handle.reader.fit_lifetime(histogram, n_exp=fit.n_exp,
-                                      diagnostics=options.diagnostics(),
-                                      **fit.window_kwargs(),
-                                      **options.fit_kwargs(fit.n_exp, scale),
-                                      **_irf_kwargs(irf, irf_params))
+    # The tab logs an MLE fallback from the result (mle_fallback_text) every
+    # time; Python would show the backend's warning only once.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", MLEFallbackWarning)
+        return handle.reader.fit_lifetime(histogram, n_exp=fit.n_exp,
+                                          diagnostics=options.diagnostics(),
+                                          **fit.window_kwargs(),
+                                          **options.fit_kwargs(fit.n_exp, scale),
+                                          **_irf_kwargs(irf, irf_params))
 
 
 def compute_fit(handle: LoadedFile, params: TraceParams, fit: FitParams,
@@ -739,8 +791,11 @@ def compute_lifetime_trace(handle: LoadedFile, params: TraceParams, fit: FitPara
     """
     options = options or FitOptions()
     options.validate()
-    kwargs = {**fit.window_kwargs(), **options.fit_kwargs(lt.n_exp), **(irf_kwargs or {})}
-    with handle.lock:
+    kwargs = {**fit.window_kwargs(), **options.fit_kwargs(lt.n_exp, per_bin=True),
+              **(irf_kwargs or {})}
+    # MLE fallbacks are logged by the tab from meta["mle_fallback"].
+    with handle.lock, warnings.catch_warnings():
+        warnings.simplefilter("ignore", MLEFallbackWarning)
         ptu = handle.reader
         if lt.roi is None:
             tstart, tend = _window(handle, params)
@@ -873,6 +928,8 @@ def fit_summary(fit: dict[str, Any]) -> dict[str, Any]:
         summary["prerise_bins"] = int(fit.get("prerise_points", 0))
     if fit.get("seam_points"):
         summary["seam_bins"] = int(fit["seam_points"])
+    if "weighting" in fit:
+        summary["statistic"] = statistic_text(fit)
     summary["reduced_chi_squared"] = float(quality.get("reduced_chi_squared", np.nan))
     if "bic" in quality:
         summary["bic"] = float(quality["bic"])
@@ -886,6 +943,92 @@ def fit_summary(fit: dict[str, Any]) -> dict[str, Any]:
     if fit.get("channels"):
         summary["channels"] = ", ".join(str(c) for c in fit["channels"])
     return summary
+
+
+#: Columns of the per-component results table: (``fit_summary`` key pattern, title).
+COMPONENT_COLUMNS = (("tau{}_ns", "τ (ns)"), ("A{}_pct", "A (%)"), ("I{}_pct", "I (%)"),
+                     ("A{}", "A (counts)"), ("A{}_fit", "A fitted (counts)"))
+#: ``fit_summary`` keys of the mean lifetimes, shown in the τ column.
+_MEAN_KEYS = {"tau_int_ns": "intensity", "tau_amp_ns": "amplitude"}
+
+
+@dataclass
+class ComponentRow:
+    """One row of the per-component table.
+
+    ``label`` is the component number (``"1"``, ``"2"``, ...) or, for the
+    mean lifetime, its symbol; ``keys`` maps a column title of
+    :data:`COMPONENT_COLUMNS` to the ``fit_summary`` key shown there.
+    """
+
+    label: str
+    keys: dict[str, str]
+    mean: bool = False
+
+
+def component_columns(summaries: Sequence[dict[str, Any]]) -> list[str]:
+    """Titles of the component columns used by any of ``summaries`` (in table order)."""
+    return [title for pattern, title in COMPONENT_COLUMNS
+            if any(pattern.format(1) in s for s in summaries)]
+
+
+def component_rows(summary: dict[str, Any]) -> list[ComponentRow]:
+    """The components of one fit, then its mean lifetime (in the τ column)."""
+    rows = []
+    i = 1
+    while f"tau{i}_ns" in summary:
+        keys = {title: pattern.format(i) for pattern, title in COMPONENT_COLUMNS
+                if pattern.format(i) in summary}
+        rows.append(ComponentRow(str(i), keys))
+        i += 1
+    for key, kind in _MEAN_KEYS.items():
+        if key in summary:
+            rows.append(ComponentRow(f"Mean {MEAN_SYMBOLS[kind]}", {"τ (ns)": key}, mean=True))
+    return rows
+
+
+def quality_keys(summaries: Sequence[dict[str, Any]]) -> list[str]:
+    """``fit_summary`` keys of the second table: everything not per component.
+
+    Standard errors are left out; they are shown with their value.
+    """
+    used = {key for s in summaries for row in component_rows(s) for key in row.keys.values()}
+    keys = list(dict.fromkeys(k for s in summaries for k in s))
+    errors = {error_key(k) for k in keys}
+    return [k for k in keys if k not in used and k not in errors]
+
+
+def summary_text(summary: dict[str, Any], key: str) -> str:
+    """A summary value as shown in the tables: ``value ± error`` where there is one."""
+    value = summary.get(key)
+    if value is None:
+        return ""
+    if error_key(key) in summary:
+        return format_uncertainty(value, summary[error_key(key)])
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, float):
+        return f"{value:.4g}"
+    return str(value)
+
+
+def mle_fallback_text(fit: dict[str, Any]) -> str | None:
+    """Log line when a lifetime fit's Poisson MLE fell back to least squares."""
+    if fit.get("mle_converged") is not False:
+        return None
+    return ("the Poisson MLE did not converge, so the Poisson least-squares fit is shown "
+            "(its BIC is not comparable with MLE fits). Check the fit window and the "
+            "background.")
+
+
+def bin_fallback_text(signal: Signal) -> str | None:
+    """Log line when per-bin Poisson MLE fits fell back to least squares (``None`` if none)."""
+    fallback = np.asarray(signal.meta.get("mle_fallback", []), dtype=bool)
+    if not fallback.any():
+        return None
+    fitted = int(np.count_nonzero(np.isfinite(np.asarray(signal.y, dtype=float))))
+    return (f"the Poisson MLE did not converge in {int(fallback.sum())} of {fitted} fitted "
+            "time bins; the Poisson least-squares result is used there.")
 
 
 def format_uncertainty(value: float, error: float) -> str:
@@ -933,7 +1076,23 @@ def quality_text(fit: dict[str, Any]) -> str:
     quality = fit.get("quality", {})
     chi = quality.get("reduced_chi_squared", np.nan)
     r2 = quality.get("r_squared", np.nan)
-    return f"χ²ᵣ = {chi:.3g}, R² = {r2:.4f}"
+    text = f"χ²ᵣ = {chi:.3g}, R² = {r2:.4f}"
+    if fit.get("mle_converged") is False:
+        text += " | MLE did not converge: Poisson least squares"
+    return text
+
+
+#: Names of the fit statistics in the results table.
+STATISTIC_NAMES = {"mle": "Poisson MLE", "poisson": "Poisson least squares",
+                   "none": "Least squares"}
+
+
+def statistic_text(fit: dict[str, Any]) -> str:
+    """The fit statistic actually used, e.g. ``"Poisson least squares (MLE did not converge)"``."""
+    name = STATISTIC_NAMES.get(fit.get("weighting", ""), str(fit.get("weighting", "")))
+    if fit.get("mle_converged") is False:
+        name += " (MLE did not converge)"
+    return name
 
 
 # ------------------------------------------------------------ BIC comparison
