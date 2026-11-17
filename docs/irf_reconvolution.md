@@ -1,11 +1,11 @@
 # IRF reconvolution – how it works
 
-> **Status:** background explanation. IRF reconvolution is **implemented
-> since v1.7.0** (`PTU.fit_lifetime(irf=...)`, GUI *Lifetime fit → use IRF*);
-> without an IRF the lifetime fit is a *tail fit*. Section 8 describes the
-> implementation; usage and parameters are in [ptu.md](ptu.md#irf-reconvolution)
-> and [gui.md](gui.md). Bracketed numbers refer to the reference list at the
-> end.
+This note explains the lifetime fit with a measured instrument response
+(*IRF reconvolution*). The general method (tail fit, statistics, background,
+mean lifetimes, number of components) is in
+[lifetime_fitting.md](lifetime_fitting.md); how to run the fit is in
+[ptu.md](ptu.md#fitting-with-a-measured-irf-reconvolution) and
+[gui.md](gui.md). Bracketed numbers refer to the reference list at the end.
 
 ## 1. Why the IRF matters
 
@@ -22,7 +22,7 @@ I(t) = ∫ R(t') F(t − t') dt' + B ,      F(t) = Σᵢ aᵢ exp(−t/τᵢ)   
 
 There are two ways to deal with this:
 
-- **Tail fit** (what `kpfm_pl` does today). Fit `Σ aᵢ exp(−t/τᵢ)` only to the
+- **Tail fit** (the lifetime fit without an IRF). Fit `Σ aᵢ exp(−t/τᵢ)` only to the
   part after the maximum, where the IRF has (nearly) died away. This is fine
   when all lifetimes are much longer than the IRF width; PicoQuant
   recommends it only for "lifetimes … significantly longer than the FWHM of
@@ -71,9 +71,9 @@ The subtracted floor must **not be clipped at zero**, even though clipping
 negative values is a common recipe: it removes only the negative half of the
 floor's Poisson noise and leaves a positive floor of about `0.4·√floor`
 counts per bin. The convolution turns it into a flat level that the fit
-takes from the background `B`. On a synthetic test file this cost 4 % of
-`B`; with a noisier IRF floor it took 90 % of it (fixed in v1.7.2). Likewise
-the floor level is estimated as a mean, not a median, because the median of
+takes from the background `B`: on a synthetic test file 4 % of `B`, with a
+noisier IRF floor 90 % of it. `kpfm_pl` therefore does not clip, and it
+estimates the floor level as a mean, not a median, because the median of
 Poisson counts is biased.
 
 ### IRF shift `δ`
@@ -109,8 +109,8 @@ A side effect matters in practice: with an incomplete decay the bins before
 the rising edge contain fluorescence from the previous pulse, so the
 background `B` can no longer be read off those bins [5]. The reconvolution
 fit covers them because it fits the whole period; the tail fit can include
-them with `prerise=True` (since v1.8.0, see
-[ptu.md](ptu.md#background-and-the-bins-before-the-rise)).
+them as well (*bins before the rise*, see
+[lifetime_fitting.md](lifetime_fitting.md#the-bins-before-the-rise)).
 
 ## 3. Fitting statistics
 
@@ -118,9 +118,9 @@ TCSPC bin counts are Poisson distributed. Three objective functions are in use:
 
 | Objective | Formula | Behaviour |
 |---|---|---|
-| Neyman χ² (`σ² = data`) | `Σ (yⱼ − mⱼ)² / max(yⱼ, 1)` | classic TCSPC least squares; `kpfm_pl`'s current *Poisson* weighting. Biased at low counts (bins that fluctuate low get more weight). |
+| Neyman χ² (`σ² = data`) | `Σ (yⱼ − mⱼ)² / max(yⱼ, 1)` | classic TCSPC least squares; *Poisson least squares* in `kpfm_pl`. Biased at low counts (bins that fluctuate low get more weight). |
 | Pearson χ² (`σ² = model`) | `Σ (yⱼ − mⱼ)² / mⱼ` | biased the other way when minimised directly |
-| Poisson maximum likelihood (deviance) | `2 Σ [mⱼ − yⱼ + yⱼ ln(yⱼ/mⱼ)]` | unbiased estimator; also a goodness-of-fit measure (≈ χ²-distributed) [17] |
+| Poisson maximum likelihood (deviance) | `2 Σ [mⱼ − yⱼ + yⱼ ln(yⱼ/mⱼ)]` | unbiased estimator; also a goodness-of-fit measure (≈ χ²-distributed) [17]; the default of the lifetime fit in `kpfm_pl` |
 
 Least squares underestimates lifetimes by about 5 % at 1 000–20 000 photons,
 whereas the maximum-likelihood estimator (MLE) stays accurate [15]. Similar
@@ -187,15 +187,14 @@ excitation time. Derived quantities:
 
 - intensity fractions `fᵢ = aᵢτᵢ / Σ aⱼτⱼ`
 - amplitude-weighted lifetime `τ_amp = Σ aᵢτᵢ / Σ aᵢ`
-- intensity-weighted lifetime `τ_int = Σ aᵢτᵢ² / Σ aᵢτᵢ` (as reported by
-  `kpfm_pl` today [5])
+- intensity-weighted lifetime `τ_int = Σ aᵢτᵢ² / Σ aᵢτᵢ` [5]
 
 Unlike in a tail fit, none of these depends on where `t = 0` is put.
 
 ## 7. Pitfalls specific to `kpfm_pl` data
 
 - **Settings mismatch.** The IRF file and the sample file must have the same
-  `MeasDesc_Resolution` and repetition period; a mismatch is reported as an
+  TCSPC resolution and repetition period; a mismatch is reported as an
   error.
 - **Lifetime window shorter than a period.** `kpfm_pl` caps the lifetime axis
   at 4096 bins. Choose the TCSPC resolution so that the window covers a whole
@@ -214,41 +213,27 @@ Unlike in a tail fit, none of these depends on where `t = 0` is put.
   bins before it. The automatic fit-start modes therefore fit the whole
   period; *Manual* fits only the bins between start and end.
 
-## 8. Implementation in `kpfm_pl`
-
-Already available (v1.5.0): the Poisson MLE (`weighting="mle"`), the BIC of
-every lifetime fit with the ΔBIC against the previous fit in the GUI, the
-over-fitting warnings, and the incomplete-decay correction of the tail fit
-(`A = A_fit·(1 − exp(−T/τ))`, section 2). Since v1.8.0 the tail fit can
-also fit its background (`fit_background=True`) and the bins before the
-rise (`prerise=True`), and every fit with a fitted background warns about
-lifetimes above half the laser period (the `B` ↔ `τ ≳ T` correlation of
-section 7).
-
-Implemented in v1.7.0 (`fitting.IRFReconvolutionFit`, `PTU.fit_lifetime(irf=...)`;
-verified on synthetic data: kernel against brute-force integration, unbiased
-recovery of τ, δ, B and s):
+## 8. What `kpfm_pl` fits
 
 - **Model:** `mⱼ = Σᵢ aᵢ [g_δ ⊛ k_τᵢ]ⱼ + s·g_δ,ⱼ + B` on one laser period,
-  with `g` the background-subtracted, unit-area IRF, `g_δ` its sub-bin shifted
-  copy (Fourier shift), `k_τ` the bin-integrated periodic exponential kernel
-  and `⊛` a circular FFT convolution. The periodic kernel contains the
-  incomplete-decay correction, so `aᵢ` are per-pulse amplitudes. The
-  *Incomplete decay* toggle (v1.6.0) switches to a single-pulse kernel.
-- **Free parameters:** `aᵢ ≥ 0`, `τᵢ`, `δ` (started where the half-maximum
-  rising edges of IRF and decay coincide, bounded to ± max(20 bins, 5 IRF
-  FWHM), at most a quarter period); optional checkboxes to fit `B`
-  (otherwise fixed from the dark counts) and the scatter `s`. `k` in the BIC
-  counts all of them.
-- **IRF preparation:** the floor is subtracted (mean of the floor bins) but
-  not clipped, see section 2.
-- **Statistic:** any `weighting` (least squares, Poisson, Poisson MLE).
-- **Lifetime trace / FLID:** the per-bin fits reconvolve with `δ` (and `B`,
-  `s`) taken from the last *Lifetime fit*; without one they fall back to the
-  tail fit and log a warning.
-- **GUI:** one IRF `.ptu` file for the whole application, remembered across
-  sessions and changeable at any time, a *Use IRF (reconvolution)* checkbox,
-  and the fitted shift `δ` in the results table.
+  with `g` the background-subtracted, unit-area IRF, `g_δ` its copy shifted
+  by `δ` (sub-bin, Fourier shift), `k_τ` the exponential integrated over each
+  bin and `⊛` a circular convolution. The periodic kernel includes the
+  incomplete decay, so the `aᵢ` are per-pulse amplitudes; *Incomplete decay*
+  off switches to a single pulse.
+- **Free parameters:** `aᵢ ≥ 0`, `τᵢ` and `δ`; optionally `B` (otherwise
+  fixed from the dark counts) and the scatter `s`. `δ` starts where the
+  half-maximum rising edges of IRF and decay coincide and may move by
+  ± max(20 bins, 5 IRF widths), at most a quarter period. The BIC counts all
+  free parameters.
+- **Statistic:** any of the three of section 3; the Poisson maximum
+  likelihood is the default.
+- **Lifetime trace / FLID:** every time bin is reconvolved with `δ`, `B` and
+  `s` from the fit of the summed histogram; only `aᵢ` and `τᵢ` are fitted per
+  bin.
+- **Verification:** so far on synthetic data only (kernel against numerical
+  integration, unbiased recovery of `τ`, `δ`, `B` and `s`); no real IRF
+  recording has been analysed yet.
 
 ## References
 

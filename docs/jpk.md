@@ -1,16 +1,15 @@
-# JPK reader (`kpfm_pl.JPK`)
+# JPK AFM images (`kpfm_pl.JPK`)
 
-Loads JPK AFM image files (`.jpk`, a TIFF-based container). Each channel
-(height, surface potential, photon counter, ...) is returned as a calibrated
-[`Image`](../src/kpfm_pl/core.py) with physical axes and z-units. No plotting
-or colormaps live in the loader – those belong to the optional
-[`plotting`](../src/kpfm_pl/plotting.py) helpers.
+Reads JPK AFM image files (`.jpk`). Each channel (height, surface
+potential, photon counter, ...) is returned as a calibrated `Image` with
+physical axes and units, ready for plotting; colormaps and interactive
+helpers are in [plotting.md](plotting.md).
 
 The runnable example is
 [`examples/example_jpk.py`](../examples/example_jpk.py), which loads
 `jpk_test_(Drift1).jpk` from the `Test data/` folder.
 
-## Loading a file
+## Opening a file
 
 ```python
 from kpfm_pl import JPK
@@ -19,14 +18,12 @@ jpk = JPK("overview.jpk")
 print(jpk.channel_names())   # e.g. ['Height (measured)', 'Precision 5', ...]
 ```
 
-The reader iterates over the TIFF pages, reads JPK's private tags, applies the
-per-channel calibration (`value = raw * scale + offset`) and flips the image
-vertically, so it shows the right way up with matplotlib's default
-`imshow(..., origin="upper")`. Channels are keyed by
-`"<name> <trace>"` (a `retrace` suffix distinguishes retrace scans).
-The unnamed 64x64 page is retained as `jpk.thumbnail` for reference but is not
-listed as a measurement channel. Its scan dimensions and calibration metadata
-are still used for the calibrated channels.
+Every channel is calibrated on opening (`value = raw × scale + offset`, with
+the factors stored in the file) and turned the right way up for
+matplotlib's default `imshow(..., origin="upper")`. Channels are named
+`"<name> <trace>"` (a `retrace` suffix marks retrace scans). The small
+preview image of the file is kept as `jpk.thumbnail` but is not a
+measurement channel.
 
 Attributes after loading:
 
@@ -34,12 +31,12 @@ Attributes after loading:
 |-----------|---------|
 | `channels` | `{key: ndarray}` calibrated channel arrays |
 | `units` | `{key: unit}` z-unit per channel |
-| `x`, `y` | physical scan axes (metres), derived from the scan factors `dx`/`dy` |
+| `x`, `y` | physical scan axes (metres) |
 | `thumbnail` | unnamed preview page, separate from the measurement channels |
 
 ## Channel calibration
 
-Calibration is looked up by the channel's type tag. Known channel types:
+The calibration depends on the channel type. Known types:
 
 | Channel type | Units |
 |--------------|-------|
@@ -58,7 +55,7 @@ multiplied by these two calibration values and returned in newtons. Missing,
 malformed or non-finite force calibration raises a `ValueError` instead of
 returning an incorrectly calibrated image.
 
-## Getting channels as Images
+## Getting a calibrated channel
 
 ```python
 afm  = jpk.image("Height (measured)", process=True)   # Image
@@ -88,24 +85,24 @@ import matplotlib.pyplot as plt
 plt.imshow(afm["data"], extent=afm.extent_um)   # default origin="upper"
 ```
 
-Or use the optional [`plotting`](../src/kpfm_pl/plotting.py) helpers, as in the
-example, for Gwyddion-style colormaps, scaled colorbars and interactive ROIs:
+Or use the optional [plotting helpers](plotting.md), as in the example, for
+Gwyddion-style colormaps, scaled colorbars and interactive ROIs:
 
 ```python
+from matplotlib.patches import Circle
 from kpfm_pl import plotting
 
 fig, ax, im, cbar = plotting.plot_image(
     afm, cmap=plotting.cmap_gold, cbar_scale=1e9,
     cbar_label="Height (nm)", extent_unit="um", title="Topography")
 circle_params = plotting.make_circle(ax)   # interactive circular ROI
-ax.add_patch(Circle(circle_params[0],circle_params[1], edgecolor = "red", fill=False)) # Adds circle patch to axis object
+ax.add_patch(Circle(circle_params[0], circle_params[1], edgecolor="red", fill=False))
 ```
 
-## Drift between two scans
+## Measuring the drift between two scans
 
-[`utils.image_shift`](../src/kpfm_pl/utils.py) estimates the translation
-between two images of equal shape by FFT cross-correlation with sub-pixel
-refinement. Rows point down in the stored arrays (row 0 is the top of the
+`image_shift` estimates the translation between two images of equal shape
+by cross-correlation, with sub-pixel precision. Rows point down in the stored arrays (row 0 is the top of the
 scan), so convert to scan coordinates like this:
 
 ```python
@@ -122,5 +119,7 @@ dy = -drow * (a.y[1] - a.y[0])    # metres, upwards
 match, small values mean the shift is unreliable. The *AFM shift* tab of the
 GUI does the same for up to four files, also on a window around a circle.
 
-`get_save_path(name="AFM")` returns a `processed/<stem> <name>.png` path
-(creating the `processed/` folder) for saving figures next to the source file.
+## Saving figures next to the data
+
+`jpk.get_save_path(name="AFM")` returns a `processed/<stem> <name>.png`
+path next to the source file (and creates the `processed/` folder).

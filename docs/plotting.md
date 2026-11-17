@@ -1,4 +1,4 @@
-# Plotting and interactive helpers (`kpfm_pl.plotting`, `kpfm_pl.selector`)
+# Plotting and drawing regions of interest (`kpfm_pl.plotting`, `kpfm_pl.selector`)
 
 Optional matplotlib helpers for figure styling, image plots and interactive
 work: zoom/pan with the mouse, and drawing regions of interest (ROIs) on images
@@ -66,7 +66,7 @@ fig, ax, im, cbar = plotting.plot_image(
     cbar_label="Height (nm)", extent_unit="um", title="Topography")
 ```
 
-`plot_image` shows an [`Image`](../src/kpfm_pl/core.py) with its extent in
+`plot_image` shows an `Image` (e.g. an AFM channel) with its extent in
 `extent_unit` (`"m"`, `"mm"`, `"um"`, `"nm"`), adds a colorbar and returns
 `(fig, ax, im, cbar)`. Pass `ax=` to draw into an existing axis; extra keywords
 go to `imshow`.
@@ -148,7 +148,7 @@ rois = selector.get_boxes()   # [{"x_min", "x_max", "y_min", "y_max"}, ...]
 |-----------|---------|---------|
 | `on_save` | `None` | callback receiving the box list when `Enter` is pressed |
 | `box_color`, `box_alpha` | `"royalblue"`, `0.25` | box appearance |
-| `handle_size` | `None` | handle half-width in data units of both axes; `None` = handles of a fixed size on screen (`HANDLE_POINTS`, kept when you zoom, pan or resize) and the whole box edge can be grabbed within `GRAB_POINTS`; the cursor shows the action (resize horizontally/vertically, corner, move) |
+| `handle_size` | `None` | handle half-width in data units of both axes; `None` = handles of a fixed size on screen (kept when you zoom, pan or resize), and the whole box edge can be grabbed; the cursor shows the action (resize horizontally/vertically, corner, move) |
 
 `get_boxes()` returns plain dicts ordered by drawing order, with `x_min <
 x_max` and `y_min < y_max`. `set_boxes(boxes)` replaces all boxes with dicts in
@@ -204,7 +204,7 @@ or by closing the window.
 ## Workflow: compare FLIDs of time-trace regions
 
 Boxes drawn on a time trace have the same format that
-[`PTU.flid`](ptu.md#flid-map) takes as `roi`: `x_min`/`x_max` is the time
+[`PTU.flid`](ptu.md#lifetimeintensity-maps-flid) takes as `roi`: `x_min`/`x_max` is the time
 window (s) and `y_min`/`y_max` the count range of the time bins to include.
 So you can draw a few regions on the trace and pass each box to `flid`:
 
@@ -249,11 +249,12 @@ Things to keep in mind:
   sets the limits for all of them, cropping the others. Lifetimes outside
   `lifetime_range` are dropped, so widen it if your data extends further.
 - Use the ranges from `meta` as the `imshow` extent, as above. They are the
-  exact image edges (see [FLID map](ptu.md#flid-map)).
+  exact image edges (see [FLID maps](ptu.md#lifetimeintensity-maps-flid)).
 - `flid` raises `ValueError` for a box that contains no photons.
 - Bins with almost no counts (e.g. a box that starts before the laser turns
   on) give meaningless lifetime fits that pile up near 0 ns and 0 counts. Raise
   the box's lower edge above the background to exclude them.
+
 [`examples/example_flid.py`](../examples/example_flid.py) is the full version:
 it skips empty boxes, falls back to a default ROI when nothing is drawn, and
 plots the trace with coloured ROIs above the matching FLIDs.

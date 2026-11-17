@@ -1,15 +1,15 @@
-# Zurich reader (`kpfm_pl.Zurich`)
+# Zurich lock-in exports: KPFM signal and laser triggers (`kpfm_pl.Zurich`)
 
-Parses Zurich Instruments lock-in `.txt` exports (KPFM surface potential,
-laser-trigger channel, ...) into per-stream
-[`Signal`](../src/kpfm_pl/core.py) objects. No plotting inside the loader –
-return the arrays and plot them yourself.
+Reads Zurich Instruments lock-in `.txt` exports (KPFM surface potential,
+laser-trigger channel, ...) and returns each recorded stream as a `Signal`
+ready for plotting, plus the laser triggers needed to correlate the KPFM
+signal with a PL time trace ([`Match`](match.md)).
 
 The Zurich reader is used in
 [`examples/example_correlate.py`](../examples/example_correlate.py)
 together with a `.ptu` file, via the `Match` class.
 
-## File format
+## What the file contains
 
 The exporter writes a multi-stream text file: a `%`-prefixed header naming
 each stream, followed by `time;value` data rows. All streams share the same
@@ -20,7 +20,7 @@ number of samples. Two quirks are handled automatically:
 - Malformed rows are skipped with a warning; the total row count must be
   divisible by the number of streams or a `ValueError` is raised.
 
-## Loading a file
+## Opening a file
 
 ```python
 from kpfm_pl import Zurich
@@ -39,7 +39,7 @@ The lab-default stream names are exposed as module constants:
 | `KPFM_STREAM` | `"Demod 6 Sample Auxiliary Input 1"` | KPFM surface potential |
 | `TRIGGER_STREAM` | `"Demod 6 Sample Auxiliary Input 2"` | laser trigger channel |
 
-## Getting a stream as a Signal
+## Getting the KPFM signal
 
 ```python
 raw = z.signal(stream=z.stream_names()[0])          # full-resolution Signal
@@ -53,7 +53,7 @@ kpfm = z.average(z.stream_names()[0], bintime=0.05)  # time-averaged Signal
   interval; the trailing partial bin is averaged over its valid samples.
   `meta` records `stream`, `bintime` and `averaged=True`.
 
-## Laser triggers
+## Finding the laser triggers
 
 ```python
 triggers = z.laser_triggers(z.stream_names()[1],
@@ -73,11 +73,11 @@ no trigger is found.
 | `reference` | `None` | optional averaged `Signal`; when given, trigger indices/times are mapped onto its (binned) time axis |
 | `slope_threshold` | `0.1` | fraction of the max `|diff|` used to qualify a slope sample as a flank (only used by `method="slope"`) |
 
-A single detected flank gives a one-point list. Passing `reference=kpfm` is important when correlating with an averaged KPFM
-signal, so the trigger `index` values line up with the binned axis used by
-`Match`.
+A single detected flank gives a one-point list. Passing `reference=kpfm` is
+important when correlating with an averaged KPFM signal, so the trigger
+`index` values line up with the binned axis used by `Match`.
 
-## Peak detection
+## Finding trigger onsets from peaks
 
 ```python
 onsets = z.find_peaks(z.signal(stream=TRIGGER_STREAM, units="V"), prominence=2.0, left_drop=0.3)

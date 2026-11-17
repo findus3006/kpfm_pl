@@ -65,231 +65,242 @@ main results (fitted lifetimes, time shift, ROI bounds, statistics, …).
 Everything about one `.ptu` file in one tab: time trace, regions of interest
 (ROIs), lifetime fits, lifetime trace and FLID maps (like
 `examples/example_ptu.py` and `examples/example_flid.py`). Click a group
-title on the left to fold it away.
+title on the left to fold it away. The method behind the fits is explained
+in [lifetime_fitting.md](lifetime_fitting.md).
 
-0. **File**: under the file name a line states the record format read from
-   the header (device, T3 or T2 mode, detectors). Files with several
-   detectors get a **Detector** selector: *All detectors* (summed, the
-   default) or one of them. It is applied with *Update time trace*, used by
-   everything computed from the trace (also in *Correlate*), listed in the
-   fit table and recorded in the exports; opening a file resets it. A **T2
-   file with laser pulses** on channel 0 behaves like a T3 file. A **T2 file
-   without laser pulses** (PicoHarp 300 with two detectors) has no lifetime
-   information: the time trace, triggers and *Correlate* work, while *Fit*,
-   *Compute lifetime trace*, *Compute FLIDs* and the lifetime shift are
-   greyed out and the plots say why. See
-   [ptu.md](ptu.md#record-formats-t3-and-t2).
-0. **Lifetime shift** (File group, default *Off*): a salvage for recordings
-   with a wrong sync offset, where the decay starts late in the lifetime
-   window and its tail continues at the window start. *Auto* rotates the
-   lifetime axis so the histogram peak sits at 5 ns, *Manual* shifts by the
-   given ns. It is applied with *Update time trace*, shown under the control,
-   in the fit table and plot titles, and recorded in the exports. It applies
-   to one file only: opening a file resets it to *Off*. See
-   [ptu.md](ptu.md#lifetime-shift-salvaging-a-wrong-sync-offset).
-1. **Time trace**: photons per bin. Set the *bin time* and the window:
-   *Start at* / *End at* is either a *Time* or a *Trigger*, chosen from a
-   drop-down of all laser triggers of the file (`#2 – 482.048 s`, numbered as
-   in the plot). The chosen trigger numbers are kept when you open the next
-   file. Then *Update time trace*. Red dashed, numbered lines are the laser
-   triggers. For old recordings without laser markers, untick *Laser markers*
-   (the trace is then centred and its two edges serve as triggers).
-2. **Regions of interest**: on the trace, **left-drag** draws a box, dragging
-   inside moves it, dragging an edge, a corner or a handle resizes it (the
-   cursor shows which; the handles keep their size on screen when you zoom),
-   **Delete** removes the selected box. The list shows every ROI in its colour; *Add ROI from numbers* adds
-   an exact box. An ROI is a time window *and* a range of counts per bin, so
-   it belongs to the bin time it was drawn at: when you change the bin time,
-   the count ranges are rescaled, and everything that uses ROIs runs with the
-   trace's bin time.
-3. **On/off states**: bins above *On state* (% of the maximum) form the on
-   state, bins below *Off state* the off state. The thresholds are drawn on
-   the trace.
-4. **Lifetime fit**: *Histogram of* chooses the photons: whole trace, on or
-   off state, one ROI, *All ROIs combined*, or *Each ROI separately* (one fit
-   per ROI, overlaid in the ROI colours, one table column per ROI). Choose
-   the number of exponentials and how the fit window starts: *Falling edge
-   (fraction)* starts after the maximum where the decay has fallen to *Edge
-   fraction* of it, *Inflection point* at the steepest point of the falling
-   edge (both leave the rising edge out); in *Manual* mode you can drag
-   across the histogram plot to set start and end.
-   *Dark counts* are subtracted as an offset.
-   The fit always works on the raw counts (there is no *Normalise* any more:
-   the percentages below show the relative amplitudes directly).
-   - **Background** (*fit background B*, off by default): fits the constant
-     offset instead of fixing it at the dark counts, with or without the IRF.
-     Use it when the histogram sits on a pedestal the dark counts do not
-     cover (afterpulsing, stray light, emission much slower than the laser
-     period); a fixed offset that is too low ends up in the longest lifetime.
-     The *Offset* row then shows the fitted value ± error. The lifetime trace
-     and the FLIDs cannot fit a background per time bin (too few photons):
-     they reuse the background of the **last lifetime fit**; without such a
-     fit they use the dark counts and say so in the log. A fitted background
-     and a lifetime above half the laser period are barely separable; the log
-     warns then (threshold in *Advanced fit settings*).
-   - **Seam bins** (*leave out (auto-detected)*, on by default): lifetime
-     bins that are not fully inside one laser period (bins past the period,
-     its partly covered last bin, bins that never fill) are left out of the
-     tail fit, the bins before the rise and the IRF fit alike. They sit at
-     the end of the histogram, or inside the decay after a *Lifetime shift*.
-     The plot marks them in grey (*Seam bins, not fitted (n)*) and the table
-     lists their number. Untick to fit them like any other bin. See
-     [ptu.md](ptu.md#seam-bins).
-   - **Before the rise** (*also fit these bins*, off by default; tail fit
-     only): also fits the bins before the rising edge. They hold the tail of
-     the previous laser pulse and enter the fit at their time since that
-     pulse, which extends the observed decay to the whole laser period. Meant
-     for decays that have not reached the background within one period. *Gap
-     before maximum* (default 2 ns) keeps the rising edge out. The plot
-     hatches the region, the fitted curve is drawn on both sides of the rise,
-     and the table adds *Bins before the rise*. A fit with and one without
-     these bins use different data, so their BIC is "not comparable". Also
-     used by the lifetime trace. See
-     [ptu.md](ptu.md#background-and-the-bins-before-the-rise).
-   - **IRF reconvolution** (optional): *Choose IRF file…* loads a `.ptu`
-     recording of the instrument response (e.g. scattered laser light, same
-     detector, TCSPC resolution and laser period). The file is remembered and
-     loaded again at the next start; *Clear IRF* forgets it. With *use IRF
-     (reconvolution)* the decay is convolved with the IRF and fitted over the
-     whole laser period, including the rising edge (*Manual* fit start: only
-     start…end); the IRF shift δ is fitted. *fit background B* (above) also
-     applies here, *fit scatter s* adds scattered laser light shaped like the
-     IRF. The table adds *IRF
-     shift δ*, *IRF FWHM* (and *Scatter s*), the plot shows the shifted IRF
-     (grey, dashed). The lifetime trace and the FLIDs then reuse δ, B and s
-     of the **last lifetime fit** and fit only the amplitudes and lifetimes
-     per bin; without a lifetime fit with the IRF they fall back to the tail
-     fit and say so in the log. The *Incomplete decay* setting chooses the
-     periodic or the single-pulse model. Usage and parameters:
-     [ptu.md](ptu.md#irf-reconvolution); how it works, with literature:
-     [irf_reconvolution.md](irf_reconvolution.md).
-   - **Mean lifetime**: **τ_int**, the intensity-weighted mean Σ Aᵢτᵢ² / Σ Aᵢτᵢ
-     (the mean photon arrival time), or **τ_amp**, the amplitude-weighted mean
-     Σ Aᵢτᵢ / Σ Aᵢ (share of emitters, e.g. for quenching/FRET), as chosen in
-     *Advanced fit settings*, with its standard error (from the fit
-     covariance), rounded to the relevant digits, in the table and the plot
-     title. The lifetime trace and the FLID maps use the same mean for
-     several exponentials.
-   - **Results tables**: the *Components* table has one row per
-     exponential, with τ ± error, **A (%)** = Aᵢ / Σ Aⱼ (amplitude fraction),
-     **I (%)** = Aᵢτᵢ / Σ Aⱼτⱼ (intensity fraction, share of the photons),
-     both with errors, **A (counts)**, the amplitude in counts per bin, and
-     *A fitted (counts)* (see *Incomplete decay* below). Its last row is the
-     mean lifetime (τ_int or τ_amp) in the τ column. With *Each ROI
-     separately* the rows are grouped per ROI and labelled in the ROI colour.
-     The *Fit* table below lists everything else: fit statistic, offset,
-     χ²ᵣ, BIC, R², convergence, fit window and, where used, bins before the
-     rise, seam bins, lifetime shift, detectors and the IRF parameters (one
-     column per ROI). Hover over a row or column title for its meaning.
-   - **Fit quality**: **χ²ᵣ** (reduced chi-squared with Poisson weights), also shown in the
-     plot title. χ²ᵣ ≈ 1 (green) means the fit describes the histogram within
-     photon noise; clearly larger values (orange) mean systematic deviations,
-     e.g. one exponential too few. R² is listed too, but is close to 1 for
-     almost any decay. The panel below the histogram shows the **weighted
-     residuals** (counts − fit) / √counts, which should scatter around 0
-     without structure.
-   - **BIC**: every fit is compared with the previous *Fit* click by the
-     Bayesian information criterion (χ² + k·ln n, the Poisson deviance
-     instead of χ² for the MLE). If the previous fit used the same histogram,
-     window and weighting, the table, the plot title (coloured line) and the
-     log show ΔBIC: **green** when the new fit is better by more than the
-     threshold, **red** when it is worse (typically an added component that
-     only fits noise), **gray** when both are about equally good. Otherwise
-     only the BIC is shown, in gray, as "not comparable". Fit 1, then 2, then
-     3 exponentials and keep the last green one.
-   - **Over-fitting warnings** in the log: an amplitude compatible with zero
-     or carrying almost no intensity, two lifetimes that have merged, a
-     parameter that ended at one of its bounds, or (with a fitted background)
-     a lifetime above half the laser period.
-   - **Incomplete decay**: by default the amplitudes are per-pulse values,
-     corrected for the photons of earlier laser pulses when the decay has not
-     reached the noise floor within one period (A = A_fit·(1 − exp(−T/τ)));
-     the percentages and the mean lifetime use them. *A fitted (counts)* are
-     the amplitudes of the plotted curve. The lifetimes need no correction.
-     Switch it off with *Incomplete decay* in *Advanced fit settings* (then
-     the *A fitted* column disappears). See [ptu.md](ptu.md#lifetime-fitting).
-   - **Advanced fit settings…**: initial guesses and lower/upper bounds of
-     every lifetime τ (ns) and amplitude A (fraction of the histogram peak),
-     the **fit statistic**, separately for the *Lifetime fit* (default
-     *Poisson MLE*, maximum likelihood, unbiased even where the histogram
-     holds few photons per bin) and for the per-bin fits of *Lifetime trace /
-     FLID* (default *Poisson least squares*, several times faster and close to
-     the maximum likelihood from about 100 photons per time bin; *Poisson MLE*
-     can be chosen), and robust losses against outliers. A robust loss cannot
-     be combined with the maximum likelihood: those fits then use Poisson
-     least squares and the log says so. If the maximum likelihood does not
-     converge (typically a fixed background far below the real one), the
-     lifetime fit shows the Poisson least-squares result, the *Fit statistic*
-     row and the plot title say "MLE did not converge" and the log warns
-     every time; for the lifetime trace and the FLIDs the log gives the number
-     of time bins concerned. Ticked fields are used,
-     unticked ones are automatic. The settings apply to the lifetime fit,
-     the lifetime trace and the FLID fits; the line under the button
-     summarises them. *Amplitudes and mean lifetime* chooses τ_int or τ_amp
-     and switches the incomplete-decay correction (both for all fits).
-     *Model selection* sets the |ΔBIC| threshold (default 10, "very strong"
-     evidence after Kass & Raftery) and the thresholds of the over-fitting
-     warnings; these only affect the lifetime fit.
-   - **Constraint** (*sum(A) ≤ 1*): caps the total amplitude at one peak, so
-     the components stay fractions of the decay. It is only applied to the
-     lifetime trace and FLID per-bin fits, which are always normalised. The
-     lifetime fit ignores it, because its amplitudes are counts and the
-     constraint would cap them at 1 count.
-5. **Lifetime trace**: fits every time bin separately and plots the mean
-   lifetime against time (grey: counts). It uses the fit window of
-   *Lifetime fit*. *Region* restricts it to one ROI
-   (then with the trace's bin time). This can take a while; watch the
-   progress bar, *Cancel* stops it.
-6. **FLID**: *Compute FLIDs* builds fluorescence-lifetime-intensity maps with
-   the trace's bin time. The FLID's own *Region* (independent of the lifetime
-   trace's) chooses **which time bins** are mapped: *Each ROI* gives one map
-   per ROI, coloured like the ROI (without ROIs: the window between the first
-   and last laser trigger); *Whole time window* gives one map of the
-   displayed trace; *ROI n* maps only that ROI.
-   - **Lifetime from**: *Fit* fits every time bin (*Exponentials*, *Lifetime
-     binning* and the advanced fit settings apply); *Mean arrival time* takes
-     the mean delay of the photons instead, without fitting, as a fast sanity
-     check (*Window correction* undoes the cut-off of late photons by the
-     finite window, see [ptu.md](ptu.md#mean-arrival-time-no-fit)); *Both*
-     shows the two maps of every ROI side by side on identical bins. On a
-     multi-exponential decay a one-exponential fit gives shorter lifetimes
-     than the mean arrival time, which follows the intensity-weighted mean.
-   - **Fit window**: the FLID has its own (*Fit start*, *Edge fraction*,
-     *Edge smoothing*, *Start*/*End*): **which part of each decay** is fitted
-     or averaged. *Before the rise* works as in the lifetime fit (fitted
-     maps only, not the mean arrival time), *Seam bins* too (both methods). *Copy fit window from 'Lifetime
-     fit'* takes over the settings of the lifetime fit. With *fit background
-     B* ticked the per-bin fits use the background of the last lifetime fit.
-   - **Photons per time bin**: at least *At least* photons *in* that share of
-     the bins (90 %; 50 % is the median). Otherwise the log suggests a larger
-     bin time for that ROI. With *Bin time: automatic (per ROI)* such an ROI
-     is computed with the suggested bin time instead; its count range and
-     counts axis are scaled along, and its title shows the bin time. The
-     displayed trace keeps its bin time.
-   - **Map**: lifetime and count range, bins and *Map smoothing* redraw the
-     maps **instantly** from the stored per-bin lifetimes, without fitting
-     again. All maps share the same lifetime range (default 0–20 ns) and
-     count range, so their values are directly comparable. *Map smoothing*
-     widens the maps; set it to 0 before judging their width (the shot-noise
-     spread of the lifetimes, see
-     [ptu.md](ptu.md#flid-map)).
-   - Maps are square. **Double-click** a map (or select its ROI and press
-     *Pop out map(s)*) to open it in its own window, with pan/zoom tools,
-     wheel zoom and colour-scale fields: minimum, maximum, colormap and
-     linear/logarithmic scale.
+### Opening a file
 
-   ROIs without photons are skipped (see the log). For the **CSV export**
-   pick the ROI and whether to export its map (fitted or mean arrival) or the
-   per-bin results.
+Under the file name a line states how the file was recorded (device, T3 or
+T2 mode, detectors).
 
-Exports: the time trace (with ROIs and trigger times), the lifetime
-histogram (before a fit just the histogram, after a fit the fitted
-histogram(s) with fit curve and weighted residuals), the lifetime trace and
-the FLID maps, each with all parameters including the advanced fit settings.
-The suggested file names start with the full name of the source file.
+- **Detector**: files with several detectors offer *All detectors* (summed,
+  the default) or one of them. The choice is applied with *Update time
+  trace*, used by everything computed from the trace (also in *Correlate*),
+  listed in the fit table and recorded in the exports. Opening a file resets
+  it.
+- **T2 files** with laser pulses on channel 0 behave like T3 files. T2 files
+  without laser pulses (PicoHarp 300 with two detectors) have no lifetime
+  information: the time trace, triggers, *Correlate* and *Antibunching* work,
+  while the fits, the lifetime trace, the FLIDs and the lifetime shift are
+  greyed out and the plots say why. See
+  [ptu.md](ptu.md#record-formats-t3-and-t2).
+- **Lifetime shift** (default *Off*): a salvage for recordings with a wrong
+  sync offset, where the decay starts late in the lifetime window and its
+  tail continues at the window start. *Auto* rotates the lifetime axis so the
+  histogram peak sits at 5 ns, *Manual* shifts by the given ns. It is applied
+  with *Update time trace*, shown under the control, in the fit table and the
+  plot titles, and recorded in the exports. Opening a file resets it to
+  *Off*. See [ptu.md](ptu.md#lifetime-shift-salvaging-a-wrong-sync-offset).
 
 Continuous-wave files have no lifetime information; the tab says so and
 disables the analysis.
+
+### The time trace
+
+Photons per time bin. Set the *Bin time* and the window: *Start at* / *End
+at* is a *Time* or a *Trigger*, chosen from a drop-down of all laser triggers
+of the file (`#2 – 482.048 s`, numbered as in the plot). The chosen trigger
+numbers are kept when you open the next file. Then *Update time trace*. Red
+dashed, numbered lines are the laser triggers. For old recordings without
+laser markers, untick *Laser markers* (the trace is then centred and its two
+edges serve as triggers). *Dark counts* (per second) are the fixed background
+of the fits and are subtracted before mean arrival times are taken.
+
+### Choosing photons: ROIs and on/off states
+
+- **Regions of interest**: on the trace, **left-drag** draws a box, dragging
+  inside moves it, dragging an edge, a corner or a handle resizes it (the
+  cursor shows which; the handles keep their size on screen when you zoom),
+  **Delete** removes the selected box. The list shows every ROI in its
+  colour; *Add ROI from numbers* adds an exact box. An ROI is a time window
+  *and* a range of counts per bin, so it belongs to the bin time it was drawn
+  at: when you change the bin time, the count ranges are rescaled, and
+  everything that uses ROIs runs with the trace's bin time.
+- **On/off states**: bins above *On state* (% of the maximum) form the on
+  state, bins below *Off state* the off state. The thresholds are drawn on
+  the trace.
+
+### Fitting a lifetime
+
+*Histogram of* chooses the photons: the whole trace, the on or off state,
+one ROI, *All ROIs combined*, or *Each ROI separately* (one fit per ROI,
+overlaid in the ROI colours). Choose the number of exponentials and where the
+fit window starts: *Falling edge (fraction)* after the maximum where the decay
+has fallen to *Edge fraction* of it, *Inflection point* at the steepest point
+of the falling edge (both leave the rising edge out), or *Manual* (drag
+across the histogram plot to set start and end). Then *Fit lifetime*. The fit
+works on the raw counts.
+
+**The results.**
+
+- The *Components* table has one row per exponential: τ ± error, **A (%)** =
+  Aᵢ / Σ Aⱼ (amplitude fraction), **I (%)** = Aᵢτᵢ / Σ Aⱼτⱼ (intensity
+  fraction, share of the photons), both with errors, **A (counts)**, the
+  amplitude in counts per bin, and *A fitted (counts)* (see *Incomplete
+  decay* below). Its last row is the mean lifetime in the τ column:
+  **τ_int** = Σ Aᵢτᵢ² / Σ Aᵢτᵢ (the mean photon arrival time) or **τ_amp** =
+  Σ Aᵢτᵢ / Σ Aᵢ (e.g. for quenching/FRET), as chosen in *Advanced fit
+  settings*, also shown in the plot title. With *Each ROI separately* the
+  rows are grouped per ROI and labelled in the ROI colour.
+- The *Fit* table lists everything else: fit statistic, offset, χ²ᵣ, BIC,
+  R², convergence, fit window and, where used, bins before the rise, seam
+  bins, lifetime shift, detectors and the IRF parameters (one column per
+  ROI). Hover over a row or column title for its meaning.
+- **χ²ᵣ** (reduced chi-squared with Poisson weights), also in the plot title:
+  ≈ 1 (green) means the fit describes the histogram within photon noise;
+  clearly larger values (orange) mean systematic deviations, e.g. one
+  exponential too few. R² is close to 1 for almost any decay. The panel below
+  the histogram shows the **weighted residuals** (counts − fit) / √counts,
+  which should scatter around 0 without structure.
+- **BIC**: every fit is compared with the previous *Fit* click. If that fit
+  used the same histogram, window and statistic, the table, a coloured line
+  above the plot title and the log show ΔBIC: **green** when the new fit is
+  better by more than the threshold, **red** when it is worse (typically an
+  added component that only fits noise), **gray** when both are about equally
+  good. Otherwise only the BIC is shown, in gray, as "not comparable". Fit 1,
+  then 2, then 3 exponentials and keep the last green one.
+- **Warnings** in the log: an amplitude compatible with zero or carrying
+  almost no intensity, two lifetimes that have merged, a parameter that ended
+  at one of its bounds, or (with a fitted background) a lifetime above half
+  the laser period.
+
+**Background, bins before the rise, seam bins.**
+
+- *fit background B* (off by default) fits the constant background instead
+  of fixing it at the dark counts, with or without the IRF. Use it when the
+  histogram sits on a pedestal the dark counts do not cover (afterpulsing,
+  stray light, emission much slower than the laser period); a fixed
+  background that is too low ends up in the longest lifetime. The *Offset*
+  row then shows the fitted value ± error. A fitted background and a lifetime
+  above half the laser period are barely separable; the log warns then.
+- *Before the rise: also fit these bins* (off by default, tail fit only):
+  the bins before the rising edge hold the tail of the previous laser pulse
+  and are fitted at their time since that pulse, which extends the observed
+  decay to the whole laser period. Meant for decays that have not reached the
+  background within one period. *Gap before maximum* (default 2 ns) keeps
+  the rising edge out. The plot hatches the region, the curve is drawn on
+  both sides of the rise and the table adds *Bins before the rise*. Fits with
+  and without these bins use different data, so their BIC is "not
+  comparable".
+- *Seam bins: leave out (auto-detected)* (on by default): lifetime bins that
+  are not fully inside one laser period (past the period, its partly covered
+  last bin, bins that never fill) are left out of every fit. They sit at the
+  end of the histogram, or inside the decay after a *Lifetime shift*. The
+  plot marks them in grey and the table lists their number. See
+  [ptu.md](ptu.md#seam-bins).
+
+See [lifetime_fitting.md](lifetime_fitting.md#4-the-background) for when to
+use which.
+
+**IRF reconvolution** (optional): *Choose IRF file…* loads a `.ptu`
+recording of the instrument response (e.g. scattered laser light, same
+detector, TCSPC resolution and laser period). The file is remembered for the
+next start; *Clear IRF* forgets it. With *use IRF (reconvolution)* the decay
+is convolved with the IRF and fitted over the whole laser period, including
+the rising edge (*Manual* fit start: only start…end); the IRF shift δ is
+fitted. *fit background B* also applies here, *fit scatter s* adds scattered
+laser light shaped like the IRF. The table adds *IRF shift δ*, *IRF FWHM*
+(and *Scatter s*); the plot shows the shifted IRF (grey, dashed). See
+[ptu.md](ptu.md#fitting-with-a-measured-irf-reconvolution) and
+[irf_reconvolution.md](irf_reconvolution.md).
+
+**Advanced fit settings…** (shared by the lifetime fit, the lifetime trace
+and the FLIDs; the line under the button summarises them):
+
+- **Initial guesses and bounds** of every lifetime τ (ns) and amplitude A
+  (fraction of the histogram peak). Ticked fields are used, unticked ones are
+  automatic.
+- **Fit statistic**, separately for the *Lifetime fit* (default *Poisson
+  MLE*, maximum likelihood, correct even where the histogram holds few
+  photons per bin) and for the per-bin fits of *Lifetime trace / FLID*
+  (default *Poisson least squares*, several times faster and close to the
+  maximum likelihood from about 100 photons per time bin; *Poisson MLE* can
+  be chosen). See
+  [lifetime_fitting.md](lifetime_fitting.md#5-counting-statistics-how-the-bins-are-weighted).
+  If the maximum likelihood does not converge (typically a fixed background
+  far below the real one), the lifetime fit shows the Poisson least-squares
+  result, the *Fit statistic* row and the plot title say "MLE did not
+  converge" and the log warns; for the lifetime trace and the FLIDs the log
+  gives the number of time bins concerned.
+- **Loss and constraint**: robust losses against outliers (e.g. afterpulsing
+  spikes). They exist only for least squares: with *Poisson MLE* selected,
+  those fits use Poisson least squares and the log says so. *sum(A) ≤ 1*
+  caps the total amplitude at one peak; it only acts on the per-bin fits,
+  which are normalised (the lifetime fit's amplitudes are counts).
+- **Amplitudes and mean lifetime**: τ_int or τ_amp for the table, the title,
+  the lifetime trace and the FLID maps. **Incomplete decay** (on by default)
+  reports per-pulse amplitudes, corrected for the photons of earlier laser
+  pulses when the decay has not reached the noise floor within one period
+  (A = A_fit·(1 − exp(−T/τ))). The percentages and the mean lifetime use
+  them; *A fitted (counts)* are the amplitudes of the plotted curve. The
+  lifetimes need no correction. Switched off, the *A fitted* column
+  disappears.
+- **Model selection** (lifetime fit only): the |ΔBIC| threshold (default 10,
+  "very strong" evidence after Kass & Raftery) and the thresholds of the
+  warnings.
+
+### Lifetime trace
+
+*Compute lifetime trace* fits every time bin separately and plots the mean
+lifetime against time (grey: counts). It uses the fit window of *Lifetime
+fit*. *Region* restricts it to one ROI (then with the trace's bin time). A
+time bin holds too few photons for its own background or IRF shift: with
+*fit background B* or the IRF ticked, the per-bin fits reuse the background
+(and δ, scatter) of the **last lifetime fit**; without such a fit they use
+the dark counts or the tail fit and say so in the log. This can take a
+while; watch the progress bar, *Cancel* stops it.
+
+### FLID maps
+
+*Compute FLIDs* builds fluorescence-lifetime–intensity maps with the trace's
+bin time.
+
+- **Region** (independent of the lifetime trace's): *Each ROI* gives one map
+  per ROI, coloured like the ROI (without ROIs: the window between the first
+  and last laser trigger); *Whole time window* one map of the displayed
+  trace; *ROI n* only that ROI.
+- **Lifetime from**: *Fit* fits every time bin (*Exponentials*, *Lifetime
+  binning* and the advanced fit settings apply); *Mean arrival time* takes
+  the mean delay of the photons instead, without fitting, as a fast check
+  (*Window correction* undoes the loss of late photons in the finite window,
+  see [ptu.md](ptu.md#mean-arrival-time-no-fit)); *Both* shows the two maps
+  of every ROI side by side on identical bins. On a multi-exponential decay a
+  one-exponential fit gives shorter lifetimes than the mean arrival time,
+  which follows the intensity-weighted mean.
+- **Fit window**: the FLID has its own (*Fit start*, *Edge fraction*, *Edge
+  smoothing*, *Start*/*End*): **which part of each decay** is fitted or
+  averaged. *Before the rise* works as in the lifetime fit (fitted maps
+  only), *Seam bins* too (both methods). *Copy fit window from "Lifetime
+  fit"* takes over the settings of the lifetime fit. With *fit background B*
+  ticked the per-bin fits use the background of the last lifetime fit.
+- **Photons per time bin**: at least *At least* photons *in* that share of
+  the bins (90 %; 50 % is the median). Otherwise the log suggests a longer
+  bin time for that ROI. With *Bin time: automatic (per ROI)* such an ROI is
+  computed with the suggested bin time instead; its count range and counts
+  axis are scaled along, and its title shows the bin time. The displayed
+  trace keeps its bin time.
+- **Map**: lifetime and count range, bins and *Map smoothing* redraw the
+  maps **instantly** from the stored per-bin lifetimes, without fitting
+  again. All maps share the same lifetime range (default 0–20 ns) and count
+  range, so their values are directly comparable. *Map smoothing* widens the
+  maps; set it to 0 before judging their width (the photon-noise spread of
+  the lifetimes, see [ptu.md](ptu.md#lifetimeintensity-maps-flid)).
+- Maps are square. **Double-click** a map (or select its ROI and press *Pop
+  out map(s)*) to open it in its own window, with pan/zoom tools, wheel zoom
+  and colour-scale fields: minimum, maximum, colormap and linear/logarithmic
+  scale.
+
+ROIs without photons are skipped (see the log). For the **CSV export** pick
+the ROI and whether to export its map (fitted or mean arrival) or the per-bin
+results.
+
+### Exports
+
+The time trace (with ROIs and trigger times), the lifetime histogram (before
+a fit the histogram, after a fit the fitted histogram(s) with fit curve and
+weighted residuals), the lifetime trace and the FLID maps, each with all
+parameters including the advanced fit settings. The suggested file names
+start with the full name of the source file.
 
 ## Antibunching (g2)
 
@@ -400,8 +411,7 @@ between them.
    Right-click on a file's circle puts it back on the reference position;
    right-click on the reference deletes all circles.
 4. **Automatic shift**: *Detect shift* cross-correlates every plotted channel
-   of each file with the reference
-   ([`utils.image_shift`](../src/kpfm_pl/utils.py), sub-pixel). *Detect on:
+   of each file with the reference (with sub-pixel precision). *Detect on:
    Whole image* gives the overall drift; *Around the circle* uses a square of
    *Window* circle diameters around the reference circle (local drift of that
    feature; shifts larger than about half the window are missed). The
@@ -430,28 +440,3 @@ Index a measurement archive and open measurement pairs from it.
   to *Correlate*.
 - **Add pair…** and **Remove selected** edit the index (never the files).
   Unsaved changes are marked, and you are asked before they are discarded.
-
-## For developers
-
-The GUI is an optional front end. The backend does not import it, and it uses
-only the public `kpfm_pl` API.
-
-```
-gui/app.py         MainWindow, run()
-gui/context.py     AppState (loaded files, shared by tabs) + AppContext (dialogs, loading)
-gui/workers.py     JobRunner: background jobs with progress and cancel
-gui/canvas.py      PlotPanel: matplotlib canvas + Save figure / Export CSV
-gui/forms.py       ParamForm: labelled parameter fields
-gui/export.py      CSV and figure export with metadata (Qt-free)
-gui/fit_options.py Advanced fit settings dialog (FitOptions)
-gui/logcapture.py  print(), warnings and uncaught errors -> log panel
-gui/models/        Qt-free workflow logic, one module per tab (unit-testable)
-gui/tabs/          one widget per tab, built on tabs/base.py (collapsible groups);
-                   tabs/rois.py: RoiEditor (box selector + ROI list)
-```
-
-Adding a workflow: write a Qt-free model (parameter dataclasses, the backend
-calls, an `ExportPayload` builder), a `BaseTab` subclass using `ParamForm`,
-`PlotPanel` and `run_job`, register it in `app.TAB_CLASSES`, and add tests
-(`tests/test_gui_*.py`, offscreen via `pytest-qt`). See the GUI rules in
-`AGENTS.md`, in particular the note on the PTU's cached time trace.

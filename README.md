@@ -122,7 +122,7 @@ smoother = flid_map(lt, sigma=3)               # redraw a FLID map without fitti
 in the PTU marker channel. Older files without markers need
 `time_trace(..., laser_pulse=False)`. Continuous-wave files load, but have no
 lifetime axis, so the lifetime methods raise a `ValueError`.
-→ [`docs/ptu.md`](docs/ptu.md)
+→ [`docs/ptu.md`](docs/ptu.md); the method of the lifetime fits: [`docs/lifetime_fitting.md`](docs/lifetime_fitting.md), with an IRF: [`docs/irf_reconvolution.md`](docs/irf_reconvolution.md)
 
 ### Correlate KPFM and PL (`Zurich` + `Match`)
 

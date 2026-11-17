@@ -1,8 +1,8 @@
-# Match: aligning a PL time trace with a KPFM signal (`kpfm_pl.Match`)
+# Correlating KPFM with photoluminescence (`kpfm_pl.Match`)
 
-`Match` takes two [`Signal`](../src/kpfm_pl/core.py) traces – a KPFM lock-in
-signal and a photoluminescence (PL) time trace – plus the laser triggers of
-each, and:
+`Match` puts a KPFM lock-in signal and a photoluminescence (PL) time trace
+on one time axis, using the laser on/off triggers recorded in both files. It
+takes the two signals and their triggers and:
 
 1. **shifts** the time trace so one chosen trigger coincides with its KPFM
    counterpart,
@@ -21,7 +21,7 @@ a current PTU recording with marker triggers. The separate
 [`examples/example_correlate_legacy.py`](../examples/example_correlate_legacy.py)
 demonstrates the legacy `laser_pulse=False` fallback.
 
-## End-to-end example
+## Aligning the two signals
 
 ```python
 import kpfm_pl as k
@@ -53,11 +53,11 @@ k_sig, t_sig = window["kpfm"], window["timetrace"]
 A trigger is a point `{"index": int, "time": float}`; a collection of triggers
 is a chronological list of such points. This is what
 [`PTU.laser_triggers`](ptu.md#laser-triggers-and-markers) and
-[`Zurich.laser_triggers`](zurich.md#laser-triggers) return. `Match` also
+[`Zurich.laser_triggers`](zurich.md#finding-the-laser-triggers) return. `Match` also
 accepts a single point, or plain time(s) in seconds – e.g. the exact hardware
 marker times from `ptu.get_markers()`.
 
-## Constructor parameters
+## Options
 
 ```python
 Match(kpfm, timetrace, *, kpfm_triggers, timetrace_triggers,
@@ -78,7 +78,7 @@ Both loaders report rising flanks by default, so the lists normally pair up
 one-to-one. If they don't (e.g. a legacy file read with `flank="both"`), pick
 the pair with `align`, or slice the lists before passing them.
 
-## Grid and triggers
+## The shared time grid
 
 ```python
 m.offset     # time shift subtracted from the time-trace axis (s)
@@ -96,7 +96,7 @@ m.triggers   # every KPFM trigger mapped onto m.grid
   trigger list: `m.triggers`, taken from the KPFM triggers. Every point
   satisfies `m.grid[point["index"]] == point["time"]`.
 
-## Outputs
+## Choosing the time window and getting the results
 
 ```python
 m.extract(start=None, stop=None)  # {"kpfm": Signal, "timetrace": Signal}
@@ -110,7 +110,7 @@ bound is a time in seconds or a trigger point; `None` defaults to the start /
 end of the region where **both** signals have data:
 
 ```python
-m.extract(m.triggers[0], m.triggers[-1])  # same window as the legacy code
+m.extract(m.triggers[0], m.triggers[-1])  # first to last laser trigger
 m.extract(10.0, 300.0)                    # from 10 s to 300 s
 m.extract()                               # the full overlap
 ```
@@ -128,7 +128,7 @@ m.extract()                               # the full overlap
 Construction rejects empty, non-finite, or non-increasing time axes, invalid
 triggers, and signals with no overlapping time span after the shift.
 
-## Plotting tip
+## Plotting the result
 
 The extracted signals share the same time axis, so a twin-axis plot works
 well. The trigger lines come straight from the signal metadata:

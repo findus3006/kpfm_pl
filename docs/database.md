@@ -1,10 +1,10 @@
-# Measurement database (`kpfm_pl.database`)
+# Measurement database: finding KPFM/PL pairs (`kpfm_pl.database`)
 
 Builds a searchable databank of paired KPFM (`.txt`) / photoluminescence
 (`.ptu`) measurements from a folder archive, so you can query and reload
 measurement pairs by their metadata instead of hunting through folders.
 
-## Archive layout it understands
+## How the archive must be organised
 
 ```
 <sample>/[<precipitation>/]<date>/<...DRx..._pair files...>
@@ -21,7 +21,7 @@ measurement pairs by their metadata instead of hunting through folders.
 - The lowest ("leaf") folder that directly contains `.txt`/`.ptu` files holds
   the actual measurement pairs. `.ipynb` and any other files are ignored.
 
-## What gets parsed out of each pair
+## What is read from the file names
 
 | Field | Source | Notes |
 |---|---|---|
@@ -47,23 +47,23 @@ and ambiguous ties (several candidates with the same best score) also warn.
 Data files placed directly in the scan root are supported; the root folder
 name is then used as the sample name.
 
-## Building and persisting the database
+## Building and saving the database
 
 ```python
 from kpfm_pl import build_database, save_json, save_csv, load_json
 
-entries = build_database(r"C:\Users\rolfs\Desktop\Claude correlate")
-save_json(entries, r"C:\Users\rolfs\Desktop\Claude correlate\database.json")
-save_csv(entries, r"C:\Users\rolfs\Desktop\Claude correlate\database.csv")   # for Excel
+entries = build_database(r"D:\data\KPFM archive")
+save_json(entries, r"D:\data\KPFM archive\database.json")
+save_csv(entries, r"D:\data\KPFM archive\database.csv")   # for Excel
 
 # later, in a new session:
-entries = load_json(r"C:\Users\rolfs\Desktop\Claude correlate\database.json")
+entries = load_json(r"D:\data\KPFM archive\database.json")
 ```
 
 Rebuilding from scratch (`build_database`) is the simplest way to keep the
 database in sync if you add/rename whole folders of raw data.
 
-## Querying / navigating the database
+## Finding measurements
 
 `entries` is just a plain Python `list[Entry]`, so any list operation works.
 Two convenience helpers are provided for the common cases.
@@ -103,13 +103,15 @@ entry = next(iter(filter_entries(entries, sample="JV001", total_power_nw=1200.0,
 entry = filter_entries(entries, sample="CF501", dr="DR1", date="23.01.2026")[0]
 ```
 
-### Loading the actual data for a pair
+### Opening the files of a pair
 
 ```python
-zurich, ptu = entry.load(**kwargs)   # -> (Zurich, PTU) instances, see README for their API, kwargs are passed into PTU(dark_counts=2.25)
+zurich, ptu = entry.load(dark_counts=2.25)   # (Zurich, PTU); keywords go to PTU
 ```
 
-## Editing the database
+See [zurich.md](zurich.md) and [ptu.md](ptu.md) for what to do with them.
+
+## Adding and removing pairs
 
 ```python
 from kpfm_pl import add_entry, remove_entry, save_json
@@ -119,12 +121,12 @@ remove_entry(entries, txt_path=entry.txt_path)
 
 # add a new pair -- parsed the same way build_database does; root lets it
 # infer sample/precipitation/date from the folder location
-add_entry(entries, new_txt_path, new_ptu_path, root=r"C:\Users\rolfs\Desktop\Claude correlate")
+add_entry(entries, new_txt_path, new_ptu_path, root=r"D:\data\KPFM archive")
 
 # any field can be overridden explicitly
 add_entry(entries, new_txt_path, new_ptu_path, root=root, measurement_time_s=120.0)
 
-save_json(entries, r"C:\Users\rolfs\Desktop\Claude correlate\database.json")
+save_json(entries, r"D:\data\KPFM archive\database.json")
 ```
 
 Both `add_entry` and `remove_entry` mutate `entries` in place and also return
